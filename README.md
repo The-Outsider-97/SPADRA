@@ -13,5 +13,6 @@ Intelligent CAD, BIM & Engineering powered by SLAI
 | Animation | |	Walkthroughs, object animation, keyframes and timelines |
 | Engineering | |	Calculations, analysis, optimization and verification |
 | AI assistance | |	Context-aware, multi-agent design intelligence through SLAI |
+| Documentation | .sldc | |
 | Application identity | SLAI SPADE |
 | Software category | Parametric CAD and Spatial Design |
