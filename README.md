@@ -16,3 +16,14 @@ Intelligent CAD, BIM & Engineering powered by SLAI
 | Documentation | .sldc | |
 | Application identity | SLAI SPADE |
 | Software category | Parametric CAD and Spatial Design |
+
+
+What makes SPADRA unique?
+Its intended differentiator is the combination of:
+- One coordinated workflow from drawing to model, documentation and animation.
+- Native SLAI spatial formats.
+- Context-aware specialist AI agents.
+- Explainable and reviewable AI operations.
+- Parametric design with deterministic constraints.
+- Integrated engineering analysis and optimization.
+- Consistent interfaces with SciCal, SReader, SLAI Writer and other SLAI applications.
