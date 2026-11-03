@@ -1,0 +1,25 @@
+{
+  "name": "spadra-client",
+  "version": "1.0.0-dev",
+  "private": true,
+  "description": "SPADRA web client (strict TypeScript on the shared SLAI UI kit, no bundler, no framework)",
+  "type": "module",
+  "scripts": {
+    "start": "python -m applications.SPADRA",
+    "start:dev": "python -m applications.SPADRA --dev",
+    "check": "python -m applications.SPADRA --check",
+    "build": "node ../tools/build/build-static.mjs",
+    "package": "python -m applications.SPADRA.bundle",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "tsx --test tests_ts/*.test.ts",
+    "test:py": "python -m unittest discover -s tests -t ../.. -v",
+    "test:e2e": "node --test tests_e2e/*.e2e.test.mjs",
+    "test:all": "npm run typecheck && npm test && npm run test:py && npm run test:e2e"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "playwright": "^1.47.0"
+  }
+}

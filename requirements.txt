@@ -1,0 +1,17 @@
+# SPADRA: Python dependencies beyond the standard library and the SLAI checkout. Python 3.10 or newer (SLAI declares >=3.10,<3.13).
+# Install into the SLAI environment that runs SPADRA; SPADRA never creates or switches environments:
+#     python -m pip install -r applications/SPADRA/requirements.txt
+# Check what is really installed:   python -m applications.SPADRA --check
+# The versions in the comments are the ones the test suites were run with; older versions were not tried.
+#
+# Needed to start:
+PyYAML>=6.0           # tested with 6.0.3 : SLAI's configuration repository (src.utils.configuration)
+#
+# Needed only by the feature named. Without them SPADRA still starts and reports what is unavailable (GET /api/agents):
+numpy>=1.24           # tested with 2.5.3 : STEM, Simulation, Spatial and Optimization agents
+scipy>=1.10           # tested with 1.18.1: STEM Agent integrator, Optimization Agent
+psutil>=5.9           # tested with 7.2.2 : resource monitoring imported by the agents
+#
+# Not on PyPI, part of the SLAI checkout: src/utils (SGEO, SDRW, SLDC, spatial_formats) and src/agents.
+# Not needed by SPADRA itself: ezdxf (DXF), ifcopenshell (IFC), reportlab (PDF). SPADRA reports those formats as unavailable without them.
+# Web client (Node.js 20 or newer): npm install, then npm run build, in applications/SPADRA.

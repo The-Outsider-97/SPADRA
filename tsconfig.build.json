@@ -1,0 +1,5 @@
+{
+  "extends": "../tools/tsconfig.json",
+  "compilerOptions": { "rootDir": "..", "outDir": "dist/js", "noEmit": false, "sourceMap": false },
+  "include": ["src/client/**/*.ts", "../tools/web/src/**/*.ts"]
+}
