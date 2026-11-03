@@ -1,0 +1,1405 @@
+/** The 2D drawing editor: a canvas that shows an SDRW document and turns pointer input into commands.
+ *  The canvas draws what the server returned; every change is a command the server validates and records for undo. */
+import { h } from "../../../tools/web/src/dom.js";
+import { promptDialog, toast } from "../../../tools/web/src/ui.js";
+import { hatchDialog, mirrorKeepDialog, numberPrompt, type HatchChoice } from "./dialogs.js";
+import { clamp } from "../../../tools/web/src/util.js";
+import {
+  alongFrom, angleBetween, distToSegment, dist, entityDistance, entityBounds, fitBox, formatDimension, gripAt, grips, hatchLoops, insideBox, mid, niceStep, normaliseRect, orthoConstrain,
+  pointInPolygon, polygonDistance, polygonsBounds, rotateAbout, roundAngle, segments, snapPoint, textBox, wallBand, type Grip, type Snap,
+} from "./geom2d.js";
+import { cssColor, withAlpha } from "./palette.js";
+import { cutWeight, levelLabel, markArrows, markLabel, projectionAt, snapPolygons, visibleLevels } from "./projection.js";
+import type { Store, Tool } from "./store.js";
+import type { DrawingData, Entity, GridLabel, PlanWall, Projection, Pt, RoomLabel, SectionMark } from "./types.js";
+
+const MM_PER = { mm: 1, cm: 10, m: 1000 } as const;
+const SNAP_PX = 10;
+const PICK_PX = 6;
+const DRAG_PX = 4;
+/** Tools that act on whatever curve is clicked, and the kinds each one accepts. */
+const TOOL_KINDS: Record<string, readonly string[]> = {
+  offset: ["line", "polyline", "circle"], trim: ["line", "polyline"], extend: ["line", "polyline"], fillet: ["line"],
+};
+const PAINT_ORDER = ["floor", "room", "extrusion", "sweep", "generic", "stair", "wall", "structural", "window", "door", "column", "gutter", "downpipe", "void", "grid"];
+const CURVE_TOOLS = new Set<string>(["offset", "trim", "extend", "fillet", "hatch"]);
+
+/** An edit being dragged with a handle: a wall end, a turn of the selection about its centre, or a section's cut line (an end, or all of it). */
+type Edit =
+  | { kind: "end"; id: string; end: "a" | "b"; axis: { a: Pt; b: Pt; thickness: number }; from: Pt; now: Pt; moved: boolean }
+  | { kind: "turn"; ids: string[]; centre: Pt; from: Pt; now: Pt; raw: Pt; fine: boolean; moved: boolean }
+  | { kind: "mark"; id: string; part: "a" | "b" | "body"; from: Pt; now: Pt; moved: boolean };
+/** A handle drawn on the selection: where it is, its look, and the edit that dragging it starts. */
+interface Handle { at: Pt; shape: "square" | "turn"; edit: () => Edit }
+const TURN_OFFSET_PX = 30;
+
+interface Colors { paper: string; grid: string; gridMajor: string; ink: string; muted: string; select: string; accent: string; hover: string }
+
+export class DrawingView {
+  readonly el: HTMLElement;
+  private readonly canvas: HTMLCanvasElement;
+  private readonly ctx: CanvasRenderingContext2D;
+  private readonly hint: HTMLElement;
+  private data: DrawingData | null = null;
+  private viewId = "";
+  private scale = 0.05;                     // pixels per drawing unit
+  private centre: Pt = [0, 0];
+  private cursor: Pt | null = null;         // world position of the pointer, after snapping
+  private snap: Snap | null = null;
+  private pts: Pt[] = [];                   // points placed so far by the active tool
+  private hover: string | null = null;
+  private box: { from: Pt; to: Pt } | null = null;
+  private drag: { start: Pt; now: Pt; moved: boolean; ids: string[] } | null = null;
+  private pan: { x: number; y: number; centre: Pt } | null = null;
+  private spaceDown = false;
+  private frame = 0;
+  private width = 1;
+  private height = 1;
+  private colors: Colors | null = null;
+  private pendingFit = false;
+  private target: { id: string; pick: Pt; distance?: number } | null = null;     // the first thing picked by offset or fillet
+  private grip: { id: string; list: Grip[]; index: number; now: Pt; moved: boolean } | null = null;
+  private lastOffset: number | null = null;
+  private lastRadius = 0;
+  private lastHatch: HatchChoice | null = null;
+  private hoverMark: string | null = null;
+  private tagOf: string | null = null;      // the element the Tag tool has picked; the next click says where its tag goes
+  private projectionSnap: { of: Projection | null; polygons: Pt[][] } = { of: null, polygons: [] };
+  private edit: Edit | null = null;
+  private anchor: Pt | null = null;         // while an end is dragged: the end that stays, so Shift can keep the wall straight from it
+  private markSel: string | null = null;    // the section whose cut line is selected on this plan
+  private lengthBox: { x: number; y: number; w: number; h: number; id: string; a: Pt; b: Pt } | null = null;      // the length of the selected wall, where it can be clicked and typed over
+  private readonly wallHud: HTMLElement;
+  private readonly wallFields: { height: HTMLInputElement; thickness: HTMLInputElement };
+  private readonly formHuds = new Map<Tool, { el: HTMLElement; sync: () => void }>();      // the option strips of the Extrude, Void and Sweep tools
+
+  constructor(private readonly store: Store) {
+    this.canvas = h("canvas", { class: "view-canvas", attrs: { tabindex: "0", "aria-label": "Drawing canvas" } });
+    const ctx = this.canvas.getContext("2d");
+    if (!ctx) throw new Error("This browser cannot draw on a canvas.");
+    this.ctx = ctx;
+    (this.canvas as HTMLCanvasElement & { spadraView?: DrawingView }).spadraView = this;      // read by the browser tests (see screenOf)
+    this.hint = h("div", { class: "canvas-hint", attrs: { "aria-live": "polite" } });
+    const option = (label: string, value: number, min: string, step: string, set: (n: number) => void): [HTMLLabelElement, HTMLInputElement] => {
+      const input = h("input", { type: "number", value: String(value), min, step, attrs: { "aria-label": label } });
+      input.addEventListener("input", () => { const n = Number(input.value); if (n > 0) set(n); });
+      return [h("label", {}, label, input), input];
+    };
+    const [heightLabel, height] = option("Height (m)", this.store.wallOptions.height, "0.1", "0.1", (n) => { this.store.wallOptions.height = n; });
+    const [thicknessLabel, thickness] = option("Thickness (mm)", this.store.wallOptions.thickness, "10", "10", (n) => { this.store.wallOptions.thickness = n; });
+    this.wallFields = { height, thickness };
+    this.wallHud = h("div", { class: "wall-hud", hidden: true }, heightLabel, thicknessLabel, h("span", { class: "muted", text: "Click for each corner. Shift keeps it straight. Double-click or Esc ends." }));
+    this.buildFormHuds();
+    this.el = h("div", { class: "canvas-wrap" }, this.canvas, this.wallHud, ...[...this.formHuds.values()].map((x) => x.el), this.hint);
+    new ResizeObserver(() => this.resize()).observe(this.el);
+    this.bind();
+  }
+
+  /** The option strips of Extrude, Void and Sweep: numbers kept in the store, shared by every plan, shown only while their tool is active. */
+  private buildFormHuds(): void {
+    const o = this.store.formOptions;
+    const num = (label: string, get: () => number, set: (n: number) => void, step: string, positive: boolean): [HTMLLabelElement, () => void] => {
+      const input = h("input", { type: "number", value: String(get()), step, attrs: { "aria-label": label } });
+      input.addEventListener("input", () => { const n = Number(input.value); if (input.value !== "" && Number.isFinite(n) && (!positive || n > 0)) set(n); });
+      return [h("label", {}, label, input), () => { input.value = String(get()); }];
+    };
+    const hud = (tool: Tool, note: string, fields: Array<[HTMLElement, () => void]>, extra: HTMLElement[] = []): void => {
+      this.formHuds.set(tool, { el: h("div", { class: "wall-hud", hidden: true }, ...fields.map((f) => f[0]), ...extra, h("span", { class: "muted", text: note })), sync: () => fields.forEach((f) => f[1]()) });
+    };
+    hud("extrude", "Click each corner of the outline. Enter or double-click finishes, Esc cancels.",
+      [num("Depth (m)", () => o.depth, (n) => { o.depth = n; }, "0.1", true), num("Base (m)", () => o.base, (n) => { o.base = n; }, "0.1", false)]);
+    hud("void", "Draw the outline of the cut. It cuts floors and extrusions it lies wholly inside, and walls it passes through square.",
+      [num("Depth (m)", () => o.voidDepth, (n) => { o.voidDepth = n; }, "0.1", true), num("Base (m)", () => o.voidBase, (n) => { o.voidBase = n; }, "0.1", false)]);
+    const shape = h("select", { attrs: { "aria-label": "Profile" } }, h("option", { value: "rectangle", text: "Rectangle" }), h("option", { value: "round", text: "Round" }));
+    shape.addEventListener("change", () => { o.sweepShape = shape.value === "round" ? "round" : "rectangle"; });
+    const shapeLabel = h("label", {}, "Profile", shape);
+    hud("sweep", "Click along the path. Enter or double-click finishes, C closes it, Esc cancels. The path stays at one height.",
+      [num("Width (mm)", () => o.sweepWidth, (n) => { o.sweepWidth = n; }, "10", true), num("Height (mm)", () => o.sweepHeight, (n) => { o.sweepHeight = n; }, "10", true),
+        [shapeLabel, () => { shape.value = o.sweepShape; }], num("Base (m)", () => o.sweepBase, (n) => { o.sweepBase = n; }, "0.1", false)]);
+  }
+
+  // ------------------------------------------------------------------------------------------------------------- public
+  setData(data: DrawingData | null): void {
+    const first = !!data && data.view.id !== this.viewId;
+    this.data = data;
+    if (data && first) { this.viewId = data.view.id; this.pts = []; this.fit(); }
+    else if (data && !this.inView(data.bounds)) this.fit();       // the content (say, walls just placed in 3D) is off screen: bring it back
+    this.updateHint();
+    this.draw();
+  }
+
+  /** Reset the pending tool state (the tool changed or the tab did). */
+  reset(): void { this.pts = []; this.box = null; this.drag = null; this.grip = null; this.edit = null; this.anchor = null; this.target = null; this.tagOf = null; this.updateHint(); this.draw(); }
+
+  fit(): void {
+    if (!this.measure()) { this.pendingFit = true; return; }       // hidden right now: fit as soon as it has a size
+    const b = this.data?.bounds;
+    if (b) {
+      const f = fitBox(b[0], b[1], this.width, this.height, 64);
+      this.scale = clamp(f.scale, 1e-6, 1e6); this.centre = f.centre;
+    } else {
+      const unit = MM_PER[this.store.unit];
+      this.scale = Math.max(1e-9, (Math.min(this.width, this.height) - 96) / (20_000 / unit));   // a 20 m square, in the project's unit
+      this.centre = [10_000 / unit, 7_500 / unit];
+    }
+    this.draw();
+  }
+
+  /** True when nothing is known to be drawn, or at least part of it is inside the viewport. */
+  private inView(bounds: [Pt, Pt] | null | undefined): boolean {
+    if (!bounds || !this.measure()) return true;
+    const lo = this.toWorld(0, this.height), hi = this.toWorld(this.width, 0);
+    return bounds[1][0] >= lo[0] && bounds[0][0] <= hi[0] && bounds[1][1] >= lo[1] && bounds[0][1] <= hi[1];
+  }
+
+  zoom(factor: number): void { this.scale = clamp(this.scale * factor, 1e-6, 1e6); this.draw(); }
+
+  /** Move the view by a number of screen pixels (right and down are positive), as the arrow keys do. */
+  panBy(dx: number, dy: number): void { this.centre = [this.centre[0] + dx / this.scale, this.centre[1] - dy / this.scale]; this.draw(); }
+
+  // -------------------------------------------------------------------------------------------------------------- space
+  private toWorld(px: number, py: number): Pt {
+    return [this.centre[0] + (px - this.width / 2) / this.scale, this.centre[1] - (py - this.height / 2) / this.scale];
+  }
+  private toScreen(p: Pt): Pt { return [this.width / 2 + (p[0] - this.centre[0]) * this.scale, this.height / 2 - (p[1] - this.centre[1]) * this.scale]; }
+  private local(e: PointerEvent | MouseEvent | WheelEvent): Pt {
+    const r = this.canvas.getBoundingClientRect();
+    return [e.clientX - r.left, e.clientY - r.top];
+  }
+  private gridStep(): number { return niceStep(24 / this.scale); }
+  private entities(): Entity[] { return this.data?.entities ?? []; }
+  /** What can be snapped to in a section or elevation: the corners of the cut and the ends of every drawn line. */
+  private projectionPolygons(): Pt[][] {
+    const pr = this.data?.projection ?? null;
+    if (this.projectionSnap.of !== pr) this.projectionSnap = { of: pr, polygons: pr ? snapPolygons(pr) : [] };
+    return this.projectionSnap.polygons;
+  }
+  /** The centre line of every wall as a two-point "polygon": snapping then finds the true ends and middles of walls, not just their outline corners. */
+  private axisPolygons(): Pt[][] {
+    const seen = new Set<string>(), out: Pt[][] = [];
+    const own = this.edit?.kind === "end" ? this.edit.id : null;
+    for (const w of this.data?.model ?? []) if (w.axis && !seen.has(w.id) && w.id !== own) { seen.add(w.id); out.push([w.axis.a, w.axis.b]); }
+    return out;
+  }
+  private visible(e: Entity): boolean { return this.data?.layers.find((l) => l.name === e.layer)?.visible !== false; }
+
+  private pointFor(e: PointerEvent | MouseEvent): { world: Pt; snap: Snap } {
+    const [x, y] = this.local(e);
+    const raw = this.toWorld(x, y);
+    const snap = snapPoint(raw, this.entities().filter((en) => this.visible(en)), SNAP_PX / this.scale, this.store.snapGrid ? this.gridStep() : null,
+      [...(this.data?.model ?? []).map((w) => w.polygon), ...this.axisPolygons(), ...this.projectionPolygons()]);
+    let point = snap.point;
+    const last = this.pts[this.pts.length - 1] ?? this.anchor;
+    if (e.shiftKey && last && (this.store.tool !== "select" || this.anchor) && this.store.tool !== "circle") { point = orthoConstrain(last, raw); return { world: point, snap: { point, kind: "none" } }; }
+    return { world: point, snap };
+  }
+
+  // ---------------------------------------------------------------------------------------------------------- interaction
+  private bind(): void {
+    const c = this.canvas;
+    c.addEventListener("contextmenu", (e) => { e.preventDefault(); if (this.pts.length) { this.finish(false); } });
+    c.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const [x, y] = this.local(e);
+      const before = this.toWorld(x, y);
+      this.scale = clamp(this.scale * Math.exp(-e.deltaY * 0.0015), 1e-6, 1e6);
+      const after = this.toWorld(x, y);
+      this.centre = [this.centre[0] + before[0] - after[0], this.centre[1] + before[1] - after[1]];
+      this.draw();
+    }, { passive: false });
+    c.addEventListener("pointerdown", (e) => this.down(e));
+    c.addEventListener("pointermove", (e) => this.move(e));
+    c.addEventListener("pointerup", (e) => { void this.up(e); });
+    c.addEventListener("pointerleave", () => { this.cursor = null; this.snap = null; this.hover = null; this.draw(); });
+    c.addEventListener("dblclick", (e) => {
+      if (this.store.tool === "polyline" || this.store.tool === "floor" || this.store.tool === "room" || this.store.tool === "extrude" || this.store.tool === "void" || this.store.tool === "sweep") { void this.finish(true); return; }
+      if (this.store.tool === "wall") { void this.finish(false); return; }
+      const mark = this.store.tool === "select" ? this.markAt(this.toWorld(...this.local(e))) : null;       // double-click a section line to open that section
+      if (mark) void this.store.openTab({ kind: "drawing", id: mark.id }, mark.name);
+    });
+    c.addEventListener("keydown", (e) => { void this.key(e); });
+    c.addEventListener("keyup", (e) => { if (e.key === " ") this.spaceDown = false; });
+  }
+
+  private down(e: PointerEvent): void {
+    this.canvas.focus();
+    this.canvas.setPointerCapture(e.pointerId);
+    const [x, y] = this.local(e);
+    if (e.button === 1 || e.button === 2 || (e.button === 0 && this.spaceDown)) { this.pan = { x, y, centre: [...this.centre] as Pt }; return; }
+    if (e.button !== 0 || !this.data) return;
+    const { world } = this.pointFor(e);
+    if (this.store.tool !== "select") return;       // drawing tools act on pointer-up, so a drag never leaves a stray point
+    const raw = this.toWorld(x, y);
+    const handle = this.handleAt(raw);
+    if (handle) { this.edit = handle.edit(); this.anchor = this.edit.kind === "end" ? (this.edit.end === "a" ? this.edit.axis.b : this.edit.axis.a) : null; return; }
+    if (this.lengthBox && x >= this.lengthBox.x && x <= this.lengthBox.x + this.lengthBox.w && y >= this.lengthBox.y && y <= this.lengthBox.y + this.lengthBox.h) { void this.typeLength(); return; }
+    const handles = this.currentGrips();
+    if (handles) {
+      const index = gripAt(handles.list, raw, (PICK_PX + 3) / this.scale);
+      if (index >= 0) { this.grip = { id: handles.id, list: handles.list, index, now: (handles.list[index] as Grip).at, moved: false }; return; }
+    }
+    const mark = this.data.projection ? null : this.markAt(raw);              // a section's cut line is picked before what lies under it
+    if (mark && !e.shiftKey) {
+      this.markSel = mark.id;
+      if (this.store.selection) void this.store.select(null);
+      this.edit = { kind: "mark", id: mark.id, part: "body", from: world, now: world, moved: false };
+      this.draw();
+      return;
+    }
+    const hit = this.pick(raw);
+    const selected = this.allSelectedIds();
+    // Dragging a selected element moves the whole selection; dragging one that is not selected moves just that one, as in Revit.
+    if (hit && !e.shiftKey && !this.data.projection) { this.drag = { start: world, now: world, moved: false, ids: selected.includes(hit) ? selected : [hit] }; return; }      // a section is a picture of the model, not a place to move it
+    if (hit) { this.drag = null; return; }
+    this.box = { from: raw, to: raw };
+  }
+
+  private move(e: PointerEvent): void {
+    const [x, y] = this.local(e);
+    if (this.pan) {
+      this.centre = [this.pan.centre[0] - (x - this.pan.x) / this.scale, this.pan.centre[1] + (y - this.pan.y) / this.scale];
+      this.draw(); return;
+    }
+    const { world, snap } = this.pointFor(e);
+    this.cursor = world; this.snap = snap;
+    if (this.store.tool !== "select") this.canvas.style.setProperty("cursor", "crosshair");        // a drawing tool shows where it will act
+    if (this.edit) {
+      const ed = this.edit;
+      const raw = this.toWorld(x, y);
+      const now = ed.kind === "turn" ? raw : world;
+      this.edit = { ...ed, now, ...(ed.kind === "turn" ? { raw, fine: !e.shiftKey } : {}), moved: ed.moved || dist(this.toScreen(ed.from), this.toScreen(now)) > DRAG_PX } as Edit;
+    } else if (this.grip) {
+      const from = (this.grip.list[this.grip.index] as Grip).at;
+      this.grip = { ...this.grip, now: world, moved: this.grip.moved || dist(this.toScreen(from), this.toScreen(world)) > DRAG_PX };
+    } else if (this.drag) {
+      const moved = dist(this.toScreen(this.drag.start), this.toScreen(world)) > DRAG_PX;
+      this.drag = { ...this.drag, now: world, moved: this.drag.moved || moved };
+    } else if (this.box) {
+      this.box = { from: this.box.from, to: this.toWorld(x, y) };
+    } else if (this.store.tool === "select") {
+      const raw = this.toWorld(x, y);
+      const mark = this.data?.projection ? null : this.markAt(raw);
+      this.hoverMark = mark?.id ?? null;
+      this.hover = mark ? null : this.pick(raw);
+      const onHandle = this.handleAt(raw);
+      this.canvas.style.setProperty("cursor", onHandle ? (onHandle.shape === "turn" ? "alias" : "move") : mark ? "pointer" : "");
+    } else if (this.store.tool === "tag" && !this.tagOf) {
+      const hit = this.pick(this.toWorld(x, y));
+      this.hover = hit && this.isModel(hit) ? hit : null;
+    } else if (CURVE_TOOLS.has(this.store.tool)) {
+      const raw = this.toWorld(x, y);
+      this.hover = this.store.tool === "hatch" ? this.shapeAt(raw) : this.pickEntity(raw, TOOL_KINDS[this.store.tool]);
+    }
+    this.draw();
+  }
+
+  private async up(e: PointerEvent): Promise<void> {
+    const [x, y] = this.local(e);
+    if (this.pan) { this.pan = null; return; }
+    if (e.button !== 0 || !this.data) return;
+    const view = this.data.view.id;
+    const { world } = this.pointFor(e);
+    const tool = this.store.tool;
+    if (this.edit) {
+      const ed = this.edit;
+      this.edit = null; this.anchor = null;
+      if (ed.moved) await this.commitEdit(ed);
+      this.draw();
+      return;
+    }
+    if (this.grip) {
+      const { id, list, index, now, moved } = this.grip;
+      this.grip = null;
+      if (moved) await this.store.run("draw.set_geometry", { drawing: view, id, geometry: (list[index] as Grip).geometry(now) });
+      else this.draw();
+      return;
+    }
+    if (tool === "select") {
+      if (this.drag?.moved) {
+        const { start, now, ids } = this.drag;
+        this.drag = null;
+        const dx = now[0] - start[0], dy = now[1] - start[1];
+        const before = this.allSelectedIds();
+        if (this.isModel(ids[0])) {                      // a wall moves in the model, in metres; the plan follows
+          const f = MM_PER[this.store.unit] / 1000;
+          const hangs = (id: string): boolean => this.data?.model.find((w) => w.id === id)?.category === "gutter";      // a gutter hangs on its roof: it moves with the roof
+          for (const id of ids) if (!hangs(id) && !(await this.store.run("model.move", { id, dx: dx * f, dy: dy * f }))) break;
+        } else await this.store.run("draw.move", { drawing: view, ids, dx, dy });
+        if (ids.length !== before.length || ids.some((i) => !before.includes(i))) await this.store.select(this.isModel(ids[0]) ? { kind: "model", ids } : { kind: "drawing", view, ids });      // what was dragged is what is selected
+        return;
+      }
+      this.drag = null;
+      if (this.box && dist(this.toScreen(this.box.from), [x, y]) > DRAG_PX) {
+        const lo: Pt = [Math.min(this.box.from[0], this.box.to[0]), Math.min(this.box.from[1], this.box.to[1])];
+        const hi: Pt = [Math.max(this.box.from[0], this.box.to[0]), Math.max(this.box.from[1], this.box.to[1])];
+        const ids = this.entities().filter((en) => this.visible(en) && insideBox(en, lo, hi)).map((en) => en.id);
+        this.box = null; this.markSel = null;
+        await this.store.select(ids.length ? { kind: "drawing", view, ids } : null);
+        return;
+      }
+      this.box = null;
+      this.markSel = null;
+      const hit = this.pick(this.toWorld(x, y));
+      const current = this.allSelectedIds();
+      let ids: string[] = hit ? [hit] : [];
+      // Shift adds to the selection, but only things of the same kind: drawing entities and model walls are edited by different commands.
+      if (hit && e.shiftKey && current.length && this.isModel(current[0]) === this.isModel(hit)) ids = current.includes(hit) ? current.filter((i) => i !== hit) : [...current, hit];
+      await this.store.select(!ids.length ? null : this.isModel(ids[0]) ? { kind: "model", ids } : { kind: "drawing", view, ids });
+      return;
+    }
+    await this.place(tool, world, view, this.toWorld(x, y));
+  }
+
+  private async place(tool: Tool, p: Pt, view: string, raw: Pt): Promise<void> {
+    const last = this.pts[this.pts.length - 1];
+    if (last && dist(last, p) < 1e-9 && tool !== "text") return;      // a double click never adds a zero-length piece
+    switch (tool) {
+      case "line":
+        if (!last) { this.pts = [p]; break; }
+        if (await this.store.run("draw.line", { drawing: view, start: last, end: p })) this.pts = [p];
+        break;
+      case "polyline": this.pts = [...this.pts, p]; break;
+      case "rectangle": {
+        if (!last) { this.pts = [p]; break; }
+        const r = normaliseRect(last, p);
+        if (r.width === 0 || r.height === 0) { toast("A rectangle needs two corners that differ in both directions.", { kind: "info" }); return; }
+        if (await this.store.run("draw.rectangle", { drawing: view, corner: r.corner, width: r.width, height: r.height })) this.pts = [];
+        break;
+      }
+      case "circle":
+        if (!last) { this.pts = [p]; break; }
+        if (await this.store.run("draw.circle", { drawing: view, center: last, radius: dist(last, p) })) this.pts = [];
+        break;
+      case "dimension":
+        if (this.pts.length < 2) { this.pts = [...this.pts, p]; break; }
+        if (await this.store.run("draw.dimension", { drawing: view, p1: this.pts[0], p2: this.pts[1], dimline_point: p })) this.pts = [];
+        break;
+      case "text": {
+        const value = await promptDialog({ title: "Add text", label: "Text", confirmLabel: "Place", maxLength: 500 });
+        if (value) await this.store.run("draw.text", { drawing: view, position: p, text: value, height: 250 / MM_PER[this.store.unit] });
+        break;
+      }
+      case "offset": await this.offsetClick(view, raw); break;
+      case "trim": case "extend": {
+        const id = this.pickEntity(raw, TOOL_KINDS[tool]);
+        if (!id) { toast(tool === "trim" ? "Click the part of a line or polyline to remove." : "Click near the end of a line or open polyline to extend.", { kind: "info" }); break; }
+        await this.store.run(tool === "trim" ? "draw.trim" : "draw.extend", { drawing: view, id, pick: raw });
+        break;
+      }
+      case "fillet": await this.filletClick(view, raw); break;
+      case "mirror": await this.mirrorClick(view, p); break;
+      case "door": case "window": {
+        const wall = this.wallAt(raw);
+        if (!wall) { toast(`Click on a wall to place the ${tool}.`, { kind: "info" }); break; }
+        const out = await this.store.run(`model.add_${tool}`, { wall, point: raw });
+        const id = (out?.result as { id?: string } | undefined)?.id;
+        if (id) await this.store.select({ kind: "model", ids: [id] });
+        break;
+      }
+      case "floor": case "room": this.pts = [...this.pts, p]; break;
+      case "extrude": case "void": case "sweep":
+        if (!this.data?.view.level_id) { toast("Extrusions, voids and sweeps are drawn on a floor plan.", { kind: "info" }); break; }
+        this.pts = [...this.pts, p]; break;
+      case "wall": {
+        const level = this.data?.view.level_id;
+        if (!level) { toast("Walls are drawn on a floor plan. Open a plan, or draw them in the 3D view.", { kind: "info" }); break; }
+        if (!last) { this.pts = [p]; break; }
+        const { height, thickness } = this.store.wallOptions;
+        if (!(height > 0) || !(thickness > 0)) { toast("Enter a positive wall height and thickness.", { kind: "error" }); break; }
+        if (await this.store.run("model.add_wall", { start: last, end: p, level, height, thickness })) this.pts = [p];      // the chain goes on from the new end
+        break;
+      }
+      case "rotate": {
+        const ids = this.turnable();
+        if (!ids.length) { toast("Select what to rotate first (walls, columns, floors, rooms, stairs …), then choose Rotate. Doors and windows turn with their wall.", { kind: "info" }); break; }
+        if (this.pts.length < 2) { this.pts = [...this.pts, p]; break; }
+        const [centre, reference] = this.pts as [Pt, Pt];
+        this.pts = [];
+        const degrees = (angleBetween(centre, reference, p) * 180) / Math.PI;
+        if (Math.abs(degrees) > 1e-9) await this.store.run("model.rotate", { ids, centre, angle: degrees });
+        break;
+      }
+      case "column": {
+        const level = this.data?.view.level_id;
+        if (!level) { toast("Columns are placed on a floor plan.", { kind: "info" }); break; }
+        const out = await this.store.run("model.add_column", { point: p, level });
+        const id = (out?.result as { id?: string } | undefined)?.id;
+        if (id) await this.store.select({ kind: "model", ids: [id] });
+        break;
+      }
+      case "section": {
+        if (!last) { this.pts = [p]; break; }
+        const out = await this.store.run("view.add_section", { a: last, b: p });
+        const made = out?.result as { id?: string; name?: string } | undefined;
+        this.pts = [];
+        if (made?.id) await this.store.openTab({ kind: "drawing", id: made.id }, made.name ?? "Section");
+        break;
+      }
+      case "hatch": await this.hatchClick(view, raw); break;
+      case "grid": {
+        if (!last) { this.pts = [p]; break; }
+        const out = await this.store.run("model.add_grid", { start: last, end: p });
+        const id = (out?.result as { id?: string } | undefined)?.id;
+        this.pts = [];
+        if (id) await this.store.select({ kind: "model", ids: [id] });
+        break;
+      }
+      case "stair": {
+        const level = this.data?.view.level_id;
+        if (!level) { toast("Stairs are placed on a floor plan.", { kind: "info" }); break; }
+        if (!last) { this.pts = [p]; break; }
+        const out = await this.store.run("model.add_stair", { start: last, end: p, level });
+        const id = (out?.result as { id?: string } | undefined)?.id;
+        this.pts = [];
+        if (id) await this.store.select({ kind: "model", ids: [id] });
+        break;
+      }
+      case "family": {
+        const level = this.data?.view.level_id, family = this.store.family;
+        if (!level) { toast("Family elements are placed on a floor plan.", { kind: "info" }); break; }
+        if (!family) { toast("Choose a family first (Insert, then Family).", { kind: "info" }); break; }
+        const out = await this.store.run("family.place", { family: family.id, level, point: p });
+        const id = (out?.result as { id?: string } | undefined)?.id;
+        if (id) await this.store.select({ kind: "model", ids: [id] });
+        break;
+      }
+      case "tag": {
+        if (!this.tagOf) {
+          const hit = this.pick(raw);
+          if (!hit || !this.isModel(hit)) { toast("Click the element to tag.", { kind: "info" }); break; }
+          this.tagOf = hit; this.hover = hit;
+          break;
+        }
+        const out = await this.store.run("draw.tag", { drawing: view, element: this.tagOf, point: p });
+        const id = (out?.result as { id?: string } | undefined)?.id;
+        this.tagOf = null; this.hover = null;
+        if (id) await this.store.select({ kind: "drawing", view, ids: [id] });
+        break;
+      }
+      default: break;
+    }
+    this.updateHint();
+    this.draw();
+  }
+
+  /** Offset: pick the shape, say how far, then click the side to copy it to. */
+  private async offsetClick(view: string, raw: Pt): Promise<void> {
+    if (!this.target) {
+      const id = this.pickEntity(raw, TOOL_KINDS["offset"]);
+      if (!id) { toast("Click a line, polyline, rectangle or circle to offset.", { kind: "info" }); return; }
+      this.target = { id, pick: raw };
+      this.draw();
+      const unit = this.store.unit;
+      const distance = await numberPrompt({ title: "Offset", label: "Distance", unit, value: this.lastOffset ?? 200 / MM_PER[unit], confirmLabel: "Set distance" });
+      if (distance === null) { this.target = null; return; }
+      this.lastOffset = distance; this.target = { id, pick: raw, distance };
+      return;
+    }
+    const distance = this.target.distance;
+    if (distance === undefined) return;                 // the distance dialog is still open
+    const id = this.target.id;
+    this.target = null;
+    await this.store.run("draw.offset", { drawing: view, id, distance, side: raw });
+  }
+
+  /** Fillet: click one line near the end to keep, then the other; the radius is asked for once both are known. */
+  private async filletClick(view: string, raw: Pt): Promise<void> {
+    const id = this.pickEntity(raw, TOOL_KINDS["fillet"]);
+    if (!id) { toast("Click a line to fillet.", { kind: "info" }); return; }
+    if (!this.target) { this.target = { id, pick: raw }; return; }
+    if (this.target.id === id) { toast("Click a second, different line.", { kind: "info" }); return; }
+    const first = this.target;
+    const unit = this.store.unit;
+    const radius = await numberPrompt({ title: "Fillet", label: "Radius", unit, value: this.lastRadius, allowZero: true, confirmLabel: "Fillet" });
+    this.target = null;
+    if (radius === null) return;
+    this.lastRadius = radius;
+    await this.store.run("draw.fillet", { drawing: view, ids: [first.id, id], picks: [first.pick, raw], radius });
+  }
+
+  /** Mirror the selected entities across a line given by two points. */
+  private async mirrorClick(view: string, p: Pt): Promise<void> {
+    const ids = this.selectedIds();
+    if (!ids.length) { toast("Select what to mirror first, then choose Mirror.", { kind: "info" }); return; }
+    if (this.pts.length === 0) { this.pts = [p]; return; }
+    const a = this.pts[0] as Pt;
+    this.pts = [];
+    const keep = await mirrorKeepDialog();
+    if (keep === null) return;
+    await this.store.run("draw.mirror", { drawing: view, ids, p1: a, p2: p, copy: keep });
+  }
+
+  /** Hatch the closed shape under the click. */
+  private async hatchClick(view: string, raw: Pt): Promise<void> {
+    const id = this.shapeAt(raw);
+    if (!id) { toast("Click inside a closed shape (a rectangle, closed polyline or circle) to hatch it.", { kind: "info" }); return; }
+    const choice = await hatchDialog(this.store.unit, this.lastHatch);
+    if (!choice) return;
+    this.lastHatch = choice;
+    await this.store.run("draw.hatch", { drawing: view, ids: [id], pattern: choice.pattern, angle: choice.angle, ...(choice.spacing !== null ? { spacing: choice.spacing } : {}) });
+  }
+
+  /** The selected model elements that can be turned: everything but doors and windows, which turn with their wall. */
+  private turnable(): string[] {
+    const sel = this.store.selection;
+    if (sel?.kind !== "model") return [];
+    const cats = new Map((this.data?.model ?? []).map((w) => [w.id, w.category] as const));
+    return sel.ids.filter((id) => cats.has(id) && cats.get(id) !== "door" && cats.get(id) !== "window");
+  }
+
+  /** The handles of the selection: the ends of a selected wall, a turn handle above anything that can be turned, or the ends of a selected section line. */
+  private handles(): Handle[] {
+    const data = this.data;
+    if (!data || data.projection || this.store.tool !== "select") return [];
+    if (this.markSel) {
+      const m = data.section_marks.find((x) => x.id === this.markSel);
+      return m ? (["a", "b"] as const).map((part) => ({ at: m[part], shape: "square" as const, edit: (): Edit => ({ kind: "mark", id: m.id, part, from: m[part], now: m[part], moved: false }) })) : [];
+    }
+    const ids = this.turnable();
+    if (!ids.length) return [];
+    const out: Handle[] = [];
+    const wall = ids.length === 1 ? data.model.find((w) => w.id === ids[0] && w.axis) : undefined;
+    if (wall?.axis) {
+      const axis = wall.axis;
+      for (const end of ["a", "b"] as const) out.push({ at: axis[end], shape: "square", edit: (): Edit => ({ kind: "end", id: wall.id, end, axis, from: axis[end], now: axis[end], moved: false }) });
+    }
+    const box = polygonsBounds(data.model.filter((w) => ids.includes(w.id)).map((w) => w.polygon));
+    if (box) {
+      const centre: Pt = [(box[0][0] + box[1][0]) / 2, (box[0][1] + box[1][1]) / 2];
+      const at: Pt = [centre[0], box[1][1] + TURN_OFFSET_PX / this.scale];
+      out.push({ at, shape: "turn", edit: (): Edit => ({ kind: "turn", ids, centre, from: at, now: at, raw: at, fine: true, moved: false }) });
+    }
+    return out;
+  }
+
+  private handleAt(p: Pt): Handle | null {
+    let best: Handle | null = null, bestD = (PICK_PX + 4) / this.scale;
+    for (const hd of this.handles()) { const d = dist(hd.at, p); if (d <= bestD) { best = hd; bestD = d; } }
+    return best;
+  }
+
+  /** The angle (radians) a turn edit currently stands for: whole degrees, or 15° steps while Shift is held. */
+  private turnAngle(ed: Extract<Edit, { kind: "turn" }>): number {
+    return roundAngle(angleBetween(ed.centre, ed.from, ed.raw), ed.fine ? 1 : 15);
+  }
+
+  /** Send a finished handle drag to the server. */
+  private async commitEdit(ed: Edit): Promise<void> {
+    if (ed.kind === "end") {
+      await this.store.run("model.set_wall_ends", { id: ed.id, [ed.end === "a" ? "start" : "end"]: ed.now });
+    } else if (ed.kind === "turn") {
+      const degrees = (this.turnAngle(ed) * 180) / Math.PI;
+      if (Math.abs(degrees) > 1e-9) await this.store.run("model.rotate", { ids: ed.ids, centre: ed.centre, angle: degrees });
+    } else {
+      const ends = this.markEnds(ed);
+      if (ends) await this.store.run("view.set_section", { id: ed.id, a: ends[0], b: ends[1] });
+    }
+  }
+
+  /** Where a section's cut line runs while (or after) it is dragged. */
+  private markEnds(ed: Extract<Edit, { kind: "mark" }>): [Pt, Pt] | null {
+    const m = this.data?.section_marks.find((x) => x.id === ed.id);
+    if (!m) return null;
+    if (ed.part === "a") return [ed.now, m.b];
+    if (ed.part === "b") return [m.a, ed.now];
+    const dx = ed.now[0] - ed.from[0], dy = ed.now[1] - ed.from[1];
+    return [[m.a[0] + dx, m.a[1] + dy], [m.b[0] + dx, m.b[1] + dy]];
+  }
+
+  /** Click the length shown beside a selected wall and type the one it should have; the far end stays put. */
+  private async typeLength(): Promise<void> {
+    const box = this.lengthBox;
+    if (!box) return;
+    const unit = this.store.unit;
+    const current = Math.round(dist(box.a, box.b) * 1000) / 1000;
+    const length = await numberPrompt({ title: "Wall length", label: "Length", unit, value: current, confirmLabel: "Set length" });
+    if (length === null || Math.abs(length - current) < 1e-9) return;
+    await this.store.run("model.set_wall_ends", { id: box.id, end: alongFrom(box.a, box.b, length) });
+  }
+
+  /** The wall under a plan point, ignoring doors, windows, floors and beams. */
+  private wallAt(p: Pt): string | null {
+    let best: string | null = null, bestD = PICK_PX / this.scale;
+    for (const w of this.data?.model ?? []) {
+      if (w.category !== "wall") continue;
+      const d = polygonDistance(p, w.polygon);
+      if (d <= bestD) { best = w.id; bestD = d; }
+    }
+    return best;
+  }
+
+  /** The smallest closed shape (closed polyline or circle) that the point is on or inside. */
+  private shapeAt(p: Pt): string | null {
+    let best: string | null = null, bestArea = Infinity;
+    for (const e of this.entities()) {
+      if (!this.visible(e)) continue;
+      const g = e.geometry;
+      let inside = false;
+      if (e.kind === "polyline" && g["closed"] === true && Array.isArray(g["points"])) inside = pointInPolygon(p, g["points"] as Pt[]);
+      else if (e.kind === "circle" && Array.isArray(g["center"]) && typeof g["radius"] === "number") inside = dist(p, g["center"] as Pt) <= g["radius"];
+      if (!inside) continue;
+      const b = entityBounds(e);
+      const area = b ? (b[1][0] - b[0][0]) * (b[1][1] - b[0][1]) : Infinity;
+      if (area < bestArea) { best = e.id; bestArea = area; }
+    }
+    return best;
+  }
+
+  /** The handles of the one selected drawing entity, when there is exactly one. */
+  private currentGrips(): { id: string; list: Grip[] } | null {
+    const ids = this.selectedIds();
+    const e = ids.length === 1 ? this.entities().find((en) => en.id === ids[0]) : undefined;
+    if (!e) return null;
+    const list = grips(e);
+    return list.length ? { id: e.id, list } : null;
+  }
+
+  /** Finish the active tool: a polyline is committed here (Enter, double click, or C to close it); other tools just stop. */
+  private async finish(commit: boolean, closed = false): Promise<void> {
+    const view = this.data?.view.id;
+    if (commit && this.store.tool === "polyline" && view) {
+      const pts = this.pts.filter((p, i) => i === 0 || dist(p, this.pts[i - 1] ?? p) > 1e-9);
+      if (pts.length >= 2) await this.store.run("draw.polyline", { drawing: view, points: pts, closed });
+      else toast("A polyline needs at least two points.", { kind: "info" });
+    }
+    if (commit && this.store.tool === "floor" && view) {
+      const level = this.data?.view.level_id;
+      const pts = this.pts.filter((p, i) => i === 0 || dist(p, this.pts[i - 1] ?? p) > 1e-9);
+      if (pts.length >= 3 && level) await this.store.run("model.add_floor", { points: pts, level });
+      else toast("A floor needs at least three corners on a floor plan.", { kind: "info" });
+    }
+    if (commit && (this.store.tool === "extrude" || this.store.tool === "void") && view) {
+      const level = this.data?.view.level_id;
+      const isVoid = this.store.tool === "void";
+      const o = this.store.formOptions;
+      const pts = this.pts.filter((p, i) => i === 0 || dist(p, this.pts[i - 1] ?? p) > 1e-9);
+      if (pts.length >= 3 && level) {
+        const out = await this.store.run("model.add_extrusion", { points: pts, level, void: isVoid, depth: isVoid ? o.voidDepth : o.depth, base: isVoid ? o.voidBase : o.base });
+        const id = (out?.result as { id?: string } | undefined)?.id;
+        if (id) await this.store.select({ kind: "model", ids: [id] });
+      } else toast(`${isVoid ? "A void" : "An extrusion"} needs an outline of at least three corners on a floor plan.`, { kind: "info" });
+    }
+    if (commit && this.store.tool === "sweep" && view) {
+      const level = this.data?.view.level_id;
+      const o = this.store.formOptions;
+      const pts = this.pts.filter((p, i) => i === 0 || dist(p, this.pts[i - 1] ?? p) > 1e-9);
+      if (pts.length >= (closed ? 3 : 2) && level) {
+        const out = await this.store.run("model.add_sweep", { points: pts, closed, level, shape: o.sweepShape, width: o.sweepWidth, height: o.sweepHeight, base: o.sweepBase });
+        const id = (out?.result as { id?: string } | undefined)?.id;
+        if (id) await this.store.select({ kind: "model", ids: [id] });
+      } else toast("A sweep needs a path of at least two points on a floor plan.", { kind: "info" });
+    }
+    if (commit && this.store.tool === "room" && view) {
+      const level = this.data?.view.level_id;
+      const pts = this.pts.filter((p, i) => i === 0 || dist(p, this.pts[i - 1] ?? p) > 1e-9);
+      if (pts.length >= 3 && level) await this.store.run("model.add_room", { points: pts, level });
+      else toast("A room needs at least three corners on a floor plan.", { kind: "info" });
+    }
+    this.pts = [];
+    this.target = null;
+    this.tagOf = null;
+    this.updateHint();
+    this.draw();
+  }
+
+  private async key(e: KeyboardEvent): Promise<void> {
+    if (e.key === " ") { this.spaceDown = true; e.preventDefault(); return; }
+    const arrow: Record<string, [number, number]> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+    const step = arrow[e.key];
+    if (step && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); const px = e.shiftKey ? 240 : 60; this.panBy(step[0] * px, step[1] * px); return; }
+    if ((e.key === "+" || e.key === "=") && !e.ctrlKey && !e.metaKey) { e.preventDefault(); this.zoom(1.25); return; }
+    if (e.key === "-" && !e.ctrlKey && !e.metaKey) { e.preventDefault(); this.zoom(1 / 1.25); return; }
+    if (e.key === "0" && !e.ctrlKey && !e.metaKey) { e.preventDefault(); this.fit(); return; }
+    if (e.key === "Escape") { if (this.edit) { this.edit = null; this.anchor = null; this.draw(); } else if (this.grip) { this.grip = null; this.draw(); } else if (this.pts.length || this.target || this.tagOf) await this.finish(false); else this.store.setTool("select"); return; }
+    if (e.key === "Enter" && (this.store.tool === "polyline" || this.store.tool === "floor" || this.store.tool === "room" || this.store.tool === "extrude" || this.store.tool === "void" || this.store.tool === "sweep")) { await this.finish(true); return; }
+    if ((e.key === "c" || e.key === "C") && (this.store.tool === "polyline" || this.store.tool === "sweep") && this.pts.length > 2) { await this.finish(true, true); return; }
+    const sel = this.store.selection;
+    if ((e.key === "Delete" || e.key === "Backspace") && sel?.kind === "drawing" && this.data) {
+      e.preventDefault();
+      await this.store.run("draw.delete", { drawing: this.data.view.id, ids: sel.ids });
+    } else if ((e.key === "Delete" || e.key === "Backspace") && sel?.kind === "model") {
+      e.preventDefault();
+      for (const id of sel.ids) if (!(await this.store.run("model.delete", { id }))) break;
+    }
+  }
+
+  private isModel(id: string | undefined): boolean {
+    return !!id && ((this.data?.model ?? []).some((w) => w.id === id) || !!this.data?.projection?.items.some((i) => i.id === id));
+  }
+
+  /** The section whose cut line is under a plan point, if any. */
+  private markAt(p: Pt): SectionMark | null {
+    let best: SectionMark | null = null, bestD = PICK_PX / this.scale;
+    for (const m of this.data?.section_marks ?? []) {
+      const d = distToSegment(p, m.a, m.b);
+      if (d <= bestD) { best = m; bestD = d; }
+    }
+    return best;
+  }
+
+  /** Selected drawing entities, or selected model walls when the selection is a wall. */
+  private allSelectedIds(): string[] {
+    const sel = this.store.selection;
+    if (sel?.kind === "model") return sel.ids.filter((id) => this.isModel(id));
+    return this.selectedIds();
+  }
+
+  private selectedIds(): string[] {
+    const sel = this.store.selection;
+    return sel?.kind === "drawing" && sel.view === this.data?.view.id ? sel.ids : [];
+  }
+
+  private pick(world: Pt): string | null {
+    let best: string | null = null;
+    let bestD = PICK_PX / this.scale;
+    for (const e of this.entities()) {
+      if (!this.visible(e) || e.kind === "hatch") continue;
+      const d = entityDistance(e, world);
+      if (d <= bestD) { best = e.id; bestD = d; }
+    }
+    if (best) return best;                              // drawn entities win over the wall they sit on
+    if (this.data?.projection) return projectionAt(this.data.projection, world, PICK_PX / this.scale);
+    for (const w of this.data?.model ?? []) {
+      if (w.category === "floor" || w.category === "room") continue;
+      const d = this.modelDistance(w, world);
+      if (d <= bestD) { best = w.id; bestD = d; }
+    }
+    if (best) return best;
+    for (const w of this.data?.model ?? []) if (w.category === "floor" && polygonDistance(world, w.polygon) === 0) best = w.id;      // a floor is picked by its area, last
+    if (best) return best;
+    for (const w of this.data?.model ?? []) if (w.category === "room" && polygonDistance(world, w.polygon) === 0) best = w.id;       // a room is picked inside its outline, after the floor
+    if (best) return best;
+    for (const e of this.entities()) if (this.visible(e) && e.kind === "hatch" && entityDistance(e, world) === 0) best = e.id;   // a hatch is picked by its fill, last
+    return best;
+  }
+
+  /** How far a point is from a model element on the plan; a door is also hit on its open leaf. */
+  private modelDistance(w: PlanWall, p: Pt): number {
+    const s = w.symbol;
+    const base = polygonDistance(p, w.polygon);
+    return w.category === "door" && s?.hinge && s.leaf_end ? Math.min(base, distToSegment(p, s.hinge, s.leaf_end)) : base;
+  }
+
+  /** The nearest drawn entity of the given kinds (never a wall or a hatch). */
+  private pickEntity(world: Pt, kinds?: readonly string[]): string | null {
+    let best: string | null = null;
+    let bestD = PICK_PX / this.scale;
+    for (const e of this.entities()) {
+      if (!this.visible(e) || e.kind === "hatch" || (kinds && !kinds.includes(e.kind))) continue;
+      const d = entityDistance(e, world);
+      if (d <= bestD) { best = e.id; bestD = d; }
+    }
+    return best;
+  }
+
+  // ------------------------------------------------------------------------------------------------------------- render
+  /** Read the element's real size and size the canvas to it. False while the view is hidden (zero size): nothing can be fitted yet. */
+  private measure(): boolean {
+    const r = this.el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) return false;
+    const dpr = window.devicePixelRatio || 1;
+    this.width = Math.round(r.width); this.height = Math.round(r.height);
+    this.canvas.width = Math.round(this.width * dpr); this.canvas.height = Math.round(this.height * dpr);
+    this.canvas.style.setProperty("width", `${this.width}px`); this.canvas.style.setProperty("height", `${this.height}px`);
+    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return true;
+  }
+
+  private resize(): void {
+    if (!this.measure()) return;
+    if (this.pendingFit) { this.pendingFit = false; this.fit(); } else this.draw();
+  }
+
+  private readColors(): Colors {
+    return { paper: cssColor("--paper", "#ffffff"), grid: cssColor("--grid", "#e4e7ec"), gridMajor: cssColor("--grid-major", "#cfd4dc"), ink: cssColor("--ink", "#1a1d23"),
+      muted: cssColor("--muted", "#566070"), select: cssColor("--select", "#1a5fd1"), accent: cssColor("--accent", "#b89b00"), hover: cssColor("--hover-line", "#5b8def") };
+  }
+
+  draw(): void {
+    if (this.frame) return;
+    this.frame = requestAnimationFrame(() => { this.frame = 0; this.paint(); });
+  }
+
+  private paint(): void {
+    const ctx = this.ctx;
+    const k = (this.colors = this.readColors());
+    ctx.save();
+    ctx.fillStyle = k.paper; ctx.fillRect(0, 0, this.width, this.height);
+    this.paintGrid(k);
+    const sel = new Set(this.allSelectedIds());
+    if (this.data?.projection) this.paintProjection(this.data.projection, sel, k);
+    for (const cat of PAINT_ORDER) {
+      for (const w of this.data?.model ?? []) if (w.category === cat) this.paintItem(w, sel.has(w.id) ? k.select : w.id === this.hover ? k.hover : k.ink, sel.has(w.id), k);
+    }
+    const ordered = [...this.entities().filter((e) => e.kind === "hatch"), ...this.entities().filter((e) => e.kind !== "hatch")];   // fills go under the lines
+    for (const e of ordered) {
+      if (!this.visible(e)) continue;
+      const picked = sel.has(e.id) || this.target?.id === e.id;
+      const state = picked ? "selected" : e.id === this.hover ? "hover" : "normal";
+      this.paintEntity(e, state === "selected" ? k.select : state === "hover" ? k.hover : k.ink, state === "selected" ? 2.5 : 1.5);
+    }
+    this.paintSectionMarks(k);
+    this.paintGrips(k);
+    this.paintHandles(k);
+    this.paintPreview(k);
+    if (this.drag?.moved) this.paintMoveGhost(k);
+    if (this.edit?.moved) this.paintEditGhost(this.edit, k);
+    this.syncWallHud();
+    if (this.box) {
+      const a = this.toScreen(this.box.from), b = this.toScreen(this.box.to);
+      ctx.fillStyle = withAlpha(k.select, 0.13); ctx.strokeStyle = k.select; ctx.lineWidth = 1; ctx.setLineDash([5, 4]);
+      ctx.fillRect(a[0], a[1], b[0] - a[0], b[1] - a[1]); ctx.strokeRect(a[0], a[1], b[0] - a[0], b[1] - a[1]);
+    }
+    if (this.snap && this.snap.kind !== "none" && this.cursor) this.paintSnap(this.snap, k);
+    ctx.restore();
+  }
+
+  /** The wall options strip shows while the wall tool is active, with the values the 3D view's wall tool uses too. */
+  private syncWallHud(): void {
+    for (const [tool, hud] of this.formHuds) {
+      const on = this.store.tool === tool;
+      if (hud.el.hidden === on) { hud.el.hidden = !on; if (on) hud.sync(); }
+    }
+    const show = this.store.tool === "wall";
+    if (this.wallHud.hidden === !show) return;
+    this.wallHud.hidden = !show;
+    if (show) {
+      this.wallFields.height.value = String(this.store.wallOptions.height);
+      this.wallFields.thickness.value = String(this.store.wallOptions.thickness);
+    }
+  }
+
+  private mmPerUnit(): number { return MM_PER[this.store.unit]; }
+
+  private tracePolygon(poly: readonly Pt[]): void {
+    poly.forEach((p, i) => { const [x, y] = this.toScreen(p); if (i) this.ctx.lineTo(x, y); else this.ctx.moveTo(x, y); });
+    this.ctx.closePath();
+  }
+
+  /** The handles on the selection (square for stretching, round for turning), the length of a selected wall, and the stem of the turn handle. */
+  private paintHandles(k: Colors): void {
+    this.lengthBox = null;
+    const list = this.handles();
+    if (!list.length) return;
+    const ctx = this.ctx;
+    ctx.setLineDash([]); ctx.lineWidth = 1.5; ctx.strokeStyle = k.select; ctx.fillStyle = k.paper;
+    for (const hd of list) {
+      const [x, y] = this.toScreen(hd.at);
+      ctx.beginPath();
+      if (hd.shape === "square") { ctx.rect(x - 5, y - 5, 10, 10); ctx.fill(); ctx.stroke(); continue; }
+      ctx.moveTo(x, y + TURN_OFFSET_PX - 8); ctx.lineTo(x, y + 8); ctx.stroke();                 // the stem down to the selection
+      ctx.beginPath(); ctx.arc(x, y, 8, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y, 3.6, -Math.PI * 0.2, Math.PI * 1.3); ctx.stroke();            // a turning arrow
+      ctx.beginPath(); ctx.moveTo(x + 4, y - 5.6); ctx.lineTo(x + 4.6, y - 1.2); ctx.lineTo(x + 0.6, y - 3.6); ctx.stroke();
+    }
+    const ends = list.filter((x) => x.shape === "square");
+    const wall = this.edit?.kind === "end" ? null : ends.length === 2 && !this.markSel ? this.data?.model.find((w) => w.axis && this.allSelectedIds()[0] === w.id) : undefined;
+    if (wall?.axis && !this.edit) this.paintLength(wall.axis.a, wall.axis.b, wall.axis.thickness, wall.id, k, true);
+  }
+
+  /** The temporary dimension of a wall: its length, drawn beside it. A selected wall's can be clicked to type a new length. */
+  private paintLength(a: Pt, b: Pt, thickness: number, id: string, k: Colors, clickable: boolean): void {
+    const ctx = this.ctx;
+    const [ax, ay] = this.toScreen(a), [bx, by] = this.toScreen(b);
+    const len = Math.hypot(bx - ax, by - ay) || 1;
+    const off = thickness * this.scale / 2 + 18;
+    const nx = (-(by - ay) / len) * off, ny = ((bx - ax) / len) * off;                       // the dimension line runs beside the wall, off its face
+    const mx = (ax + bx) / 2 + nx, my = (ay + by) / 2 + ny;
+    const text = `${dist(a, b).toLocaleString(undefined, { maximumFractionDigits: 1 })} ${this.store.unit}`;
+    ctx.font = `12px ${getComputedStyle(document.documentElement).getPropertyValue("--font-ui") || "sans-serif"}`;
+    const w = ctx.measureText(text).width + 12, hgt = 20;
+    ctx.setLineDash([]); ctx.strokeStyle = k.select; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(ax + nx, ay + ny); ctx.lineTo(bx + nx, by + ny); ctx.lineTo(bx, by); ctx.stroke();
+    ctx.fillStyle = k.paper; ctx.fillRect(mx - w / 2, my - hgt / 2, w, hgt);
+    ctx.strokeRect(mx - w / 2 + 0.5, my - hgt / 2 + 0.5, w, hgt);
+    ctx.fillStyle = k.select; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(text, mx, my + 0.5);
+    ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+    if (clickable) this.lengthBox = { x: mx - w / 2, y: my - hgt / 2, w, h: hgt, id, a, b };
+  }
+
+  /** What a handle drag would leave behind if it were dropped now. */
+  private paintEditGhost(ed: Edit, k: Colors): void {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.setLineDash([6, 4]); ctx.lineWidth = 1.5; ctx.strokeStyle = k.select; ctx.fillStyle = withAlpha(k.select, 0.14);
+    if (ed.kind === "end") {
+      const a = ed.end === "a" ? ed.now : ed.axis.a, b = ed.end === "b" ? ed.now : ed.axis.b;
+      if (dist(a, b) > 1e-9) { ctx.beginPath(); this.tracePolygon(wallBand(a, b, ed.axis.thickness)); ctx.fill(); ctx.stroke(); this.paintLength(a, b, ed.axis.thickness, ed.id, k, false); }
+    } else if (ed.kind === "turn") {
+      const angle = this.turnAngle(ed);
+      for (const w of this.data?.model ?? []) if (ed.ids.includes(w.id)) { ctx.beginPath(); this.tracePolygon(w.polygon.map((p) => rotateAbout(p, ed.centre, angle))); ctx.fill(); ctx.stroke(); }
+      this.paintBadge(`${((angle * 180) / Math.PI).toFixed(0)}°`, ed.raw, k);
+    } else {
+      const ends = this.markEnds(ed);
+      if (ends) { ctx.beginPath(); this.line(ends[0], ends[1]); ctx.stroke(); }
+    }
+    ctx.restore();
+  }
+
+  /** A small readout beside the pointer. */
+  private paintBadge(text: string, at: Pt, k: Colors): void {
+    const ctx = this.ctx;
+    const [sx, sy] = this.toScreen(at);
+    ctx.setLineDash([]); ctx.font = `12px ${getComputedStyle(document.documentElement).getPropertyValue("--font-ui") || "sans-serif"}`;
+    const w = ctx.measureText(text).width + 10;
+    ctx.fillStyle = k.paper; ctx.fillRect(sx + 14, sy + 14, w, 20);
+    ctx.strokeStyle = k.select; ctx.strokeRect(sx + 14.5, sy + 14.5, w, 20);
+    ctx.fillStyle = k.ink; ctx.textBaseline = "middle"; ctx.textAlign = "left"; ctx.fillText(text, sx + 19, sy + 24.5);
+    ctx.textBaseline = "alphabetic";
+  }
+
+  /** A section or an elevation: the level lines, then each element far to near (its surfaces cover what is behind, then its lines), then every cut on top. */
+  private paintProjection(pr: Projection, sel: Set<string>, k: Colors): void {
+    const ctx = this.ctx;
+    const mmPerUnit = MM_PER[this.store.unit];
+    ctx.lineJoin = "round"; ctx.lineCap = "round";
+    if (pr.bounds) {
+      const pad = Math.max((pr.bounds[1][0] - pr.bounds[0][0]) * 0.05, 40 / this.scale);
+      ctx.font = `12px ${getComputedStyle(document.documentElement).getPropertyValue("--font-ui") || "sans-serif"}`;
+      ctx.textAlign = "right"; ctx.textBaseline = "bottom";
+      for (const l of visibleLevels(pr, mmPerUnit)) {
+        const [x0, y] = this.toScreen([pr.bounds[0][0] - pad, l.z]), [x1] = this.toScreen([pr.bounds[1][0] + pad, l.z]);
+        ctx.strokeStyle = k.muted; ctx.lineWidth = 1; ctx.setLineDash([10, 5]);
+        ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke(); ctx.setLineDash([]);
+        ctx.fillStyle = k.muted; ctx.fillText(levelLabel(l.name, l.z, mmPerUnit), x0 - 6, y - 2);
+      }
+    }
+    const screen = (t: number[]): void => { for (let i = 0; i < t.length; i += 2) { const [x, y] = this.toScreen([t[i] ?? 0, t[i + 1] ?? 0]); if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); } };
+    for (const item of pr.items) {
+      const picked = sel.has(item.id), hot = item.id === this.hover;
+      ctx.beginPath(); for (const t of item.tris) { screen(t); ctx.closePath(); }
+      ctx.fillStyle = k.paper; ctx.fill("nonzero");                                  // opaque: this is what hides the elements behind it
+      if (picked || hot) { ctx.fillStyle = withAlpha(picked ? k.select : k.hover, picked ? 0.22 : 0.12); ctx.fill("nonzero"); }
+      ctx.beginPath();
+      for (const e of item.edges) { const [ax, ay] = this.toScreen([e[0] ?? 0, e[1] ?? 0]), [bx, by] = this.toScreen([e[2] ?? 0, e[3] ?? 0]); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); }
+      ctx.setLineDash([]); ctx.lineWidth = picked ? 2.2 : 1.1; ctx.strokeStyle = picked ? k.select : k.ink; ctx.stroke();
+    }
+    for (const item of pr.items) {
+      if (!item.cut.length) continue;
+      const picked = sel.has(item.id);
+      ctx.beginPath();
+      for (const loop of item.cut) { loop.forEach((p, i) => { const [x, y] = this.toScreen(p); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); }); ctx.closePath(); }
+      ctx.fillStyle = withAlpha(picked ? k.select : k.ink, cutWeight(item.category)); ctx.fill("evenodd");
+      ctx.lineWidth = picked ? 2.5 : 1.8; ctx.strokeStyle = picked ? k.select : k.ink; ctx.stroke();
+    }
+  }
+
+  /** The cut lines of the sections, on a plan: a dash-dot line, an arrowhead at each end showing which way it looks, and a lettered bubble. */
+  private paintSectionMarks(k: Colors): void {
+    const marks = (this.data?.section_marks ?? []).map((m) => {
+      const ed = this.edit;
+      if (ed?.kind !== "mark" || ed.id !== m.id || !ed.moved) return m;
+      const ends = this.markEnds(ed);
+      if (!ends) return m;
+      const len = dist(ends[0], ends[1]) || 1;
+      return { ...m, a: ends[0], b: ends[1], look: [-(ends[1][1] - ends[0][1]) / len, (ends[1][0] - ends[0][0]) / len] as Pt };      // it looks to the left of the line
+    });
+    if (!marks.length) return;
+    const ctx = this.ctx;
+    ctx.font = `bold 12px ${getComputedStyle(document.documentElement).getPropertyValue("--font-ui") || "sans-serif"}`;
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    for (const m of marks) {
+      const color = m.id === this.hoverMark || m.id === this.markSel ? k.select : k.ink;
+      ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = m.id === this.markSel ? 2 : 1.2; ctx.setLineDash([14, 4, 2, 4]);
+      ctx.beginPath(); this.line(m.a, m.b); ctx.stroke(); ctx.setLineDash([]);
+      for (const a of markArrows(m, 26 / this.scale)) {
+        const [fx, fy] = this.toScreen(a.from), [tx, ty] = this.toScreen(a.tip), [lx, ly] = this.toScreen(a.left), [rx, ry] = this.toScreen(a.right);
+        ctx.lineWidth = 1.4; ctx.beginPath(); ctx.moveTo(fx, fy); ctx.lineTo(tx, ty); ctx.moveTo(lx, ly); ctx.lineTo(tx, ty); ctx.lineTo(rx, ry); ctx.stroke();
+      }
+      const r = 11;
+      for (const base of [m.a, m.b]) {
+        const [bx, by] = this.toScreen(base);
+        const cx = bx - m.look[0] * r * 1.2, cy = by + m.look[1] * r * 1.2;           // behind the end, the opposite way to the arrow (screen y points down)
+        ctx.fillStyle = k.paper; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = color; ctx.fillText(markLabel(m.name), cx, cy + 0.5);
+      }
+    }
+  }
+
+  private paintGrid(k: Colors): void {
+    const ctx = this.ctx;
+    const step = this.gridStep();
+    const lo = this.toWorld(0, this.height), hi = this.toWorld(this.width, 0);
+    const major = step * 5;
+    ctx.lineWidth = 1;
+    for (const [axis, from, to] of [[0, lo[0], hi[0]], [1, lo[1], hi[1]]] as const) {
+      for (let v = Math.floor(from / step) * step; v <= to + step; v += step) {
+        const isMajor = Math.abs(v / major - Math.round(v / major)) < 1e-9;
+        ctx.strokeStyle = isMajor ? k.gridMajor : k.grid;
+        ctx.beginPath();
+        if (axis === 0) { const x = Math.round(this.toScreen([v, 0])[0]) + 0.5; ctx.moveTo(x, 0); ctx.lineTo(x, this.height); }
+        else { const y = Math.round(this.toScreen([0, v])[1]) + 0.5; ctx.moveTo(0, y); ctx.lineTo(this.width, y); }
+        ctx.stroke();
+      }
+    }
+  }
+
+  /** One model element as the plan shows it: walls solid, floors a light tint, beams dashed, doors with their swing, windows with a glazing line. */
+  private paintItem(w: PlanWall, color: string, selected: boolean, k: Colors): void {
+    const ctx = this.ctx;
+    const trace = (): void => {
+      ctx.beginPath();
+      for (const ring of [w.polygon, ...(w.holes ?? [])]) { ring.forEach((p, i) => { const [x, y] = this.toScreen(p); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); }); ctx.closePath(); }
+    };
+    ctx.lineJoin = "round"; ctx.lineCap = "round";
+    if (w.category === "wall") { this.paintWall(w.polygon, color, selected); return; }
+    ctx.lineWidth = selected ? 2.5 : 1.5; ctx.strokeStyle = color; ctx.fillStyle = color;
+    if (w.category === "floor") {
+      trace(); ctx.setLineDash([]); ctx.lineWidth = selected ? 2 : 1; ctx.fillStyle = withAlpha(color, selected ? 0.18 : 0.06); ctx.fill("evenodd");
+      ctx.strokeStyle = selected ? color : withAlpha(k.muted, 0.9); ctx.stroke();
+      return;
+    }
+    if (w.category === "extrusion" || w.category === "sweep") {
+      trace(); ctx.setLineDash([]); ctx.fillStyle = withAlpha(color, selected ? 0.5 : 0.32); ctx.fill("evenodd"); ctx.stroke();
+      if (w.path && w.path.length > 1) {                                                                    // the path a sweep follows
+        ctx.beginPath(); w.path.forEach((p, i) => { const [x, y] = this.toScreen(p); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); }); if (w.closed) ctx.closePath();
+        ctx.setLineDash([2, 4]); ctx.lineWidth = 1; ctx.stroke(); ctx.setLineDash([]);
+      }
+      return;
+    }
+    if (w.category === "void") {
+      trace(); ctx.setLineDash([7, 4]); ctx.fillStyle = withAlpha(color, selected ? 0.16 : 0.06); ctx.fill("evenodd"); ctx.stroke(); ctx.setLineDash([]);
+      const xs = w.polygon.map((p) => this.toScreen(p)[0]), ys = w.polygon.map((p) => this.toScreen(p)[1]);
+      const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+      ctx.save(); trace(); ctx.clip();                                                                      // hatched, as a cut-out is drawn
+      ctx.beginPath(); for (let t = -(y1 - y0); t < x1 - x0; t += 9) { ctx.moveTo(x0 + t, y1); ctx.lineTo(x0 + t + (y1 - y0), y0); }
+      ctx.lineWidth = 0.8; ctx.stroke(); ctx.restore();
+      return;
+    }
+    if (w.category === "room") { this.paintRoom(w, trace, color, selected, k); return; }
+    if (w.category === "stair") { this.paintStair(w, trace, color, selected, k); return; }
+    if (w.category === "grid") { this.paintGrid2(w, color, selected, k); return; }
+    if (w.category === "generic") { trace(); ctx.setLineDash([]); ctx.fillStyle = withAlpha(color, selected ? 0.4 : 0.22); ctx.fill(); ctx.stroke(); return; }
+    if (w.category === "gutter") { trace(); ctx.setLineDash([]); ctx.fillStyle = withAlpha(color, selected ? 0.45 : 0.25); ctx.fill(); ctx.stroke(); return; }
+    if (w.category === "downpipe") {                                                                      // a ring with a dot: a pipe seen end-on, filled where it is cut
+      trace(); ctx.setLineDash([]); ctx.fillStyle = withAlpha(k.paper, 1); ctx.fill(); ctx.stroke();
+      const xs = w.polygon.map((p) => this.toScreen(p)[0]), ys = w.polygon.map((p) => this.toScreen(p)[1]);
+      const cx = (Math.min(...xs) + Math.max(...xs)) / 2, cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+      ctx.beginPath(); ctx.arc(cx, cy, Math.max(1.5, (Math.max(...xs) - Math.min(...xs)) / 6), 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
+      return;
+    }
+    if (w.category === "column") {
+      trace(); ctx.setLineDash([]); ctx.fillStyle = withAlpha(color, selected ? 0.55 : 0.4); ctx.fill(); ctx.stroke();
+      const a = w.polygon[0], c = w.polygon[2];
+      if (a && c) { ctx.beginPath(); this.line(a, c); const b = w.polygon[1], d = w.polygon[3]; if (b && d) this.line(b, d); ctx.lineWidth = 1; ctx.stroke(); }      // the cross of a column in plan
+      return;
+    }
+    if (w.category === "structural") { trace(); ctx.setLineDash([8, 5]); ctx.stroke(); ctx.setLineDash([]); return; }
+    ctx.setLineDash([]);
+    const poly = w.polygon;
+    const edge = (i: number, j: number): void => { const a = poly[i], b = poly[j]; if (a && b) this.line(a, b); };
+    if (w.category === "window" && w.symbol?.a && w.symbol.b) {
+      trace(); ctx.fillStyle = withAlpha(k.paper, 1); ctx.fill(); ctx.stroke();
+      ctx.beginPath(); this.line(w.symbol.a, w.symbol.b); ctx.stroke();
+      return;
+    }
+    if (w.category === "door") {
+      ctx.fillStyle = withAlpha(k.paper, 1); trace(); ctx.fill();                                   // clear the wall behind the opening
+      ctx.beginPath(); edge(3, 0); edge(1, 2); ctx.stroke();                                       // the jambs
+      const s = w.symbol;
+      if (s?.hinge && s.leaf_end && s.radius !== undefined && s.start_angle !== undefined && s.end_angle !== undefined) {
+        ctx.beginPath(); this.line(s.hinge, s.leaf_end); ctx.stroke();                              // the open leaf
+        const [cx, cy] = this.toScreen(s.hinge);
+        ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(cx, cy, s.radius * this.scale, -s.end_angle, -s.start_angle, false); ctx.stroke();   // its swing
+      }
+    }
+  }
+
+  /** A room in plan: a light tint inside its outline and, at its centre, its name, number and the area the outline gives. */
+  private paintRoom(w: PlanWall, trace: () => void, color: string, selected: boolean, k: Colors): void {
+    const ctx = this.ctx;
+    trace(); ctx.setLineDash([2, 4]); ctx.lineWidth = selected ? 2 : 1; ctx.fillStyle = withAlpha(color, selected ? 0.16 : 0.05); ctx.fill();
+    ctx.strokeStyle = selected ? color : withAlpha(k.muted, 0.9); ctx.stroke(); ctx.setLineDash([]);
+    const label = w.label as RoomLabel | undefined;
+    if (!label || !("number" in label)) return;
+    const [x, y] = this.toScreen(label.at);
+    const font = getComputedStyle(document.documentElement).getPropertyValue("--font-ui") || "sans-serif";
+    ctx.fillStyle = selected ? color : k.ink; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.font = `bold 13px ${font}`; ctx.fillText(label.name, x, y - 9);
+    ctx.font = `12px ${font}`; ctx.fillText(`${label.number} · ${label.area_m2.toLocaleString(undefined, { maximumFractionDigits: 2 })} m²`, x, y + 8);
+    ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+  }
+
+  /** A stair in plan: its outline, a line across every tread, and an arrow along its run labelled UP (the direction of climbing). */
+  private paintStair(w: PlanWall, trace: () => void, color: string, selected: boolean, k: Colors): void {
+    const ctx = this.ctx;
+    trace(); ctx.setLineDash([]); ctx.lineWidth = selected ? 2.5 : 1.5; ctx.fillStyle = withAlpha(color, selected ? 0.16 : 0.05); ctx.fill(); ctx.stroke();
+    ctx.lineWidth = 1; ctx.beginPath();
+    for (const [a, b] of w.lines ?? []) this.line(a, b);
+    ctx.stroke();
+    const arrow = w.arrow;
+    if (!arrow) return;
+    const [fx, fy] = this.toScreen(arrow.from), [tx, ty] = this.toScreen(arrow.to);
+    const angle = Math.atan2(ty - fy, tx - fx), head = 9;
+    ctx.lineWidth = 1.4; ctx.beginPath(); ctx.moveTo(fx, fy); ctx.lineTo(tx, ty);
+    ctx.moveTo(tx - head * Math.cos(angle - 0.45), ty - head * Math.sin(angle - 0.45)); ctx.lineTo(tx, ty); ctx.lineTo(tx - head * Math.cos(angle + 0.45), ty - head * Math.sin(angle + 0.45)); ctx.stroke();
+    ctx.fillStyle = selected ? color : k.ink; ctx.font = `bold 11px ${getComputedStyle(document.documentElement).getPropertyValue("--font-ui") || "sans-serif"}`;
+    ctx.textAlign = "center"; ctx.textBaseline = "bottom"; ctx.fillText(arrow.label, (fx + tx) / 2, (fy + ty) / 2 - 4); ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+  }
+
+  /** A grid line: a long dash-dot line with a lettered bubble at its start. (Named apart from the background grid.) */
+  private paintGrid2(w: PlanWall, color: string, selected: boolean, k: Colors): void {
+    const ctx = this.ctx;
+    const [a, b] = w.polygon;
+    if (!a || !b) return;
+    ctx.setLineDash([16, 4, 2, 4]); ctx.lineWidth = selected ? 2 : 1.2; ctx.beginPath(); this.line(a, b); ctx.stroke(); ctx.setLineDash([]);
+    const label = w.label as GridLabel | undefined;
+    if (!label || !("radius" in label)) return;
+    const dx = a[0] - b[0], dy = a[1] - b[1], len = Math.hypot(dx, dy) || 1;
+    const r = Math.max(10, label.radius * this.scale);
+    const [bx, by] = this.toScreen(a);
+    const cx = bx + (dx / len) * r, cy = by - (dy / len) * r;                      // beyond the start, away from the line (screen y points down)
+    ctx.fillStyle = k.paper; ctx.lineWidth = selected ? 2 : 1.2; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = selected ? color : k.ink; ctx.font = `bold ${Math.round(r * 1.05)}px ${getComputedStyle(document.documentElement).getPropertyValue("--font-ui") || "sans-serif"}`;
+    ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(label.name, cx, cy + 0.5); ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+  }
+
+  /** A model wall as seen in plan: its footprint, filled lightly so it reads as solid and is clearly the model's, not a drawn line. */
+  private paintWall(poly: Pt[], color: string, selected: boolean): void {
+    const ctx = this.ctx;
+    ctx.beginPath();
+    poly.forEach((p, i) => { const [x, y] = this.toScreen(p); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
+    ctx.closePath();
+    ctx.setLineDash([]); ctx.lineWidth = selected ? 2.5 : 1.5; ctx.strokeStyle = color;
+    ctx.fillStyle = withAlpha(color, selected ? 0.35 : 0.22);
+    ctx.fill(); ctx.stroke();
+  }
+
+  private line(a: Pt, b: Pt): void {
+    const [x1, y1] = this.toScreen(a), [x2, y2] = this.toScreen(b);
+    this.ctx.moveTo(x1, y1); this.ctx.lineTo(x2, y2);
+  }
+
+  private paintEntity(e: Entity, color: string, width: number): void {
+    const ctx = this.ctx;
+    ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = width; ctx.setLineDash([]); ctx.lineJoin = "round"; ctx.lineCap = "round";
+    const g = e.geometry;
+    if (e.kind === "circle" && Array.isArray(g["center"]) && typeof g["radius"] === "number") {
+      const [cx, cy] = this.toScreen(g["center"] as Pt);
+      ctx.beginPath(); ctx.arc(cx, cy, g["radius"] * this.scale, 0, Math.PI * 2); ctx.stroke();
+      return;
+    }
+    if (e.kind === "arc" && Array.isArray(g["center"]) && typeof g["radius"] === "number" && typeof g["start_angle"] === "number" && typeof g["end_angle"] === "number") {
+      const [cx, cy] = this.toScreen(g["center"] as Pt);
+      let end = g["end_angle"];
+      while (end < g["start_angle"]) end += Math.PI * 2;
+      ctx.beginPath(); ctx.arc(cx, cy, g["radius"] * this.scale, -end, -g["start_angle"], false); ctx.stroke();
+      return;
+    }
+    if (e.kind === "hatch") { this.paintHatch(e, color, width); return; }
+    const box = textBox(e);
+    if (box) {
+      const px = box.height * this.scale;
+      if (px < 3) return;
+      const [x, y] = this.toScreen(box.origin);
+      ctx.font = `${px}px ${getComputedStyle(document.documentElement).getPropertyValue("--font-ui") || "sans-serif"}`;
+      ctx.textBaseline = "alphabetic"; ctx.textAlign = "left";
+      ctx.fillText(String(g["text"] ?? ""), x, y);
+      return;
+    }
+    ctx.beginPath();
+    for (const [a, b] of segments(e)) this.line(a, b);
+    ctx.stroke();
+    if (e.kind === "dimension" && e.text) this.paintDimensionText(e, color);
+  }
+
+  /** A hatch: a light solid fill, or its strokes (computed by the server) in a thin line. */
+  private paintHatch(e: Entity, color: string, width: number): void {
+    const ctx = this.ctx;
+    if (e.geometry["pattern"] === "solid") {
+      ctx.beginPath();
+      for (const loop of hatchLoops(e)) {
+        loop.forEach((p, i) => { const [x, y] = this.toScreen(p); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
+        ctx.closePath();
+      }
+      ctx.fillStyle = withAlpha(color, 0.3); ctx.fill("evenodd");
+      return;
+    }
+    ctx.lineWidth = Math.min(width, 1); ctx.beginPath();
+    for (const s of e.strokes ?? []) { const [a, b] = s; if (a && b) this.line(a, b); }
+    ctx.stroke();
+  }
+
+  /** Square handles on the selected entity, and the entity as it would be if the grip being dragged were dropped now. */
+  private paintGrips(k: Colors): void {
+    const handles = this.currentGrips();
+    if (!handles) return;
+    const ctx = this.ctx;
+    if (this.grip?.moved) {
+      const e = this.entities().find((en) => en.id === this.grip?.id);
+      if (e) {
+        const g = (this.grip.list[this.grip.index] as Grip).geometry(this.grip.now);
+        ctx.save(); ctx.setLineDash([6, 4]);
+        this.paintEntity({ ...e, geometry: { ...e.geometry, ...g } }, k.select, 1.5);
+        ctx.restore();
+      }
+    }
+    ctx.setLineDash([]); ctx.lineWidth = 1.5; ctx.strokeStyle = k.select; ctx.fillStyle = k.paper;
+    handles.list.forEach((gr, i) => {
+      const [x, y] = this.toScreen(this.grip && this.grip.index === i && this.grip.moved ? this.grip.now : gr.at);
+      ctx.beginPath(); ctx.rect(x - 4.5, y - 4.5, 9, 9); ctx.fill(); ctx.stroke();
+    });
+  }
+
+  private paintDimensionText(e: Entity, color: string): void {
+    const g = e.geometry;
+    const p1 = g["p1"], p2 = g["p2"], at = g["dimline_point"];
+    if (!Array.isArray(p1) || !Array.isArray(p2) || !Array.isArray(at)) return;
+    const a = p1 as Pt, b = p2 as Pt;
+    const dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy) || 1;
+    const nx = -dy / len, ny = dx / len;
+    const off = (at[0] - a[0]) * nx + (at[1] - a[1]) * ny;                       // signed distance of the dimension line from the measured points
+    const m: Pt = [mid(a, b)[0] + nx * off, mid(a, b)[1] + ny * off];
+    const [sx, sy] = this.toScreen(m);
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.translate(sx, sy);
+    let angle = -Math.atan2(dy, dx);
+    if (angle > Math.PI / 2 || angle < -Math.PI / 2) angle += Math.PI;           // keep the figure readable, never upside down
+    ctx.rotate(angle);
+    ctx.fillStyle = color; ctx.font = `12px ${getComputedStyle(document.documentElement).getPropertyValue("--font-ui") || "sans-serif"}`;
+    ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+    ctx.fillText(formatDimension(e.text ?? ""), 0, -3);
+    ctx.restore();
+  }
+
+  /** The rubber band for the active tool: what the next click would create. */
+  private paintPreview(k: Colors): void {
+    const ctx = this.ctx;
+    const tool = this.store.tool;
+    const p = this.cursor;
+    if (!p || this.pts.length === 0 || tool === "select") return;
+    ctx.strokeStyle = k.select; ctx.fillStyle = k.select; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]);
+    ctx.beginPath();
+    const first = this.pts[0] as Pt;
+    if (tool === "line" || tool === "polyline" || tool === "floor" || tool === "room" || tool === "section" || tool === "grid" || tool === "stair" || tool === "wall" || tool === "extrude" || tool === "void" || tool === "sweep") {
+      const all = [...this.pts, p, ...((tool === "floor" || tool === "room" || tool === "extrude" || tool === "void") && this.pts.length > 1 ? [first] : [])];
+      for (let i = 0; i + 1 < all.length; i++) this.line(all[i] as Pt, all[i + 1] as Pt);
+      const from = this.pts[this.pts.length - 1] as Pt;
+      if (tool === "wall" && dist(from, p) > 1e-9) { this.tracePolygon(wallBand(from, p, this.store.wallOptions.thickness / this.mmPerUnit())); ctx.fillStyle = withAlpha(k.select, 0.14); ctx.fill(); }
+    } else if (tool === "rotate") {
+      this.line(first, this.pts.length > 1 ? (this.pts[1] as Pt) : p);
+      if (this.pts.length > 1) {
+        this.line(first, p);
+        const angle = angleBetween(first, this.pts[1] as Pt, p);
+        ctx.stroke(); ctx.beginPath(); ctx.fillStyle = withAlpha(k.select, 0.14);
+        for (const w of this.data?.model ?? []) if (this.turnable().includes(w.id)) this.tracePolygon(w.polygon.map((q) => rotateAbout(q, first, angle)));
+        ctx.fill();
+      }
+    } else if (tool === "rectangle") {
+      const r = normaliseRect(first, p);
+      const [x, y] = this.toScreen([r.corner[0], r.corner[1] + r.height]);
+      ctx.rect(x, y, r.width * this.scale, r.height * this.scale);
+    } else if (tool === "circle") {
+      const [cx, cy] = this.toScreen(first);
+      ctx.arc(cx, cy, dist(first, p) * this.scale, 0, Math.PI * 2);
+      this.line(first, p);
+    } else if (tool === "mirror") {
+      this.line(first, p);
+    } else if (tool === "dimension") {
+      if (this.pts.length === 1) this.line(first, p);
+      else { const b = this.pts[1] as Pt; this.line(first, b); this.line(first, p); this.line(b, p); }
+    }
+    ctx.stroke();
+    const readout = this.previewReadout(first, p);
+    if (readout) {
+      const [sx, sy] = this.toScreen(p);
+      ctx.setLineDash([]); ctx.font = `12px ${getComputedStyle(document.documentElement).getPropertyValue("--font-ui") || "sans-serif"}`;
+      const w = ctx.measureText(readout).width + 10;
+      ctx.fillStyle = k.paper; ctx.fillRect(sx + 14, sy + 14, w, 20);
+      ctx.strokeStyle = k.select; ctx.strokeRect(sx + 14.5, sy + 14.5, w, 20);
+      ctx.fillStyle = k.ink; ctx.textBaseline = "middle"; ctx.textAlign = "left"; ctx.fillText(readout, sx + 19, sy + 24.5);
+    }
+  }
+
+  private previewReadout(first: Pt, p: Pt): string {
+    const u = this.store.unit;
+    const f = (n: number): string => `${n.toLocaleString(undefined, { maximumFractionDigits: 1 })} ${u}`;
+    switch (this.store.tool) {
+      case "rotate": return this.pts.length > 1 ? `${((angleBetween(first, this.pts[1] as Pt, p) * 180) / Math.PI).toFixed(1)}°` : "";
+      case "line": case "polyline": case "floor": case "room": case "grid": case "stair": case "wall": case "extrude": case "void": case "sweep": {
+        const from = this.pts[this.pts.length - 1] as Pt;
+        const deg = (Math.atan2(p[1] - from[1], p[0] - from[0]) * 180) / Math.PI;
+        return `${f(dist(from, p))}  ${deg.toFixed(1)}°`;
+      }
+      case "rectangle": { const r = normaliseRect(first, p); return `${f(r.width)} × ${f(r.height)}`; }
+      case "circle": return `R ${f(dist(first, p))}`;
+      case "dimension": return this.pts.length === 1 ? f(dist(first, p)) : f(dist(this.pts[0] as Pt, this.pts[1] as Pt));
+      default: return "";
+    }
+  }
+
+  private paintMoveGhost(k: Colors): void {
+    if (!this.drag) return;
+    const dx = this.drag.now[0] - this.drag.start[0], dy = this.drag.now[1] - this.drag.start[1];
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.translate(dx * this.scale, -dy * this.scale);
+    ctx.globalAlpha = 0.55;
+    for (const e of this.entities()) if (this.drag.ids.includes(e.id)) this.paintEntity(e, k.select, 1.5);
+    ctx.setLineDash([6, 4]); ctx.strokeStyle = k.select; ctx.fillStyle = withAlpha(k.select, 0.14); ctx.lineWidth = 1.5 / 1;
+    for (const w of this.data?.model ?? []) if (this.drag.ids.includes(w.id) && w.category !== "grid") { ctx.beginPath(); this.tracePolygon(w.polygon); ctx.fill(); ctx.stroke(); }
+    ctx.restore();
+  }
+
+  private paintSnap(snap: Snap, k: Colors): void {
+    const [x, y] = this.toScreen(snap.point);
+    const ctx = this.ctx;
+    ctx.setLineDash([]); ctx.lineWidth = 1.5; ctx.strokeStyle = snap.kind === "grid" ? k.muted : k.accent;
+    ctx.beginPath();
+    if (snap.kind === "end") ctx.rect(x - 5, y - 5, 10, 10);
+    else if (snap.kind === "mid") { ctx.moveTo(x, y - 6); ctx.lineTo(x + 6, y + 5); ctx.lineTo(x - 6, y + 5); ctx.closePath(); }
+    else if (snap.kind === "center") ctx.arc(x, y, 5, 0, Math.PI * 2);
+    else if (snap.kind === "intersection") { ctx.moveTo(x - 5, y - 5); ctx.lineTo(x + 5, y + 5); ctx.moveTo(x + 5, y - 5); ctx.lineTo(x - 5, y + 5); }
+    else { ctx.moveTo(x - 4, y); ctx.lineTo(x + 4, y); ctx.moveTo(x, y - 4); ctx.lineTo(x, y + 4); }
+    ctx.stroke();
+  }
+
+  private updateHint(): void {
+    const n = this.pts.length;
+    const hints: Record<Tool, string> = {
+      select: this.data?.projection ? "Click an element to select it. Sections and elevations are drawn from the model: change the model to change them." : "Click to select, drag a window to select several, drag an element to move it. Drag the square grips to stretch a wall or a section line, the round one to rotate. Click a wall's length to type a new one. Double-click a section line to open that section.",
+      line: n ? "Pick the next point. Shift keeps it horizontal or vertical. Esc ends the chain." : "Pick the first point of the line.",
+      polyline: n ? "Pick the next point. Enter or double-click finishes, C closes it, Esc cancels." : "Pick the first point of the polyline.",
+      rectangle: n ? "Pick the opposite corner." : "Pick the first corner.",
+      circle: n ? "Pick a point on the circle." : "Pick the centre.",
+      dimension: n === 0 ? "Pick the first point to measure." : n === 1 ? "Pick the second point." : "Pick where the dimension line goes.",
+      text: "Click where the text starts.",
+      wall: n ? "Pick the next corner of the wall chain. Shift keeps it straight. Double-click, right-click or Esc ends." : "Pick the start of the wall. Walls snap to the ends and middles of other walls.",
+      rotate: !this.turnable().length ? "Select what to rotate first, then choose Rotate." : n === 0 ? "Pick the centre of rotation." : n === 1 ? "Pick a point to start the turn from." : "Pick where that direction should end up.",
+      offset: this.target ? "Click the side to copy it to." : "Click a line, polyline, rectangle or circle, then enter the distance.",
+      trim: "Click the part of a line or polyline to remove. It is cut back to the nearest crossing curves.",
+      extend: "Click near the end of a line or open polyline to run it on to the next curve.",
+      fillet: this.target ? "Click the second line (on the side to keep)." : "Click the first line near the end to keep. Radius 0 makes a sharp corner.",
+      mirror: this.selectedIds().length ? (n ? "Pick the second point of the mirror line." : "Pick the first point of the mirror line.") : "Select what to mirror first, then choose Mirror.",
+      hatch: "Click inside a closed shape (rectangle, closed polyline or circle) to hatch it.",
+      door: "Click on a wall to place a door. Change its size in Properties.",
+      window: "Click on a wall to place a window. Change its size and sill in Properties.",
+      grid: n ? "Pick the other end of the grid line." : "Pick the first end of the grid line. Grids show on every floor plan.",
+      stair: n ? "Pick the end of the run. The stair climbs from this level to the next one up." : "Pick where the stair starts. It runs from this level to the next one up.",
+      family: this.store.family ? `Click to place “${this.store.family.name}”. Esc stops placing.` : "Choose a family first (Insert, then Family).",
+      tag: this.tagOf ? "Click where the tag goes." : "Click the element to tag. The tag shows its data and follows it when the model changes.",
+      floor: n ? "Pick the next corner. Enter or double-click finishes, Esc cancels." : "Pick the first corner of the floor.",
+      room: n ? "Pick the next corner of the room. Enter or double-click finishes, Esc cancels." : "Pick the first corner of the room, along the walls.",
+      column: "Click where the column goes. Change its size and height in Properties.",
+      extrude: n ? "Pick the next corner. Enter or double-click finishes, Esc cancels." : "Pick the first corner of the outline to extrude. Set its depth and base above.",
+      void: n ? "Pick the next corner of the cut. Enter or double-click finishes, Esc cancels." : "Pick the first corner of the void. It cuts what it passes through (see Properties).",
+      sweep: n ? "Pick the next point of the path. Enter or double-click finishes, C closes it, Esc cancels." : "Pick the first point of the path the profile follows.",
+      roof: "", beam: "",
+      section: n ? "Pick the end of the section line. It looks to the left of the line you draw (flip it in Properties)." : "Pick the start of the section line.",
+    };
+    this.hint.textContent = hints[this.store.tool];
+  }
+
+  /** Public for tests of the view's geometry: where a world point lands on screen. */
+  screenOf(p: Pt): Pt { return this.toScreen(p); }
+  /** Where the handles of the selection are on screen, and the temporary length label (read by the browser tests). */
+  handleScreens(): Array<{ shape: string; at: Pt }> { return this.handles().map((hd) => ({ shape: hd.shape, at: this.toScreen(hd.at) })); }
+  lengthLabelScreen(): Pt | null { const b = this.lengthBox; return b ? [b.x + b.w / 2, b.y + b.h / 2] : null; }
+  /** The bounds of what is drawn, in world units. */
+  contentBounds(): [Pt, Pt] | null {
+    const all = this.entities().map(entityBounds).filter((b): b is [Pt, Pt] => !!b);
+    if (!all.length) return null;
+    return [[Math.min(...all.map((b) => b[0][0])), Math.min(...all.map((b) => b[0][1]))], [Math.max(...all.map((b) => b[1][0])), Math.max(...all.map((b) => b[1][1]))]];
+  }
+}

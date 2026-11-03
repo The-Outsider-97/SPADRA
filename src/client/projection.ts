@@ -1,0 +1,141 @@
+/** Sections and elevations on the client: what is under a point, what can be snapped to, and how a projection becomes drawing paths.
+ *  Pure functions, so the canvas editor and the sheet viewer draw the very same thing and the maths is testable without a browser. */
+import type { ProjItem, Projection, Pt, SectionMark } from "./types.js";
+
+const EPS = 1e-9;
+
+/** A flat triangle ``[x0, y0, x1, y1, x2, y2]``. */
+export type Tri = readonly number[];
+
+export function inTriangle(p: Pt, t: Tri, tolerance = 0): boolean {
+  const [x0 = 0, y0 = 0, x1 = 0, y1 = 0, x2 = 0, y2 = 0] = t;
+  const side = (ax: number, ay: number, bx: number, by: number): number => (bx - ax) * (p[1] - ay) - (by - ay) * (p[0] - ax);
+  const d1 = side(x0, y0, x1, y1), d2 = side(x1, y1, x2, y2), d3 = side(x2, y2, x0, y0);
+  const neg = d1 < -EPS || d2 < -EPS || d3 < -EPS, pos = d1 > EPS || d2 > EPS || d3 > EPS;
+  if (!(neg && pos)) return true;
+  return tolerance > 0 && Math.min(segDist(p, x0, y0, x1, y1), segDist(p, x1, y1, x2, y2), segDist(p, x2, y2, x0, y0)) <= tolerance;
+}
+
+function segDist(p: Pt, ax: number, ay: number, bx: number, by: number): number {
+  const dx = bx - ax, dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  const t = len2 < EPS ? 0 : Math.max(0, Math.min(1, ((p[0] - ax) * dx + (p[1] - ay) * dy) / len2));
+  return Math.hypot(p[0] - (ax + t * dx), p[1] - (ay + t * dy));
+}
+
+/** Even-odd containment in a set of loops: a point in a hole is outside. */
+export function insideLoops(p: Pt, loops: readonly (readonly Pt[])[]): boolean {
+  let inside = false;
+  for (const loop of loops) {
+    for (let i = 0, j = loop.length - 1; i < loop.length; j = i++) {
+      const a = loop[i], b = loop[j];
+      if (!a || !b) continue;
+      if ((a[1] > p[1]) !== (b[1] > p[1]) && p[0] < ((b[0] - a[0]) * (p[1] - a[1])) / (b[1] - a[1]) + a[0]) inside = !inside;
+    }
+  }
+  return inside;
+}
+
+/** True when a point is on what an item shows: its cut, a surface facing the viewer, or (within ``tolerance``) one of its drawn lines. */
+export function itemContains(item: ProjItem, p: Pt, tolerance = 0): boolean {
+  if (item.cut.length && insideLoops(p, item.cut)) return true;
+  for (const t of item.tris) if (inTriangle(p, t, 0)) return true;
+  if (tolerance > 0) {
+    for (const e of item.edges) if (segDist(p, e[0] ?? 0, e[1] ?? 0, e[2] ?? 0, e[3] ?? 0) <= tolerance) return true;
+    if (nearLoops(p, item.cut, tolerance)) return true;
+  }
+  return false;
+}
+
+function nearLoops(p: Pt, loops: readonly (readonly Pt[])[], tolerance: number): boolean {
+  if (tolerance <= 0) return false;
+  for (const loop of loops) for (let i = 0; i < loop.length; i++) {
+    const a = loop[i], b = loop[(i + 1) % loop.length];
+    if (a && b && segDist(p, a[0], a[1], b[0], b[1]) <= tolerance) return true;
+  }
+  return false;
+}
+
+/** The element under a point: the one painted last (nearest the viewer) wins, and a cut beats anything beyond it. */
+export function projectionAt(projection: Projection, p: Pt, tolerance = 0): string | null {
+  for (let i = projection.items.length - 1; i >= 0; i--) {
+    const item = projection.items[i];
+    if (item && item.cut.length && (insideLoops(p, item.cut) || nearLoops(p, item.cut, tolerance))) return item.id;
+  }
+  for (let i = projection.items.length - 1; i >= 0; i--) {
+    const item = projection.items[i];
+    if (item && itemContains(item, p, tolerance)) return item.id;
+  }
+  return null;
+}
+
+/** Points worth snapping to: the corners of every cut loop and the end points of every drawn line. */
+export function snapPolygons(projection: Projection): Pt[][] {
+  const out: Pt[][] = [];
+  for (const item of projection.items) {
+    for (const loop of item.cut) out.push(loop);
+    for (const e of item.edges) out.push([[e[0] ?? 0, e[1] ?? 0], [e[2] ?? 0, e[3] ?? 0]]);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------- labels
+/** "Level 02", 3200 (mm) → "Level 02  +3.200". */
+export function levelLabel(name: string, z: number, mmPerUnit: number): string {
+  const m = (z * mmPerUnit) / 1000;
+  return `${name}  ${m < 0 ? "-" : "+"}${Math.abs(m).toFixed(3)}`;
+}
+
+/** The letter in a section bubble: "Section A-A" → "A"; any other name → its first letter. */
+export function markLabel(name: string): string {
+  const m = /^Section\s+(\S+?)-\1$/i.exec(name.trim());
+  return (m?.[1] ?? name.trim().charAt(0) ?? "?").toUpperCase();
+}
+
+/** The corners of the arrowheads of a section mark, in drawing units. ``size`` is the arrow's length in the same units. */
+export function markArrows(mark: SectionMark, size: number): Array<{ from: Pt; tip: Pt; left: Pt; right: Pt }> {
+  const [lx, ly] = mark.look;
+  const out: Array<{ from: Pt; tip: Pt; left: Pt; right: Pt }> = [];
+  for (const base of [mark.a, mark.b]) {
+    const tip: Pt = [base[0] + lx * size, base[1] + ly * size];
+    const back: Pt = [tip[0] - lx * size * 0.35, tip[1] - ly * size * 0.35];
+    out.push({ from: base, tip, left: [back[0] - ly * size * 0.2, back[1] + lx * size * 0.2], right: [back[0] + ly * size * 0.2, back[1] - lx * size * 0.2] });
+  }
+  return out;
+}
+
+// ------------------------------------------------------------------------------------------------------------------- SVG paths
+const r = (n: number): string => String(Math.round(n * 1000) / 1000);
+
+/** All of an item's surfaces facing the viewer as one path (filled non-zero, so there are no seams between triangles). */
+export function surfacePath(item: ProjItem, map: (p: Pt) => Pt): string {
+  return item.tris.map((t) => {
+    const a = map([t[0] ?? 0, t[1] ?? 0]), b = map([t[2] ?? 0, t[3] ?? 0]), c = map([t[4] ?? 0, t[5] ?? 0]);
+    return `M${r(a[0])} ${r(a[1])}L${r(b[0])} ${r(b[1])}L${r(c[0])} ${r(c[1])}Z`;
+  }).join("");
+}
+
+export function edgePath(item: ProjItem, map: (p: Pt) => Pt): string {
+  return item.edges.map((e) => {
+    const a = map([e[0] ?? 0, e[1] ?? 0]), b = map([e[2] ?? 0, e[3] ?? 0]);
+    return `M${r(a[0])} ${r(a[1])}L${r(b[0])} ${r(b[1])}`;
+  }).join("");
+}
+
+/** An item's cut as one path, to be filled even-odd so openings are holes. */
+export function cutPath(item: ProjItem, map: (p: Pt) => Pt): string {
+  return item.cut.map((loop) => loop.map((p, i) => { const q = map(p); return `${i ? "L" : "M"}${r(q[0])} ${r(q[1])}`; }).join("") + "Z").join("");
+}
+
+/** How strongly an element's cut is filled: structure is solid, glazing and doors are lighter so they read as different from the wall. */
+export function cutWeight(category: string): number {
+  return category === "window" ? 0.25 : category === "door" ? 0.55 : 1;
+}
+
+/** The levels worth drawing: those within about 300 mm of what the view shows, so a roof level far above a low building is not drawn in mid air. */
+export function visibleLevels(projection: Projection, mmPerUnit: number): Array<{ name: string; z: number }> {
+  const b = projection.bounds;
+  if (!b) return [];
+  const slack = 300 / mmPerUnit;
+  return projection.levels.filter((l) => l.z >= b[0][1] - slack && l.z <= b[1][1] + slack);
+}
