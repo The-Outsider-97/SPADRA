@@ -1,0 +1,11 @@
+# SPADRA settings, read through SLAI's ConfigRepository (applications/tools/config.py). Every value is optional; the numbers are the defaults.
+# Personal choices (theme, text size, units shown) are saved from the application, not here.
+# This file replaces config.yaml, which is still read if this file is missing.
+app:
+  port: 8770                  # where SPADRA listens (127.0.0.1 only)
+  max_request_bytes: 4194304  # largest request body the server accepts
+  undo_depth: 100             # how many edits can be undone per project
+  max_scene_vertices: 400000  # the 3D view refuses to draw more than this many vertices in one go
+  recent_projects: 12         # how many projects the File menu remembers
+  backups_kept: 5             # how many previous versions are kept inside a project each time it is saved again
+  plan: standard              # which resource plan in spadra_plans.yaml applies (it can only lower the values above)

@@ -1,0 +1,27 @@
+# SPADRA resource plans. A plan sets the largest value each setting in spadra_config.yaml may take; the value used is
+# min(configured value, plan limit). Plans are about memory and disk use on a computer. They are not licences, prices or feature switches,
+# and no plan removes a tool. Add a plan here and name it under "plan:" in spadra_config.yaml to use it.
+# Settings a plan may limit: max_request_bytes, undo_depth, max_scene_vertices, recent_projects, backups_kept. A setting left out is
+# limited only by its own range (see SETTINGS_FIELDS in utils/config_loader.py).
+schema_version: 1
+
+plans:
+  standard:
+    display_name: Standard
+    description: For a desktop or laptop computer. Each setting may take any value in its own range.
+    limits:
+      max_request_bytes: 67108864
+      undo_depth: 10000
+      max_scene_vertices: 20000000
+      recent_projects: 100
+      backups_kept: 50
+
+  compact:
+    display_name: Compact
+    description: For a computer with little memory or disk space. A smaller 3D scene, a shorter undo history and fewer backups.
+    limits:
+      max_request_bytes: 8388608
+      undo_depth: 50
+      max_scene_vertices: 150000
+      recent_projects: 12
+      backups_kept: 2

@@ -1,0 +1,8 @@
+# SPADRA settings, read through SLAI's ConfigRepository. Every value is optional; the numbers below are the defaults.
+# Personal choices (theme, text size, units shown) are saved from the application, not here.
+app:
+  port: 8770                  # where SPADRA listens (127.0.0.1 only)
+  max_request_bytes: 4194304  # largest request body the server accepts
+  undo_depth: 100             # how many edits can be undone per project
+  max_scene_vertices: 400000  # the 3D view refuses to draw more than this many vertices in one go
+  recent_projects: 12         # how many projects the File menu remembers
