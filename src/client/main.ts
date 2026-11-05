@@ -10,14 +10,18 @@ async function start(): Promise<void> {
   applyAppearance(loadAppearance(), "soft");
   registerSpadraGlyphs();
   const root = $("#root");
+  let initialized = false;
   try {
     await store.init();
+    initialized = true;
   } catch (error) {
+    window.dispatchEvent(new CustomEvent('slai:startup-error', { detail: error instanceof Error ? error.message : "SPADRA could not start." }));
     toast(error instanceof Error ? error.message : "SPADRA could not start.", { kind: "error", timeoutMs: 0 });
   }
   const shell = new Shell();
   root.replaceChildren(shell.el);
-  if (!store.project) void (async () => { await openOrNew(); })();
+  if (initialized) window.dispatchEvent(new Event('slai:ready'));
+  if (initialized && !store.project) void (async () => { await openOrNew(); })();
 }
 
 /** With no project open, offer the two ways to begin. */
