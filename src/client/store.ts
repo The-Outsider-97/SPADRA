@@ -487,12 +487,12 @@ export class Store {
   }
 
   /** The open sheet as a .sldc file (the sheet as read, plus everything it draws, so that opening the file gives the sheet back). */
-  async exportSheet(previewPng?: string): Promise<{ blob: Blob; filename: string } | null> {
+  async exportSheet(previewPng?: string, previewSvg?: string): Promise<{ blob: Blob; filename: string } | null> {
     const tab = this.tab;
     if (!tab || tab.ref.kind !== "sheet") { toast("Open a sheet to export it as .sldc.", { kind: "info" }); return null; }
-    if (!previewPng) { toast("The printable sheet preview is required for SLDC export.", { kind: "error" }); return null; }
+    if (!previewPng || !previewSvg) { toast("The printable vector sheet and its image preview are required for SLDC export.", { kind: "error" }); return null; }
     return this.guard(async () => {
-      const result = await this.api.post<{ data: string; filename: string }>(`/export/sheet/${tab.ref.id}`, { preview_png: previewPng, revision: this.project?.revision });
+      const result = await this.api.post<{ data: string; filename: string }>(`/export/sheet/${tab.ref.id}`, { preview_png: previewPng, preview_svg: previewSvg, revision: this.project?.revision });
       const bytes = Uint8Array.from(atob(result.data), (ch) => ch.charCodeAt(0));
       return { blob: new Blob([bytes], { type: "application/x-slai-sldc+zip" }), filename: result.filename };
     }, "Exporting the sheet");

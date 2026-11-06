@@ -259,7 +259,7 @@ export function editCommand(p, key, value) {
             return { op: "sheet.set_note", params: { id: ref["sheet"], note: key.slice(5), key: "text", value } };
         return { op: "sheet.set", params: { id: ref["sheet"], key, value } };
     }
-    if (p.kind === "view" && (key === "cut_reference" || key === "cut_offset"))
+    if (p.kind === "view" && ["cut_reference", "cut_offset", "range_top", "range_bottom", "range_depth"].includes(key))
         return { op: "view.set_cut_plane", params: { id: ref["view"], key, value } };
     if (p.kind === "view" && key === "name")
         return { op: "view.rename", params: { id: ref["view"], name: value } };

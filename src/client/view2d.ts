@@ -1249,6 +1249,11 @@ export class DrawingView {
     if (w.category === "floor" || w.category === "roof") {
       trace(); ctx.setLineDash([]); ctx.lineWidth = selected ? 2 : 1; ctx.fillStyle = withAlpha(color, selected ? 0.18 : 0.06); ctx.fill("evenodd");
       ctx.strokeStyle = selected ? color : withAlpha(k.muted, 0.9); ctx.stroke();
+      for (const poly of w.cut_polygons ?? []) {
+        ctx.beginPath(); poly.forEach((p, i) => { const [x, y] = this.toScreen(p); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); }); ctx.closePath();
+        ctx.fillStyle = withAlpha(color, selected ? 0.35 : 0.2); ctx.fill(); ctx.strokeStyle = color; ctx.stroke();
+        if (w.hatch) this.paintCutHatch([poly], w.hatch, color);
+      }
       return;
     }
     if (w.category === "foundation") {                                                                      // below the cut plane, so drawn as hidden outline with a light tint
@@ -1295,6 +1300,12 @@ export class DrawingView {
     ctx.setLineDash([]);
     const poly = w.polygon;
     const edge = (i: number, j: number): void => { const a = poly[i], b = poly[j]; if (a && b) this.line(a, b); };
+    if ((w.category === "window" || w.category === "door") && w.cut === false) {
+      // The wall is uncut at this elevation. Show an in-range opening as a
+      // projected outline, without erasing the continuous wall behind it.
+      trace(); ctx.setLineDash(w.overhead ? [6, 3] : [2, 4]); ctx.lineWidth = 1; ctx.stroke(); ctx.setLineDash([]);
+      return;
+    }
     if (w.category === "window" && w.symbol?.a && w.symbol.b) {
       trace(); ctx.fillStyle = withAlpha(k.paper, 1); ctx.fill(); ctx.stroke();
       ctx.beginPath(); this.line(w.symbol.a, w.symbol.b); ctx.stroke();

@@ -77,6 +77,10 @@ export interface StairArrow { from: Pt; to: Pt; label: string }
 export interface PlanWall {
   id: string; category: string; name: string; polygon: Pt[]; symbol?: PlanSymbol; cut?: boolean; label?: RoomLabel | GridLabel;
   lines?: Array<[Pt, Pt]>; arrow?: StairArrow; hatch?: HatchSpec | null;
+  /** Exact horizontal mesh intersections at this plan's configured cut elevation. */
+  cut_polygons?: Pt[][];
+  /** An opening intersecting the plan cut has solid jambs; an uncut opening in view range is projected. */
+  overhead?: boolean;
   /** A layered wall in plan: each layer's band, in pieces cut around the openings that layer inherits. */
   bands?: Array<{ layer: string; name: string; material: string; polygons: Pt[][]; hatch?: HatchSpec | null }>;
   /** Rings cut out of the polygon (a floor or extrusion with voids through it, or the inside of a closed sweep) and a sweep's centre line. */

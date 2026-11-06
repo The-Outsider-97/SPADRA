@@ -190,10 +190,10 @@ export class Shell {
   }
 
   private async exportSheetFile(): Promise<void> {
-    let preview: string;
-    try { preview = await this.sheet.printablePng(); }
+    let preview: string, vectors: string;
+    try { vectors = this.sheet.printableSvg(); preview = await this.sheet.printablePng(vectors); }
     catch (error) { toast(error instanceof Error ? error.message : "The sheet could not be rendered.", { kind: "error" }); return; }
-    const file = await store.exportSheet(preview);
+    const file = await store.exportSheet(preview, vectors);
     if (file) { saveBlob(file.blob, file.filename); store.setStatus(`Exported ${file.filename}`); }
   }
 

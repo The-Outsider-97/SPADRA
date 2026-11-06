@@ -262,6 +262,69 @@ class Export(Layout):
         self.assertEqual([(v["x"], v["y"], v["scale"]) for v in reopened["viewports"]],
                          [(v["x"], v["y"], v["scale"]) for v in self.p.sheet_data(self.sheet)["viewports"]])
 
+    def test_graphical_export_retains_real_svg_vectors_with_a_verified_page_size(self):
+        from applications.SPADRA import sheets as SH
+        from src.utils import sldc as S
+        from .test_sheet_contents import png
+        self.place(scale="1:100")
+        # A concrete vector drawing: not a text-only description or a raster-only package.
+        svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 841 594" '
+               'width="3179" height="2245"><path d="M40 40L800 40L800 550Z" '
+               'fill="none" stroke="#111"/><text x="50" y="65">A102</text></svg>')
+        package_bytes, _ = SH.to_sldc(self.p, self.sheet, png(841, 594), svg)
+        package = S.loads_package(package_bytes)
+        saved = SH.read_sldc(package_bytes)
+        self.assertEqual(saved["vector_svg"], svg)
+        self.assertEqual(saved["sheet"]["width"], 841)
+        self.assertEqual(saved["sheet"]["height"], 594)
+        self.assertEqual(package.document["sections"][0]["page"]["width_mm"], 841)
+        self.assertIn("<path", saved["vector_svg"])
+        self.assertTrue(SH.verify_sldc(self.p, package_bytes, self.sheet)["identical"])
+
+    def test_graphical_export_rejects_wrong_sized_or_unsafe_svg(self):
+        from applications.SPADRA import sheets as SH
+        from .test_sheet_contents import png
+        valid_png = png(841, 594)
+        for xml in (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 210 297"/>',
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 841 594"><script>alert(1)</script></svg>',
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 841 594"><image href="https://example.com/x.png"/></svg>',
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 841 594"><path style="fill:url(https://example.com/gradient)"/></svg>',
+            'not SVG',
+        ):
+            with self.subTest(xml=xml[:80]), self.assertRaises(BadRequest):
+                SH.to_sldc(self.p, self.sheet, valid_png, xml)
+
+    def test_vector_page_can_be_independently_rendered_to_an_a1_pdf(self):
+        """Independent Inkscape/PDF parser check; does not substitute for the live browser comparison."""
+        import io
+        import shutil
+        import subprocess
+        import tempfile
+        from pathlib import Path
+        from applications.SPADRA import sheets as SH
+        from .test_sheet_contents import png
+        if not shutil.which("inkscape"):
+            self.skipTest("Inkscape is unavailable for independent vector PDF rendering")
+        try:
+            from pypdf import PdfReader
+        except ImportError:
+            self.skipTest("pypdf is unavailable for independent PDF page measurement")
+        svg = ('<svg xmlns="http://www.w3.org/2000/svg" width="3179.52756" height="2245.03937" '
+               'viewBox="0 0 841 594"><rect x="15" y="15" width="811" height="564" '
+               'fill="white" stroke="black"/><path d="M100 100L500 100L500 430Z" '
+               'stroke="black" fill="none"/><text x="120" y="140">SECTION A-A</text></svg>')
+        out, _ = SH.to_sldc(self.p, self.sheet, png(841, 594), svg)
+        preserved = SH.read_sldc(out)["vector_svg"]
+        with tempfile.TemporaryDirectory(prefix="spadra-sheet-parity-") as directory:
+            pdf = Path(directory) / "A1.pdf"
+            proc = subprocess.run(["inkscape", "--pipe", f"--export-filename={pdf}"], input=preserved.encode(), capture_output=True, timeout=30)
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode(errors="replace"))
+            page = PdfReader(io.BytesIO(pdf.read_bytes())).pages[0]
+            self.assertAlmostEqual(float(page.mediabox.width) * 25.4 / 72, 841, delta=0.35)
+            self.assertAlmostEqual(float(page.mediabox.height) * 25.4 / 72, 594, delta=0.35)
+            self.assertGreater(len(page.get_contents().get_data()), 150, "the PDF must contain drawn content")
+
     def test_sheet_export_refuses_a_preview_with_incorrect_page_proportions(self):
         from applications.SPADRA import sheets as SH
         from .test_sheet_contents import png
@@ -342,12 +405,14 @@ class OverHttp(ServerCase):
         sid = a.cmd("sheet.create", {"name": "Plan"})["result"]["id"]
         self.assertEqual(a.call("GET", f"/api/export/sheet/{sid}")[0], 409)
         project_revision = a.get("/api/project/tree")["project"]["revision"]
-        result = a.post(f"/api/export/sheet/{sid}", {"preview_png": base64.b64encode(png(841, 594)).decode(), "revision": project_revision})
+        svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 841 594"><path d="M20 20L820 20"/></svg>'
+        result = a.post(f"/api/export/sheet/{sid}", {"preview_png": base64.b64encode(png(841, 594)).decode(), "preview_svg": svg, "revision": project_revision})
         raw = base64.b64decode(result["data"])
         package = sldc.loads_package(raw)
         self.assertEqual(package.document["extensions"]["spadra.sheet"]["format"], "spadra.sheet.v1")
         self.assertEqual(package.document["sections"][0]["page"]["width_mm"], 841.0)
         self.assertEqual(package.document["blocks"][0]["type"], "figure")
+        self.assertEqual(package.document["extensions"]["spadra.sheet"]["vector_svg"], svg)
         check = a.get(f"/api/export/sheet/{sid}/verify")
         self.assertEqual((check["identical"], check["differences"]), (True, []))
         self.assertEqual(a.call("GET", "/api/export/sheet/nope?legacy_text=1")[0], 404)

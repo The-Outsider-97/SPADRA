@@ -531,8 +531,11 @@ def export_sheet_printable(app: SpadraApp, req: Request) -> Any:
     from . import sheets as SH
     body = req.json()
     raw = body.get("preview_png")
+    vector = body.get("preview_svg")
     if not isinstance(raw, str) or len(raw) > 12_000_000:
         raise BadRequest("A printable PNG preview of the sheet is required")
+    if not isinstance(vector, str) or not vector.startswith("<svg") or len(vector.encode("utf-8")) > 5_000_000:
+        raise BadRequest("The full printable SVG sheet is required and must be at most 5 MB")
     try:
         preview = base64.b64decode(raw, validate=True)
     except (ValueError, binascii.Error) as exc:
@@ -542,7 +545,7 @@ def export_sheet_printable(app: SpadraApp, req: Request) -> Any:
         if body.get("revision") != project.revision:
             from ..tools.errors import Conflict
             raise Conflict("The project changed while the sheet was being exported; try again")
-        data, name = SH.to_sldc(project, req.params["sheet"], preview)
+        data, name = SH.to_sldc(project, req.params["sheet"], preview, vector)
         return {"data": base64.b64encode(data).decode("ascii"), "filename": name}
 
 
@@ -562,6 +565,30 @@ def layer_preview(app: SpadraApp, req: Request) -> Any:
     with app.lock:
         ids = [i for i in str(req.query.get("ids", "")).split(",") if i]
         return app.require().layer_preview(req.params["id"], req.params["layer"], str(req.query.get("openings", "all")), ids)
+
+
+@router.route("POST", "/api/model/{id}/layers/preview")
+def preview_new_layer(app: SpadraApp, req: Request) -> Any:
+    """A real, read-only geometry preview: execute the exact command in the project's throw-away copy.
+
+    No revision, undo history, model geometry or file in the user's project is touched.
+    Any collision/geometry error is the same error the real commit would raise.
+    """
+    from . import documentation as D
+    with app.lock:
+        project = app.require()
+        params = req.json()
+        oid = req.params["id"]
+        before = D.world_mesh(project, oid)
+        draft = project.scratch()
+        result = draft.execute("model.add_layer", {**params, "id": oid})["result"]
+        after = D.world_mesh(draft, oid)
+        if len(after[1]) > 25000:
+            from ..tools.errors import LimitExceeded
+            raise LimitExceeded("The layer preview is too complex to draw")
+        return {"revision": project.revision, "layer": result["layer"],
+                "before": {"vertices": before[0], "faces": before[1]},
+                "after": {"vertices": after[0], "faces": after[1]}}
 
 
 @router.route("GET", "/api/export/schedule/{view}")

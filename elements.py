@@ -1355,12 +1355,41 @@ def _wall_piece(fr: Mapping[str, Any], x0: float, x1: float, f: float) -> list[l
     return [[(fr["start"][0] + c * x - s * y) * f, (fr["start"][1] + s * x + c * y) * f] for x, y in corners]
 
 
-def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | None = None, show_opening: bool = True, show_hatching: bool = True) -> list[dict[str, Any]]:
+def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | None = None, show_opening: bool = True, show_hatching: bool = True,
+               top_elevation: float | None = None, bottom_elevation: float | None = None, depth_elevation: float | None = None) -> list[dict[str, Any]]:
     """What the model shows on the plan of a level, in drawing units (``f`` converts metres). Read from parameters on every call, so it
     can never disagree with the 3D model."""
     out: list[dict[str, Any]] = []
     walls: dict[str, dict[str, Any]] = {}
     cut_z = level_elevation(project, level_id) + CUT_HEIGHT if cut_elevation is None else float(cut_elevation)
+    level_z = level_elevation(project, level_id)
+    top_z = cut_z + 1.5 if top_elevation is None else float(top_elevation)
+    bottom_z = level_z - 0.2 if bottom_elevation is None else float(bottom_elevation)
+    depth_z = level_z - 1.0 if depth_elevation is None else float(depth_elevation)
+    if top_z < cut_z - 1e-9 or bottom_z > cut_z + 1e-9 or depth_z > bottom_z + 1e-9:
+        raise BadRequest("Plan view range must satisfy top ≥ cut plane ≥ bottom ≥ view depth")
+    # The single world transform map is reused for every relevant host. Model
+    # elevation, not the level name, determines whether a cut intersects it.
+    matrices = None
+    def visible_geometry(oid: str, on_level: bool) -> tuple[bool, list[list[list[float]]]]:
+        nonlocal matrices
+        from . import documentation as DOC
+        if matrices is None:
+            matrices = project.model._model.world_transforms()
+        verts, faces = DOC.world_mesh(project, oid, matrices)
+        if not verts:
+            return False, []
+        low, high = min(v[2] for v in verts), max(v[2] for v in verts)
+        if high < depth_z - 1e-9 or low > top_z + 1e-9:
+            return False, []
+        crosses = low + 1e-8 < cut_z < high - 1e-8
+        # The associated level's own elements may be projected within its view
+        # range (including overhead beams); unrelated storeys do not leak in.
+        if not crosses and not (on_level and high >= depth_z and low <= top_z + 1e-9):
+            return False, []
+        cuts = DOC.horizontal_cut_loops(verts, faces, cut_z) if crosses else []
+        return True, [[[x * f, y * f] for x, y in loop] for loop in cuts]
+
     wall_cuts: dict[str, float] = {}
     for oid in element_ids(project):
         obj = project.model.get(oid)
@@ -1374,12 +1403,18 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
             except BadRequest:
                 pass                                                                     # a downpipe without its gutter is reported by the model check, not drawn
             continue
+        if cat == "grid" or cat in OPENINGS:
+            continue  # datums are level-independent; doors/windows are emitted with their host wall below
         if cat == "wall":
             frame = wall_frame(project, oid)
             relative_cut = cut_z - frame["base"]
             if not 0.0 <= relative_cut < frame["height"]:
                 continue
             wall_cuts[oid] = relative_cut
+        elif cat not in ("room", "gutter"):
+            visible, cut_polygons = visible_geometry(oid, m(meta, "level") == level_id)
+            if not visible:
+                continue
         elif m(meta, "level") != level_id:
             continue
         if cat == "gutter":
@@ -1420,6 +1455,11 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
         elif cat == "floor":
             item = {"id": oid, "category": "floor", "name": obj["name"], "polygon": [[q[0] * f, q[1] * f] for q in (m(meta, "cut_outline") or m(meta, "boundary"))],
                     "outline": [[q[0] * f, q[1] * f] for q in m(meta, "boundary")]}
+            if cut_polygons:
+                item["cut_polygons"] = cut_polygons
+                if show_hatching:
+                    from . import documentation as DOC
+                    item["hatch"] = DOC.hatch_pattern(project, m(meta, "material"))
             if m(meta, "cut"):
                 item["holes"] = [[[q[0] * f, q[1] * f] for q in h] for h in m(meta, "cut")]
             out.append(item)
@@ -1428,10 +1468,18 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
             # plane, including its editable boundary. Sections retain the
             # actual pitched surfaces and material cut geometry.
             boundary = [[q[0] * f, q[1] * f] for q in m(meta, "boundary")]
-            out.append({"id": oid, "category": "roof", "name": obj["name"], "polygon": boundary, "outline": boundary})
+            item = {"id": oid, "category": "roof", "name": obj["name"], "polygon": boundary, "outline": boundary,
+                    **({"cut_polygons": cut_polygons} if cut_polygons else {})}
+            if cut_polygons and show_hatching:
+                from . import documentation as DOC
+                item["hatch"] = DOC.hatch_pattern(project, m(meta, "material"))
+            out.append(item)
         elif cat in FORMS:
             from . import forms as FX
-            out.append(FX.plan_item(project, oid, f))
+            item = FX.plan_item(project, oid, f)
+            if cut_polygons:
+                item["cut_polygons"] = cut_polygons
+            out.append(item)
         elif cat == "foundation":
             from . import foundations as FD
             out.append(FD.plan_item(project, oid, f))
@@ -1439,17 +1487,26 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
             x, y = m(meta, "point")
             ang = float(m(meta, "rotation", 0.0))
             out.append({"id": oid, "category": "column", "name": obj["name"],
-                        "polygon": _column_outline((x, y), ang, float(m(meta, "width")), float(m(meta, "depth")), f)})
+                        "polygon": cut_polygons[0] if cut_polygons else _column_outline((x, y), ang, float(m(meta, "width")), float(m(meta, "depth")), f),
+                        **({"cut_polygons": cut_polygons} if cut_polygons else {})})
         elif cat == "structural":
             s, e = m(meta, "start"), m(meta, "end")
             ang = math.atan2(e[1] - s[1], e[0] - s[0])
-            out.append({"id": oid, "category": "structural", "name": obj["name"], "polygon": _rect(tuple(s), ang, 0.0, math.dist(s, e), float(m(meta, "width")) / 2, f)})
+            out.append({"id": oid, "category": "structural", "name": obj["name"],
+                        "polygon": cut_polygons[0] if cut_polygons else _rect(tuple(s), ang, 0.0, math.dist(s, e), float(m(meta, "width")) / 2, f),
+                        **({"cut_polygons": cut_polygons} if cut_polygons else {})})
         elif cat == "stair":
             from . import stairs as SR
-            out.append(SR.plan_item(project, oid, f))
+            item = SR.plan_item(project, oid, f)
+            if cut_polygons:
+                item["cut_polygons"] = cut_polygons
+            out.append(item)
         elif cat == "generic":
             from . import families as FM
-            out.append(FM.plan_item(project, oid, f))
+            item = FM.plan_item(project, oid, f)
+            if cut_polygons:
+                item["cut_polygons"] = cut_polygons
+            out.append(item)
         elif cat == "room":
             from . import rooms as R
             poly = R.boundary_of(meta)
@@ -1467,9 +1524,12 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
             continue
         fr = walls[m(meta, "host")]
         x0, x1, sill, head = opening_span(meta)
+        if fr["base"] + head < depth_z - 1e-9 or fr["base"] + sill > top_z + 1e-9:
+            continue  # Opening entirely outside the plan's real view range.
+        cut = sill <= wall_cuts[m(meta, "host")] < head
         item: dict[str, Any] = {"id": oid, "category": cat, "name": obj["name"], "polygon": _rect(fr["start"], fr["angle"], x0, x1, fr["thickness"] / 2, f),
-                                "cut": sill <= wall_cuts[m(meta, "host")] < head}
-        item["symbol"] = _symbol(cat, meta, fr, x0, x1, f, show_opening=show_opening)
+                                "cut": cut, "overhead": not cut and fr["base"] + sill >= cut_z}
+        item["symbol"] = _symbol(cat, meta, fr, x0, x1, f, show_opening=show_opening and cut)
         out.append(item)
     return out
 

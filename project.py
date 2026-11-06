@@ -621,8 +621,12 @@ class Project:
             return []
         reference = view.get("cut_reference_level") or view["level_id"]
         cut_elevation = self.level(reference)["elevation"] + float(view.get("cut_offset", 1.5))
+        base_elevation = self.level(view["level_id"])["elevation"]
         return E.plan_items(self, view["level_id"], 1000.0 / MM_PER[self.manifest["unit"]], cut_elevation=cut_elevation, show_opening=bool(view.get("show_opening_direction", True)),
-                            show_hatching=bool(view.get("show_material_hatching", True)))
+                            show_hatching=bool(view.get("show_material_hatching", True)),
+                            top_elevation=cut_elevation + float(view.get("range_top", 1.5)),
+                            bottom_elevation=base_elevation + float(view.get("range_bottom", -0.2)),
+                            depth_elevation=base_elevation + float(view.get("range_depth", -1.0)))
 
     def scene_data(self, max_vertices: int = 400_000, time: float | None = None) -> dict[str, Any]:
         """Every drawable object with world-space vertices. With ``time`` (seconds) the scene is the animation evaluated at that time
@@ -1085,6 +1089,10 @@ def _view_properties(project: Project, vid: str) -> dict[str, Any]:
              "choices": [{"value": level["id"], "label": level["name"]} for level in project.manifest["levels"]]},
             {"key": "cut_offset", "label": "Offset", "type": "number", "unit": "mm", "value": offset * 1000},
             {"label": "Absolute cut height", "type": "readonly", "value": f"{(project.level(reference)['elevation'] + offset) * 1000:g} mm"}]})
+        groups.append({"title": "View range", "rows": [
+            {"key": "range_top", "label": "Above cut plane", "type": "number", "unit": "mm", "value": float(view.get("range_top", 1.5)) * 1000},
+            {"key": "range_bottom", "label": "Bottom from plan level", "type": "number", "unit": "mm", "value": float(view.get("range_bottom", -0.2)) * 1000},
+            {"key": "range_depth", "label": "Depth from plan level", "type": "number", "unit": "mm", "value": float(view.get("range_depth", -1.0)) * 1000}]})
     if kind == "section":
         fr = D.frame_of(view)
         here, there = D.compass(fr.fx, fr.fy), D.compass(-fr.fx, -fr.fy)
@@ -2215,14 +2223,25 @@ class _Commands:
         view = project.view(text(p.get("id"), "id", 80))
         if view["kind"] != "plan":
             raise BadRequest("Only a floor plan has a plan cut plane")
-        key = choice_of(p.get("key"), ("cut_reference", "cut_offset"), "key")
+        key = choice_of(p.get("key"), ("cut_reference", "cut_offset", "range_top", "range_bottom", "range_depth"), "key")
         if key == "cut_reference":
             reference = text(p.get("value"), "reference level", 80)
             project.level(reference)
             view["cut_reference_level"] = reference
             view["cut_offset"] = 0.0 if reference != view["level_id"] else 1.5
-        else:
+        elif key == "cut_offset":
             view["cut_offset"] = number(p.get("value"), "cut offset (mm)", -1000000, 1000000) / 1000.0
+        else:
+            value = number(p.get("value"), f"{key} (mm)", -1000000, 1000000) / 1000.0
+            if key == "range_top" and value < 0:
+                raise BadRequest("Top of view range must be at or above the cut plane")
+            if key == "range_bottom" and value > 0:
+                raise BadRequest("Bottom of view range cannot exceed the associated plan level")
+            if key == "range_depth" and value > float(view.get("range_bottom", -0.2)):
+                raise BadRequest("View depth cannot be above the bottom of the view range")
+            if key == "range_bottom" and value < float(view.get("range_depth", -1.0)):
+                raise BadRequest("View range bottom cannot be below the view depth")
+            view[key] = value
         return {"id": view["id"], "reference": view.get("cut_reference_level") or view["level_id"], "offset": view.get("cut_offset", 1.5)}
 
     @staticmethod

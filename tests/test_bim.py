@@ -78,6 +78,39 @@ class Levels(Case):
         self.p.undo()
         self.assertFalse(next(item for item in self.p.drawing_data(plan["id"])["model"] if item["id"] == door)["cut"])
 
+    def test_upper_level_cut_uses_real_slab_and_column_mesh_intersections(self):
+        slab = self.run_("model.add_floor", level=self.l2, thickness=200,
+                         points=[[0, 0], [6000, 0], [6000, 4000], [0, 4000]])["id"]
+        column = self.run_("model.add_column", level=self.l2, point=[2500, 1500])["id"]
+        plan = next(v for v in self.p.manifest["views"] if v.get("level_id") == self.l1)
+        self.assertNotIn(slab, [i["id"] for i in self.p.plan_overlay(plan["id"])])
+        self.run_("view.set_cut_plane", id=plan["id"], key="cut_reference", value=self.l2)
+        self.run_("view.set_cut_plane", id=plan["id"], key="cut_offset", value=-100)
+        rows = {i["id"]: i for i in self.p.plan_overlay(plan["id"])}
+        self.assertIn(slab, rows)
+        self.assertEqual(len(rows[slab]["cut_polygons"][0]), 4)
+        self.assertNotIn(column, rows)  # column begins at Level 02, above this cut
+        self.run_("view.set_cut_plane", id=plan["id"], key="cut_offset", value=1200)
+        rows = {i["id"]: i for i in self.p.plan_overlay(plan["id"])}
+        self.assertIn(column, rows)
+        self.assertNotIn(slab, rows)  # a lower level's slab is outside the cut and not the host plan's underlay
+        self.run_("view.set_cut_plane", id=plan["id"], key="range_top", value=2000)
+        self.assertEqual(self.p.view(plan["id"])["range_top"], 2.0)
+        with self.assertRaises(BadRequest):
+            self.run_("view.set_cut_plane", id=plan["id"], key="range_depth", value=2000)
+
+    def test_plan_openings_outside_the_cut_render_as_projections_only_when_in_view_range(self):
+        wall = self.wall()
+        upper_window = self.run_("model.add_window", wall=wall, offset=2.0, width=850, height=450, sill=2300)["id"]
+        plan = next(v for v in self.p.manifest["views"] if v.get("level_id") == self.l1)
+        entries = {e["id"]: e for e in self.p.plan_overlay(plan["id"])}
+        self.assertIn(upper_window, entries)
+        self.assertFalse(entries[upper_window]["cut"])
+        self.assertTrue(entries[upper_window]["overhead"])
+        self.assertNotIn("hinge", entries[upper_window]["symbol"])
+        self.run_("view.set_cut_plane", id=plan["id"], key="range_top", value=400)
+        self.assertNotIn(upper_window, [e["id"] for e in self.p.plan_overlay(plan["id"])])
+
     def test_adding_a_level_gives_it_a_floor_plan(self):
         out = self.run_("level.add", name="Level 03", elevation=9.6)
         self.assertEqual([l["name"] for l in self.p.manifest["levels"]], ["Level 01", "Level 02", "Roof Level", "Level 03"])

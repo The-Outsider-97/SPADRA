@@ -162,7 +162,43 @@ def _key(p: Pt3) -> tuple[float, float, float]:
 # -------------------------------------------------------------------------------------------------------------- the cut (sections)
 def cut_loops(fr: Frame, verts: list[Pt3], faces: list[tuple[int, int, int]]) -> list[list[tuple[float, float]]]:
     """The exact intersection of a closed mesh with the section plane, as closed loops in (across, z), clipped to the section's width."""
-    d = [fr.depth(v) for v in verts]
+    loops = _plane_cut_loops(verts, faces, fr.depth, lambda p: (fr.across(p), p[2]))
+    result: list[list[tuple[float, float]]] = []
+    for loop in loops:
+        clipped = _clip_2d(loop, 0.0, float(fr.span or 0.0))
+        if len(clipped) >= 3 and abs(_area2(clipped)) > 1e-9:
+            result.append(clipped)
+    return result
+
+
+def horizontal_cut_loops(verts: list[Pt3], faces: list[tuple[int, int, int]], elevation: float) -> list[list[tuple[float, float]]]:
+    """Cut any closed BIM mesh at an absolute Z and return true XY loops in metres.
+
+    Reuses the same edge-stitching algorithm as building sections. A plane that
+    merely touches a face does not fabricate an interior cut; callers can show
+    the projected outline separately where that view's range permits it.
+    """
+    loops = _plane_cut_loops(verts, faces, lambda p: p[2] - elevation, lambda p: (p[0], p[1]))
+    # Triangulated planar faces may put several points on one straight edge;
+    # collapse those instead of drawing false corners in the plan.
+    result = []
+    for loop in loops:
+        clean = []
+        for i, point in enumerate(loop):
+            before, after = loop[i - 1], loop[(i + 1) % len(loop)]
+            dx, dy = point[0] - before[0], point[1] - before[1]
+            ex, ey = after[0] - point[0], after[1] - point[1]
+            if abs(dx * ey - dy * ex) > 1e-8 * max(1.0, math.hypot(dx, dy) * math.hypot(ex, ey)) or dx * ex + dy * ey < 0:
+                clean.append(point)
+        if len(clean) >= 3:
+            result.append(clean)
+    return result
+
+
+def _plane_cut_loops(verts: list[Pt3], faces: list[tuple[int, int, int]],
+                     distance: Callable[[Pt3], float], coordinates: Callable[[Pt3], tuple[float, float]]) -> list[list[tuple[float, float]]]:
+    """Stitch exact mesh/plane intersections; shared by vertical sections and horizontal plans."""
+    d = [distance(v) for v in verts]
     segments: list[tuple[tuple[int, int], tuple[int, int]]] = []
     points: dict[tuple[int, int], tuple[float, float]] = {}
     for tri in faces:
@@ -173,7 +209,7 @@ def cut_loops(fr: Frame, verts: list[Pt3], faces: list[tuple[int, int, int]]) ->
                 key = (lo, hi)
                 if key not in points:
                     p = _lerp(verts[lo], verts[hi], d[lo] / (d[lo] - d[hi]))
-                    points[key] = (fr.across(p), p[2])
+                    points[key] = coordinates(p)
                 crossing.append(key)
         if len(crossing) == 2:
             segments.append((crossing[0], crossing[1]))
@@ -200,7 +236,6 @@ def cut_loops(fr: Frame, verts: list[Pt3], faces: list[tuple[int, int, int]]) ->
         if here != first:
             continue                                                 # an open chain: the mesh was not closed here; nothing honest to fill
         loop = [points[k] for k in chain[:-1]]
-        loop = _clip_2d(loop, 0.0, float(fr.span or 0.0))
         dedup = [p for i, p in enumerate(loop) if i == 0 or math.dist(p, loop[i - 1]) > 1e-9]
         if len(dedup) >= 3 and abs(_area2(dedup)) > 1e-9:
             loops.append(dedup)
