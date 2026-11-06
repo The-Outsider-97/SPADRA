@@ -1,5 +1,5 @@
 /** Dialogs: new/open project, unsaved changes, the model-check review, appearance. Built on the shared dialog kit. */
-import { h, labelled } from "../../../tools/web/src/dom.js";
+import { h, s, labelled } from "../../../tools/web/src/dom.js";
 import { appearanceControls, applyAppearance, DEFAULT_APPEARANCE, normaliseAppearance, type Appearance } from "../../../tools/web/src/theme.js";
 import { openDialog, promptDialog, toast } from "../../../tools/web/src/ui.js";
 import { flatten, type Store } from "./store.js";
@@ -15,20 +15,64 @@ export async function addLayerDialog(store: Store, id: string, category: "wall" 
   const thickness = h("input", { type: "number", value: category === "wall" ? "12.5" : "50", min: "1", max: "5000", step: "any", attrs: { "aria-label": "Layer thickness in millimetres" } });
   const openings = h("select", { attrs: { "aria-label": "Opening inheritance" } }, h("option", { value: "all", text: "Inherit all openings and voids" }), h("option", { value: "none", text: "Do not inherit existing cuts" }));
   const boundary = category === "wall" ? ["start", "end", "bottom", "top"].map((edge) => [edge, h("input", { type: "number", value: "0", step: "any", attrs: { "aria-label": `${edge} edge offset in mm` } })] as const) : [];
+  type Mesh = { vertices: number[][]; faces: number[][] };
+  const preview = s("svg", { attrs: { viewBox: "0 0 300 210", role: "img", "aria-label": "Live model geometry preview" }, css: { width: "100%", height: "210px", background: "var(--surface)", border: "1px solid var(--hairline)", borderRadius: "10px" } });
+  const previewStatus = h("p", { class: "muted", text: "Computing the exact layer geometry before committing…" });
+  let requestSerial = 0;
+  let pending: ReturnType<typeof setTimeout> | undefined;
+  const payload = (): Record<string, unknown> | null => {
+    const amount = Number(thickness.value);
+    if (!Number.isFinite(amount) || amount < 1 || amount > 5000) return null;
+    const edges: Record<string, number> = {};
+    for (const [edge, input] of boundary) { const n = Number(input.value); if (!Number.isFinite(n)) return null; edges[edge] = n; }
+    return { side, thickness: amount, material: material.value, openings: openings.value, ...edges };
+  };
+  const drawPreview = (before: Mesh, after: Mesh): void => {
+    const project = (v: number[]): [number, number] => [((v[0] ?? 0) - (v[1] ?? 0)) * 0.8660254, ((v[0] ?? 0) + (v[1] ?? 0)) * 0.5 - (v[2] ?? 0)];
+    const a = before.vertices.map(project), b = after.vertices.map(project), pts = [...a, ...b];
+    if (!pts.length) return;
+    const minX = Math.min(...pts.map((p) => p[0])), maxX = Math.max(...pts.map((p) => p[0]));
+    const minY = Math.min(...pts.map((p) => p[1])), maxY = Math.max(...pts.map((p) => p[1]));
+    const scale = Math.min(274 / Math.max(0.001, maxX - minX), 184 / Math.max(0.001, maxY - minY));
+    const toXY = (p: [number, number]): string => `${(150 + (p[0] - (minX + maxX) / 2) * scale).toFixed(2)},${(105 + (p[1] - (minY + maxY) / 2) * scale).toFixed(2)}`;
+    const path = (m: Mesh, coords: Array<[number, number]>): string => m.faces.slice(0, 10000).map((face) => `M${face.map((i) => toXY(coords[i] as [number, number])).join("L")}Z`).join("");
+    preview.replaceChildren(
+      s("path", { attrs: { d: path(before, a), fill: "none", stroke: "var(--muted)", "stroke-width": 0.7, "stroke-dasharray": "3 3" } }),
+      s("path", { attrs: { d: path(after, b), fill: "var(--select)", "fill-opacity": 0.09, stroke: "var(--select)", "stroke-width": 0.7 } }),
+    );
+  };
+  const updatePreview = async (): Promise<boolean> => {
+    const current = ++requestSerial, params = payload();
+    if (!params) { preview.replaceChildren(); previewStatus.textContent = "Enter valid thickness and boundary offsets."; return false; }
+    previewStatus.textContent = "Validating geometry and openings…";
+    try {
+      const result = await store.api.post<{ before: Mesh; after: Mesh; revision: number }>(`/model/${id}/layers/preview`, params);
+      if (current !== requestSerial) return false;
+      if (result.revision !== store.project?.revision) { previewStatus.textContent = "The project changed. Refresh this layer preview."; return false; }
+      drawPreview(result.before, result.after);
+      previewStatus.textContent = "Validated preview: grey = existing host, blue = updated geometry. No project changes have been made.";
+      return true;
+    } catch (error) {
+      if (current === requestSerial) { preview.replaceChildren(); previewStatus.textContent = `Geometry cannot be created: ${error instanceof Error ? error.message : String(error)}`; }
+      return false;
+    }
+  };
+  const refresh = (): void => { if (pending) clearTimeout(pending); pending = setTimeout(() => { void updatePreview(); }, 180); };
+  for (const control of [material, thickness, openings, ...boundary.map(([, input]) => input)]) { control.addEventListener("input", refresh); control.addEventListener("change", refresh); }
   const handle = openDialog<true>({ title: `Add ${side} ${category} layer`, size: "normal",
     body: h("div", { css: { display: "grid", gap: ".65rem" } },
       labelled("Material", material), labelled("Thickness (mm)", thickness), labelled("Opening / void cuts", openings),
       ...boundary.map(([edge, input]) => labelled(`${edge[0]?.toUpperCase()}${edge.slice(1)} boundary (mm)`, input)),
-      h("p", { class: "muted", text: "Preview the resulting geometry after adding. The layer's material, cut selection, and edge offsets remain editable in Properties." })),
+      preview, previewStatus),
     actions: [{ label: "Add layer", kind: "primary", run: async () => {
-      const amount = Number(thickness.value);
-      if (!Number.isFinite(amount) || amount < 1 || amount > 5000) { toast("Thickness must be between 1 and 5000 mm.", { kind: "error" }); return undefined; }
-      const edgeValues: Record<string, number> = {};
-      for (const [edge, input] of boundary) { const n = Number(input.value); if (!Number.isFinite(n)) { toast(`Enter a valid ${edge} boundary.`, { kind: "error" }); return undefined; } edgeValues[edge] = n; }
-      return (await store.run("model.add_layer", { id, side, thickness: amount, material: material.value, openings: openings.value, ...edgeValues })) ? true : undefined;
+      if (pending) clearTimeout(pending);
+      if (!await updatePreview()) { toast("Correct the preview error before adding this layer.", { kind: "error" }); return undefined; }
+      return (await store.run("model.add_layer", { id, ...payload() })) ? true : undefined;
     } }],
   });
+  void updatePreview();
   await handle.result;
+  if (pending) clearTimeout(pending);
 }
 
 export function loadAppearance(): Appearance {

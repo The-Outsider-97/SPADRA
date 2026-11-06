@@ -11,7 +11,7 @@ import { createServer } from "node:net";
 import { chromium } from "playwright";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const SLAI = resolve(HERE, "..", "..", "..");
+const SLAI = process.env.SPADRA_SLAI_ROOT ?? resolve(HERE, "..", "..", "..");
 const PYTHON = process.env.PYTHON ?? (process.platform === "win32" ? "python" : "python3");
 
 let server, browser, page, base, dataDir;
@@ -44,7 +44,7 @@ const drawing = async () => api(`/drawing/${await planId()}`);
 before(async () => {
   const url = await startServer();
   base = new URL(url).origin;
-  browser = await chromium.launch({ args: ["--use-gl=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"] });
+  browser = await chromium.launch({ ...(process.env.SPADRA_CHROMIUM ? { executablePath: process.env.SPADRA_CHROMIUM } : {}), args: ["--use-gl=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"] });
   page = await browser.newPage({ viewport: { width: 1672, height: 941 } });
   page.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
   page.on("console", (m) => { if (m.type() === "error") problems.push(`console: ${m.text()} ${m.location().url}`); });
@@ -189,6 +189,80 @@ describe("SPADRA in a browser", () => {
     assert.ok((await page.locator(".sheet-wrap svg path").count()) >= 1);
     const tree = await api("/project/tree");
     assert.equal(tree.tree.sections.find((x) => x.id === "sheets").children.length, 1);
+  });
+
+  it("drags an unlocked sheet viewport and synchronizes its persisted X/Y", async () => {
+    const sheetId = (await api("/project/tree")).tree.sections.find((x) => x.id === "sheets").children[0].id;
+    const original = (await api(`/sheet/${sheetId}`)).viewports[0];
+    const drawing = page.locator(`.sheet-wrap svg > g[data-viewport="${original.id}"]`);
+    const rect = await drawing.boundingBox();
+    assert.ok(rect && rect.width > 0 && rect.height > 0, "viewport has a visible drag target");
+    const x = rect.x + rect.width / 2, y = rect.y + rect.height / 2;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x + 60, y - 40, { steps: 12 });
+    await page.mouse.up();
+    await settle();
+    const moved = (await api(`/sheet/${sheetId}`)).viewports[0];
+    assert.notDeepEqual([moved.x, moved.y], [original.x, original.y], "mouse drag changed persisted sheet coordinates");
+    assert.ok(moved.x > original.x && moved.y > original.y, "drag direction uses paper coordinates");
+    // Numerical coordinates and pointer coordinates operate on one placement model.
+    const command = await api("/command", { method: "POST", body: JSON.stringify({ op: "sheet.set_viewport", params: { id: sheetId, viewport: original.id, key: "position", value: [original.x, original.y] } }) });
+    assert.ok(command, "numeric position command responded");
+    assert.deepEqual([(await api(`/sheet/${sheetId}`)).viewports[0].x, (await api(`/sheet/${sheetId}`)).viewports[0].y], [original.x, original.y]);
+  });
+
+  it("exports a complete vector SLDC sheet and prints PDF at the same physical paper size", async () => {
+    await page.getByRole("tab", { name: "File", exact: true }).first().click();
+    const sent = page.waitForRequest((r) => r.method() === "POST" && /\/api\/export\/sheet\//.test(r.url()));
+    await page.getByRole("button", { name: "Export .sldc" }).click();
+    const request = await sent;
+    const payload = request.postDataJSON();
+    assert.match(payload.preview_svg, /^<svg\b/);
+    assert.match(payload.preview_svg, /viewBox="0 0 841 594"/);
+    assert.match(payload.preview_svg, /<path\b|<text\b/);
+    assert.doesNotMatch(payload.preview_svg, /var\(--(?:ink|paper|border|muted|select)\)/, "print vectors contain portable colors");
+    assert.match(payload.preview_png, /^iVBOR/, "the reader fallback is actual PNG data");
+    const pdf = await page.pdf({ preferCSSPageSize: true, printBackground: true });
+    assert.match(pdf.subarray(0, 8).toString("ascii"), /^%PDF-/);
+    // Browser PDF page tree declares physical dimensions in 1/72-inch points.
+    const boxes = [...pdf.toString("latin1").matchAll(/\/MediaBox\s*\[\s*0\s+0\s+([\d.]+)\s+([\d.]+)\s*\]/g)];
+    assert.ok(boxes.length, "PDF has a physical MediaBox");
+    const [widthPt, heightPt] = boxes.at(-1).slice(1).map(Number);
+    assert.ok(Math.abs(widthPt * 25.4 / 72 - 841) < 1, "PDF is 841 mm wide");
+    assert.ok(Math.abs(heightPt * 25.4 / 72 - 594) < 1, "PDF is 594 mm tall");
+  });
+
+  it("resizes both side panels independently, remembers widths, and remains usable on narrower screens", async () => {
+    for (const [side, direction] of [["left", 80], ["right", -80]]) {
+      const handle = page.getByRole("separator", { name: side === "left" ? "Resize Project Browser" : "Resize Properties" });
+      const rect = await handle.boundingBox();
+      assert.ok(rect, `${side} panel has a visible resize handle`);
+      const oldWidth = await page.evaluate((s) => document.querySelector(s).getBoundingClientRect().width, side === "left" ? ".panel[aria-label='Project Browser']" : ".panel[aria-label='Properties']");
+      await page.mouse.move(rect.x + rect.width / 2, rect.y + rect.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(rect.x + rect.width / 2 + direction, rect.y + rect.height / 2, { steps: 8 });
+      await page.mouse.up();
+      const now = Number(await handle.getAttribute("aria-valuenow"));
+      assert.ok(now > oldWidth + 25, `${side} panel became wider`);
+    }
+    const widths = await page.evaluate(() => [getComputedStyle(document.querySelector(".workspace")).getPropertyValue("--browser-width"), getComputedStyle(document.querySelector(".workspace")).getPropertyValue("--properties-width")]);
+    await page.reload(); await settle();
+    const remembered = await page.evaluate(() => [getComputedStyle(document.querySelector(".workspace")).getPropertyValue("--browser-width"), getComputedStyle(document.querySelector(".workspace")).getPropertyValue("--properties-width")]);
+    assert.deepEqual(remembered, widths);
+    await page.setViewportSize({ width: 1100, height: 760 });
+    assert.ok((await page.locator(".canvas-area").boundingBox()).width > 200, "drawing workspace remains usable");
+    await page.setViewportSize({ width: 1672, height: 941 });
+  });
+
+  it("opens Roof Level using the same browser navigation as other levels", async () => {
+    await page.getByRole("treeitem", { name: /^Roof Level\b/ }).click();
+    await settle();
+    const active = page.locator(".doc-tab[aria-selected=true]");
+    assert.match(await active.textContent(), /Roof Level/i);
+    assert.match(await active.textContent(), /SDRW/i);
+    await page.getByRole("tab", { name: /A101/ }).first().click();
+    await settle();
   });
 
   it("refuses to drop unsaved work silently, then saves and reopens the project from disk", async () => {

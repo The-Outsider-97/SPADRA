@@ -60,20 +60,33 @@ export class SheetView {
   /** Print the sheet (or save it as PDF from the browser's print dialog). */
   print(): void { this.prepareToPrint(); window.print(); }
 
-  /** The same SVG scene used by Print, rasterized as the SLDC reader's portable visual preview.
-   *  The editable drawing primitives remain in the SPADRA SLDC extension. */
-  async printablePng(): Promise<string> {
+  /** The actual print scene, with editor selection removed and physical page dimensions retained.
+   *  Kept as native vector XML in SLDC alongside its portable PNG reader fallback. */
+  printableSvg(): string {
     const d = this.data;
     if (!d || !this.svg) throw new Error("Open the sheet before exporting it.");
     const clone = this.svg.cloneNode(true) as SVGSVGElement;
     clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
     clone.setAttribute("viewBox", `0 0 ${d.width} ${d.height}`);
-    clone.setAttribute("width", String(Math.round(d.width * 96 / 25.4)));
-    clone.setAttribute("height", String(Math.round(d.height * 96 / 25.4)));
-    clone.setAttribute("style", "--paper:#ffffff;--ink:#1d232a;--border:#66717c;--muted:#66717c;--select:#1766bd;font-family:Arial,sans-serif");
+    clone.setAttribute("width", `${d.width}mm`);
+    clone.setAttribute("height", `${d.height}mm`);
+    clone.setAttribute("style", "font-family:Arial,sans-serif");
+    // Print/PDF and the embedded SLDC vector must be independently readable.
+    // CSS custom properties in presentation attributes are not portable to
+    // every SVG renderer (including some document editors and PDF converters).
+    const ink: Record<string, string> = { paper: "#ffffff", ink: "#1d232a", border: "#66717c", muted: "#66717c", select: "#1766bd" };
+    for (const node of [clone, ...clone.querySelectorAll("*")]) for (const attr of [...node.attributes]) {
+      if (attr.value.includes("var(--")) node.setAttribute(attr.name, attr.value.replace(/var\(--([a-z-]+)\)/g, (_raw, key: string) => ink[key] ?? _raw));
+    }
     // Selection handles are an editing aid, never part of the paper.
     clone.querySelectorAll('[data-sheet-selection="true"]').forEach((el) => el.remove());
-    const xml = new XMLSerializer().serializeToString(clone);
+    return new XMLSerializer().serializeToString(clone);
+  }
+
+  /** Raster reader fallback generated from the exact same vector source. */
+  async printablePng(xml = this.printableSvg()): Promise<string> {
+    const d = this.data;
+    if (!d) throw new Error("Open the sheet before exporting it.");
     const url = URL.createObjectURL(new Blob([xml], { type: "image/svg+xml;charset=utf-8" }));
     try {
       const picture = new Image();
@@ -263,8 +276,18 @@ export class SheetView {
             if (bd) g.appendChild(s("path", { attrs: { d: bd, fill: "none", "stroke-width": 0.3, stroke: "var(--ink)", "vector-effect": "non-scaling-stroke" } }));
           }
         }
-        else if (cat === "floor" || cat === "roof") g.appendChild(s("path", { attrs: { d: outline(w), fill: "var(--ink)", "fill-opacity": 0.05, stroke: "var(--muted)", "stroke-width": 0.75, "vector-effect": "non-scaling-stroke" } }));
+        else if (cat === "floor" || cat === "roof") {
+          g.appendChild(s("path", { attrs: { d: outline(w), fill: "var(--ink)", "fill-opacity": 0.05, stroke: "var(--muted)", "stroke-width": 0.75, "vector-effect": "non-scaling-stroke" } }));
+          for (const poly of w.cut_polygons ?? []) {
+            g.appendChild(s("path", { attrs: { d: outline({ polygon: poly }), fill: "var(--ink)", "fill-opacity": 0.2, ...stroke, "stroke-width": 0.55 } }));
+            const bd = w.hatch ? patternPath([poly], w.hatch, w.hatch.spacing_mm / k) : "";
+            if (bd) g.appendChild(s("path", { attrs: { d: bd, fill: "none", "stroke-width": 0.3, stroke: "var(--ink)", "vector-effect": "non-scaling-stroke" } }));
+          }
+        }
         else if (cat === "structural") g.appendChild(s("path", { attrs: { d: outline(w), fill: "none", "stroke-dasharray": "6 4", ...stroke } }));
+        else if ((cat === "window" || cat === "door") && w.cut === false) {
+          g.appendChild(s("path", { attrs: { d: outline(w), fill: "none", ...stroke, "stroke-width": 0.6, "stroke-dasharray": w.overhead ? "6 3" : "2 4" } }));
+        }
         else if (cat === "window" && w.symbol?.a && w.symbol.b) {
           g.appendChild(s("path", { attrs: { d: outline(w), fill: "var(--paper)", ...stroke } }));
           g.appendChild(s("path", { attrs: { d: `M${w.symbol.a[0]} ${w.symbol.a[1]}L${w.symbol.b[0]} ${w.symbol.b[1]}`, fill: "none", ...stroke } }));

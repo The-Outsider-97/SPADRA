@@ -284,7 +284,7 @@ def SV_kind(vp: Mapping[str, Any]) -> str:
     return {"view": "drawing", "model": "3D model", "snapshot": "3D picture", "report": "report", "schedule": "schedule"}.get(kind, kind)
 
 
-def to_sldc(project: Any, sheet_id: Any, preview_png: bytes | None = None) -> tuple[bytes, str]:
+def to_sldc(project: Any, sheet_id: Any, preview_png: bytes | None = None, preview_svg: str | None = None) -> tuple[bytes, str]:
     """Editable sheet data plus a print-matched full-page visual when supplied by the sheet renderer.
 
     The image is for general SLDC document readers; SPADRA reopens the semantic vectors,
@@ -296,6 +296,25 @@ def to_sldc(project: Any, sheet_id: Any, preview_png: bytes | None = None) -> tu
     from ..tools.errors import LimitExceeded
     sheet = find(project, sheet_id)
     data = copy.deepcopy(project.sheet_data(sheet["id"]))
+    if preview_svg is not None:
+        import xml.etree.ElementTree as ET
+        if preview_png is None or not isinstance(preview_svg, str) or len(preview_svg.encode("utf-8")) > 5_000_000:
+            raise BadRequest("A vector sheet requires its matching image preview and must fit within 5 MB")
+        try:
+            root = ET.fromstring(preview_svg)
+            paper_box = [float(v) for v in root.attrib.get("viewBox", "").replace(",", " ").split()]
+        except (ET.ParseError, TypeError, ValueError) as exc:
+            raise BadRequest("The printable vector sheet is not valid SVG") from exc
+        if root.tag != "{http://www.w3.org/2000/svg}svg" or len(paper_box) != 4 or any(abs(v - target) > 1e-5 for v, target in zip(paper_box, [0, 0, data["width"], data["height"]])):
+            raise BadRequest("The printable vector sheet does not match the selected paper dimensions")
+        for element in root.iter():
+            if element.tag.rsplit("}", 1)[-1].lower() in ("script", "foreignobject", "iframe", "use", "animate", "set"):
+                raise BadRequest("Executable or externally linked SVG content is not accepted in a drawing sheet")
+            for key, value in element.attrib.items():
+                attr_name = key.rsplit("}", 1)[-1].lower()
+                if (attr_name.startswith("on") or "javascript:" in value.lower() or "url(" in value.lower() or
+                    (attr_name == "href" and not value.startswith(("data:image/png;base64,", "data:image/jpeg;base64,", "data:image/webp;base64,")))):
+                    raise BadRequest("The drawing sheet cannot include external or executable SVG references")
     placed = {vp["id"]: vp for vp in sheet.get("viewports", [])}
     assets, figures = [], {}
     if preview_png is not None:
@@ -317,6 +336,9 @@ def to_sldc(project: Any, sheet_id: Any, preview_png: bytes | None = None) -> tu
             figures[vp["id"]] = S.make_figure(asset, f"3D picture on sheet {data['number']}", caption=str(vp.get("title") or "3D snapshot"), width_mm=round(w, 3))      # width alone: a height would need SLDC 1.1
     envelope = {"format": SLDC_FORMAT, "sheet": data, "order": [vp["id"] for vp in data["viewports"]],
                 "unit": project.manifest["unit"], "model_revision": project.revision}
+    if preview_svg is not None:
+        envelope["vector_svg"] = preview_svg
+        envelope["vector_sha256"] = hashlib.sha256(preview_svg.encode("utf-8")).hexdigest()
     if preview_png is not None:
         envelope["preview_asset"] = sheet_asset.id
         blocks = [S.make_figure(sheet_asset, f"Complete drawing sheet {data['number']}", width_mm=data["width"], height_mm=data["height"],
@@ -351,6 +373,9 @@ def read_sldc(data: bytes) -> dict[str, Any]:
     envelope = (package.document.get("extensions") or {}).get(SLDC_EXTENSION)
     if not isinstance(envelope, dict) or envelope.get("format") != SLDC_FORMAT:
         raise BadRequest("This .sldc file was not made from a SPADRA sheet")
+    if "vector_svg" in envelope and (not isinstance(envelope["vector_svg"], str) or
+                                     hashlib.sha256(envelope["vector_svg"].encode("utf-8")).hexdigest() != envelope.get("vector_sha256")):
+        raise BadRequest("The vector sheet in this SLDC file is missing or damaged")
     return {**envelope, "assets": {k: bytes(a.data) for k, a in package.assets.items()}}
 
 

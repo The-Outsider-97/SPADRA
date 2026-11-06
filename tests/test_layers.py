@@ -112,6 +112,20 @@ class Walls(Case):
         self.assertEqual(self.vol(self.w), before)
         self.assertEqual(self.layers()[1]["openings"], "all")
 
+    def test_new_layer_uses_the_exact_command_in_an_isolated_preview_project(self):
+        revision, before = self.p.revision, self.vol(self.w)
+        original = D.world_mesh(self.p, self.w)
+        draft = self.p.scratch()
+        result = draft.execute("model.add_layer", {"id": self.w, "side": "left", "material": "Plasterboard", "thickness": 50,
+                                                   "openings": "none"})["result"]
+        mesh = D.world_mesh(draft, self.w)
+        self.assertTrue(mesh[0] and mesh[1])
+        self.assertNotEqual(len(mesh[1]), len(original[1]))
+        self.assertTrue(result["layer"])
+        self.assertEqual(self.p.revision, revision)
+        self.assertAlmostEqual(self.vol(self.w), before)
+        self.assertEqual(len(self.layers()), 1)
+
     def test_layers_are_reordered_and_removed(self):
         a, b = self.add(material="Plasterboard", thickness=10), self.add(material="Mineral wool", thickness=100)
         self.run_("model.move_layer", id=self.w, layer=b, position=0)

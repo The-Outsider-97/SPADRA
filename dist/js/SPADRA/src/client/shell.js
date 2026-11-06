@@ -222,15 +222,16 @@ export class Shell {
         }
     }
     async exportSheetFile() {
-        let preview;
+        let preview, vectors;
         try {
-            preview = await this.sheet.printablePng();
+            vectors = this.sheet.printableSvg();
+            preview = await this.sheet.printablePng(vectors);
         }
         catch (error) {
             toast(error instanceof Error ? error.message : "The sheet could not be rendered.", { kind: "error" });
             return;
         }
-        const file = await store.exportSheet(preview);
+        const file = await store.exportSheet(preview, vectors);
         if (file) {
             saveBlob(file.blob, file.filename);
             store.setStatus(`Exported ${file.filename}`);

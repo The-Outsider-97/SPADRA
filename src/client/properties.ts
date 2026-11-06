@@ -220,7 +220,7 @@ export function editCommand(p: Pick<Properties, "kind" | "ref">, key: string, va
     if (key.startsWith("note:")) return { op: "sheet.set_note", params: { id: ref["sheet"], note: key.slice(5), key: "text", value } };
     return { op: "sheet.set", params: { id: ref["sheet"], key, value } };
   }
-  if (p.kind === "view" && (key === "cut_reference" || key === "cut_offset")) return { op: "view.set_cut_plane", params: { id: ref["view"], key, value } };
+  if (p.kind === "view" && ["cut_reference", "cut_offset", "range_top", "range_bottom", "range_depth"].includes(key)) return { op: "view.set_cut_plane", params: { id: ref["view"], key, value } };
   if (p.kind === "view" && key === "name") return { op: "view.rename", params: { id: ref["view"], name: value } };
   if (p.kind === "view" && key === "depth") return { op: "view.set_section", params: { id: ref["view"], depth: value } };
   if (p.kind === "view" && (key === "opening_direction" || key === "material_hatching")) return { op: "view.set_option", params: { id: ref["view"], key, value } };
