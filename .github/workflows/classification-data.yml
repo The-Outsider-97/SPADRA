@@ -1,0 +1,44 @@
+name: Classification Data Validation
+
+on:
+  push:
+    paths:
+      - 'classifications.py'
+      - 'data/**'
+      - 'tests/test_classifications.py'
+      - '.github/workflows/classification-data.yml'
+  pull_request:
+    paths:
+      - 'classifications.py'
+      - 'data/**'
+      - 'tests/test_classifications.py'
+      - '.github/workflows/classification-data.yml'
+
+jobs:
+  data-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Python syntax (no SLAI runtime required)
+        run: |
+          python -m py_compile classifications.py data/build_ifc_type_products.py tests/test_classifications.py
+      - name: Schema-derived catalog consistency
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          data=json.loads(Path("data/ifc_type_products.json").read_text(encoding="utf-8"))
+          assert data["schema"] == "IFC4X3_ADD2"
+          assert data["version"] == "4.3.2.0"
+          assert len(data["types"]) == 128
+          assert "SHEAR" in data["types"]["IfcWallType"]["predefined_types"]
+          assert "IfcRoofType" in data["types"]
+          sample=json.loads(Path("data/omniclass.example.json").read_text(encoding="utf-8"))
+          assert sample["schema"] == "spadra.omniclass.v1"
+          assert sample["tables"] == {"21": [], "23": []}
+          assert sample["assembly_mappings"] == []
+          print("Classification JSON and Python syntax checks passed")
+          PY
