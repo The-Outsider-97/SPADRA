@@ -335,6 +335,29 @@ def calculator_measure(app: SpadraApp, req: Request) -> Any:
         return C.measure(app.require(), [text(i, "id", 80) for i in ids])
 
 
+# ----------------------------------------------------------------------------------------------------------- classifications
+@router.route("GET", "/api/classifications")
+def classification_info(app: SpadraApp, req: Request) -> Any:
+    from . import classifications as CL
+    return CL.info()
+
+
+@router.route("GET", "/api/classifications/search")
+def classification_search(app: SpadraApp, req: Request) -> Any:
+    """Search the official IFC type catalog or locally licensed OmniClass and assembly entries."""
+    from . import classifications as CL
+    kind = choice(req.query.get("kind", "ifc"), ("ifc", "omniclass", "assembly"), "kind")
+    q = text(req.query.get("q") or "", "q", 100, empty=True)
+    try:
+        table, limit = int(req.query.get("table", "21")), int(req.query.get("limit", "30"))
+    except (ValueError, TypeError):
+        raise BadRequest("table and limit must be whole numbers") from None
+    if table not in (21, 23):
+        raise BadRequest("OmniClass table must be 21 or 23")
+    limit = integer(limit, "limit", 1, 200)
+    return {"results": CL.search(kind, q, table=table, limit=limit)}
+
+
 # ---------------------------------------------------------------------------------------------------------------- NL-SfB
 @router.route("GET", "/api/sfb")
 def sfb_info(app: SpadraApp, req: Request) -> Any:
