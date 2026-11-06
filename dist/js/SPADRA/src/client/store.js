@@ -41,7 +41,8 @@ export class Store {
     /** What the next wall will be: height in metres, thickness in millimetres. Shared by the 2D and 3D wall tools. */
     wallOptions = { height: 3.2, thickness: 250 };
     /** What the Extrude, Void and Sweep tools make: depth and base in metres above the level, the sweep's profile in millimetres. */
-    formOptions = { depth: 1, base: 0, voidDepth: 4, voidBase: -0.5, sweepWidth: 200, sweepHeight: 200, sweepShape: "rectangle", sweepBase: 0 };
+    formOptions = { depth: 1, base: 0, voidDepth: 4, voidBase: -0.5, sweepWidth: 200, sweepHeight: 200, sweepShape: "rectangle", sweepBase: 0,
+        sweepPolygon: null, sweepPivot: "center", sweepAngle: 0, sweepOffset: [0, 0, 0], sweepMirror: false, sweepRadius: 0 };
     selection = null;
     properties = null;
     drawing = null;
@@ -560,6 +561,22 @@ export class Store {
             return null;
         }
         return this.guard(() => this.api.download(`/export/schedule/${tab.ref.id}`), "Exporting");
+    }
+    /** The open sheet as a .sldc file (the sheet as read, plus everything it draws, so that opening the file gives the sheet back). */
+    async exportSheet() {
+        const tab = this.tab;
+        if (!tab || tab.ref.kind !== "sheet") {
+            toast("Open a sheet to export it as .sldc.", { kind: "info" });
+            return null;
+        }
+        return this.guard(() => this.api.download(`/export/sheet/${tab.ref.id}`), "Exporting the sheet");
+    }
+    /** Lay out the sheet's viewports so that none overlaps another or the title block; what is locked or placed by hand stays where it is unless ``all``. */
+    async arrangeSheet(id, all = false, rescale = false) {
+        const done = await this.run("sheet.arrange", { id, mode: all ? "all" : "auto", rescale });
+        if (done)
+            toast("The viewports are arranged. Undo puts them back.", { kind: "ok" });
+        return !!done;
     }
     // ------------------------------------------------------------------------------------------------------------------- links
     /** Follow a link from Properties or the Project Browser: open a view or sheet, select an element or a drawing entity, or open a dialog. */

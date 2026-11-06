@@ -154,7 +154,7 @@ function defineForm(store, d, created) {
     return h("section", { attrs: { "aria-label": "Define a family" }, css: { display: "grid", gap: ".5rem" } }, h("h3", { text: "Define a family" }), h("div", { class: "prop-add" }, name, shape), sizes, h("p", { class: "muted", text: "A family is a parametric box, cylinder or sphere. After defining it you can add formulas and bounds to its parameters." }), h("div", { class: "prop-add" }, h("button", { class: "tool-inline", type: "button", text: "Define family", on: { click: () => { void define(); } } })));
 }
 // ------------------------------------------------------------------------------------------------------------------------ reports
-const REPORT_SECTIONS = [["summary", "Project and model summary"], ["levels", "Levels"], ["schedules", "Schedules"], ["materials", "Material quantities"], ["sheets", "Sheets and revisions"], ["checks", "Model check"]];
+const REPORT_SECTIONS = [["summary", "Project and model summary"], ["levels", "Levels"], ["schedules", "Schedules"], ["materials", "Material quantities"], ["sheets", "Sheets and revisions"], ["checks", "Model check"], ["requirements", "Information requirements (ILS and IDS)"]];
 /** Make a project report (an SLDC document) from chosen sections, as a background operation, then read it. */
 export function newReportDialog(store) {
     const name = h("input", { type: "text", value: `${store.project?.name ?? "Project"} report`, attrs: { maxlength: 80, autocomplete: "off", "aria-label": "Report name" } });

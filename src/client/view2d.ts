@@ -5,13 +5,13 @@ import { promptDialog, toast } from "../../../tools/web/src/ui.js";
 import { hatchDialog, mirrorKeepDialog, numberPrompt, type HatchChoice } from "./dialogs.js";
 import { clamp } from "../../../tools/web/src/util.js";
 import {
-  alongFrom, angleBetween, distToSegment, dist, entityDistance, entityBounds, fitBox, formatDimension, gripAt, grips, hatchLoops, insideBox, mid, niceStep, normaliseRect, orthoConstrain,
+  alongFrom, angleBetween, closedLoop, distToSegment, dist, entityDistance, entityBounds, fitBox, formatDimension, gripAt, grips, hatchLoops, insideBox, mid, niceStep, normaliseRect, orthoConstrain,
   pointInPolygon, polygonDistance, polygonsBounds, rotateAbout, roundAngle, segments, snapPoint, textBox, wallBand, type Grip, type Snap,
 } from "./geom2d.js";
 import { cssColor, withAlpha } from "./palette.js";
-import { cutStyle, cutWeight, levelLabel, markArrows, markLabel, projectionAt, snapPolygons, visibleLevels } from "./projection.js";
+import { cutStyle, cutWeight, hatchFill, patternPath, levelLabel, markArrows, markLabel, projectionAt, snapPolygons, visibleLevels } from "./projection.js";
 import type { Store, Tool } from "./store.js";
-import type { DrawingData, Entity, GridLabel, PlanWall, ProjItem, Projection, Pt, RoomLabel, SectionMark } from "./types.js";
+import type { DrawingData, Entity, GridLabel, HatchSpec, PlanSymbol, PlanWall, ProjItem, Projection, Pt, RoomLabel, SectionMark } from "./types.js";
 
 const MM_PER = { mm: 1, cm: 10, m: 1000 } as const;
 const SNAP_PX = 10;
@@ -27,11 +27,14 @@ const CURVE_TOOLS = new Set<string>(["offset", "trim", "extend", "fillet", "hatc
 /** An edit being dragged with a handle: a wall end, a turn of the selection about its centre, or a section's cut line (an end, or all of it). */
 type Edit =
   | { kind: "end"; id: string; end: "a" | "b"; axis: { a: Pt; b: Pt; thickness: number }; from: Pt; now: Pt; moved: boolean }
+  | { kind: "outline"; id: string; points: Pt[]; corner: number; edge: number; from: Pt; now: Pt; moved: boolean }
   | { kind: "turn"; ids: string[]; centre: Pt; from: Pt; now: Pt; raw: Pt; fine: boolean; moved: boolean }
   | { kind: "mark"; id: string; part: "a" | "b" | "body"; from: Pt; now: Pt; moved: boolean };
 /** A handle drawn on the selection: where it is, its look, and the edit that dragging it starts. */
 interface Handle { at: Pt; shape: "square" | "turn"; edit: () => Edit }
 const TURN_OFFSET_PX = 30;
+const PIVOTS = ["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"] as const;
+const PIVOT_NAMES: Record<(typeof PIVOTS)[number], string> = { "top-left": "Top left", top: "Top", "top-right": "Top right", left: "Left", center: "Centre", right: "Right", "bottom-left": "Bottom left", bottom: "Bottom", "bottom-right": "Bottom right" };
 
 interface Colors { paper: string; grid: string; gridMajor: string; ink: string; muted: string; select: string; accent: string; hover: string }
 
@@ -106,16 +109,64 @@ export class DrawingView {
     const hud = (tool: Tool, note: string, fields: Array<[HTMLElement, () => void]>, extra: HTMLElement[] = []): void => {
       this.formHuds.set(tool, { el: h("div", { class: "wall-hud", hidden: true }, ...fields.map((f) => f[0]), ...extra, h("span", { class: "muted", text: note })), sync: () => fields.forEach((f) => f[1]()) });
     };
-    hud("extrude", "Click each corner of the outline. Enter or double-click finishes, Esc cancels.",
-      [num("Depth (m)", () => o.depth, (n) => { o.depth = n; }, "0.1", true), num("Base (m)", () => o.base, (n) => { o.base = n; }, "0.1", false)]);
     hud("void", "Draw the outline of the cut. It cuts floors and extrusions it lies wholly inside, and walls it passes through square.",
       [num("Depth (m)", () => o.voidDepth, (n) => { o.voidDepth = n; }, "0.1", true), num("Base (m)", () => o.voidBase, (n) => { o.voidBase = n; }, "0.1", false)]);
-    const shape = h("select", { attrs: { "aria-label": "Profile" } }, h("option", { value: "rectangle", text: "Rectangle" }), h("option", { value: "round", text: "Round" }));
-    shape.addEventListener("change", () => { o.sweepShape = shape.value === "round" ? "round" : "rectangle"; });
+    const polygon = this.pickedPolygon.bind(this);
+    const extrudeBtn = h("button", { type: "button", class: "tool-inline", text: "Use selected polygon", attrs: { title: "Stand the closed polygon selected in this drawing up to the depth" }, on: { click: () => { void this.extrudeSelected(); } } });
+    hud("extrude", "Click each corner of the outline, or select a closed polygon and use it. Enter or double-click finishes, Esc cancels.",
+      [num("Depth (m)", () => o.depth, (n) => { o.depth = n; }, "0.1", true), num("Base (m)", () => o.base, (n) => { o.base = n; }, "0.1", false)], [extrudeBtn]);
+    hud("void", "Draw the outline of the cut. It cuts floors and extrusions it lies wholly inside, and walls it passes through square.",
+      [num("Depth (m)", () => o.voidDepth, (n) => { o.voidDepth = n; }, "0.1", true), num("Base (m)", () => o.voidBase, (n) => { o.voidBase = n; }, "0.1", false)]);
+    const shape = h("select", { attrs: { "aria-label": "Profile" } }, h("option", { value: "rectangle", text: "Rectangle" }), h("option", { value: "round", text: "Round" }), h("option", { value: "user", text: "User defined" }));
     const shapeLabel = h("label", {}, "Profile", shape);
+    const [widthLabel, syncWidth] = num("Width (mm)", () => o.sweepWidth, (n) => { o.sweepWidth = n; }, "10", true);
+    const [heightLabel, syncHeight] = num("Height (mm)", () => o.sweepHeight, (n) => { o.sweepHeight = n; }, "10", true);
+    // User defined: the polygon picked in the drawing replaces width and height with where it sits on the path.
+    const pick = h("button", { type: "button", class: "tool-inline", text: "Use selected polygon", attrs: { title: "Take the closed polygon selected in this drawing as the profile" }, on: { click: () => { const p = polygon(); if (p) { o.sweepPolygon = p; refresh(); } else toast("Select a closed polygon in this drawing first (a closed polyline, a circle or a hatch).", { kind: "info" }); } } });
+    const picked = h("span", { class: "muted" });
+    const grid = h("div", { class: "pivot-grid", attrs: { role: "radiogroup", "aria-label": "Pivot alignment" } });
+    const cells = PIVOTS.map((k) => { const b = h("button", { type: "button", attrs: { role: "radio", title: PIVOT_NAMES[k], "aria-label": PIVOT_NAMES[k] }, on: { click: () => { o.sweepPivot = k; refresh(); } } }); grid.append(b); return [k, b] as const; });
+    const pivotLabel = h("label", {}, "Pivot alignment", grid);
+    const [angleLabel, syncAngle] = num("Angle (°)", () => o.sweepAngle, (n) => { o.sweepAngle = n; }, "1", false);
+    const offs = (["X", "Y", "Z"] as const).map((a, i) => num(`Offset ${a} (mm)`, () => o.sweepOffset[i] as number, (n) => { o.sweepOffset[i] = n; }, "10", false));
+    const mirror = h("input", { type: "checkbox", attrs: { "aria-label": "Mirror" } });
+    mirror.addEventListener("change", () => { o.sweepMirror = mirror.checked; });
+    const mirrorLabel = h("label", {}, "Mirror", mirror);
+    const [radiusLabel, syncRadius] = num("Corner radius (mm)", () => o.sweepRadius, (n) => { o.sweepRadius = Math.max(0, n); }, "1", false);
+    const userOnly = [pick, picked, pivotLabel, angleLabel, ...offs.map((x) => x[0]), mirrorLabel, radiusLabel];
+    const refresh = (): void => {
+      const user = o.sweepShape === "user";
+      shape.value = o.sweepShape;
+      widthLabel.hidden = heightLabel.hidden = user;
+      for (const el of userOnly) el.hidden = !user;
+      picked.textContent = o.sweepPolygon ? `${o.sweepPolygon.length} points` : "no polygon yet";
+      for (const [k, b] of cells) b.setAttribute("aria-checked", String(o.sweepPivot === k));
+      mirror.checked = o.sweepMirror;
+      syncWidth(); syncHeight(); syncAngle(); syncRadius(); offs.forEach((x) => x[1]());
+    };
+    shape.addEventListener("change", () => { o.sweepShape = shape.value === "round" ? "round" : shape.value === "user" ? "user" : "rectangle"; refresh(); });
     hud("sweep", "Click along the path. Enter or double-click finishes, C closes it, Esc cancels. The path stays at one height.",
-      [num("Width (mm)", () => o.sweepWidth, (n) => { o.sweepWidth = n; }, "10", true), num("Height (mm)", () => o.sweepHeight, (n) => { o.sweepHeight = n; }, "10", true),
-        [shapeLabel, () => { shape.value = o.sweepShape; }], num("Base (m)", () => o.sweepBase, (n) => { o.sweepBase = n; }, "0.1", false)]);
+      [[shapeLabel, () => refresh()], [widthLabel, () => {}], [heightLabel, () => {}], [pivotLabel, () => {}], [angleLabel, () => {}], ...offs.map((x) => [x[0], () => {}] as [HTMLElement, () => void]),
+        [mirrorLabel, () => {}], [radiusLabel, () => {}], num("Base (m)", () => o.sweepBase, (n) => { o.sweepBase = n; }, "0.1", false)], [pick, picked]);
+    refresh();
+  }
+
+  /** The closed polygon of the one drawing entity selected on this plan, in the drawing's unit, or null. */
+  private pickedPolygon(): Array<[number, number]> | null {
+    const ids = this.selectedIds();
+    const e = ids.length === 1 ? this.entities().find((en) => en.id === ids[0]) : undefined;
+    const loop = e ? closedLoop(e) : null;
+    return loop ? loop.map((q) => [q[0], q[1]] as [number, number]) : null;
+  }
+
+  /** Extrude: stand the selected closed polygon up to the depth. */
+  private async extrudeSelected(): Promise<void> {
+    const loop = this.pickedPolygon(), level = this.data?.view.level_id, o = this.store.formOptions;
+    if (!loop) { toast("Select a closed polygon in this drawing first (a closed polyline, a circle or a hatch).", { kind: "info" }); return; }
+    if (!level) { toast("Extrusions are made on a floor plan.", { kind: "info" }); return; }
+    const out = await this.store.run("model.add_extrusion", { points: loop, level, void: false, depth: o.depth, base: o.base });
+    const id = (out?.result as { id?: string } | undefined)?.id;
+    if (id) await this.store.select({ kind: "model", ids: [id] });
   }
 
   // ------------------------------------------------------------------------------------------------------------- public
@@ -563,6 +614,12 @@ export class DrawingView {
       const axis = wall.axis;
       for (const end of ["a", "b"] as const) out.push({ at: axis[end], shape: "square", edit: (): Edit => ({ kind: "end", id: wall.id, end, axis, from: axis[end], now: axis[end], moved: false }) });
     }
+    const floor = ids.length === 1 ? data.model.find((w) => w.id === ids[0] && w.category === "floor" && w.outline && w.outline.length >= 3) : undefined;
+    if (floor?.outline) {
+      const pts = floor.outline;
+      pts.forEach((at, i) => out.push({ at, shape: "square", edit: (): Edit => ({ kind: "outline", id: floor.id, points: pts, corner: i, edge: -1, from: at, now: at, moved: false }) }));       // a corner moves freely
+      pts.forEach((a, i) => { const at = mid(a, pts[(i + 1) % pts.length] as Pt); out.push({ at, shape: "square", edit: (): Edit => ({ kind: "outline", id: floor.id, points: pts, corner: -1, edge: i, from: at, now: at, moved: false }) }); });       // an edge moves across itself
+    }
     const box = polygonsBounds(data.model.filter((w) => ids.includes(w.id)).map((w) => w.polygon));
     if (box) {
       const centre: Pt = [(box[0][0] + box[1][0]) / 2, (box[0][1] + box[1][1]) / 2];
@@ -588,6 +645,9 @@ export class DrawingView {
     if (ed.kind === "end") {
       const grid = this.data?.model.find((w) => w.id === ed.id)?.category === "grid";
       await this.store.run(grid ? "model.set_grid" : "model.set_wall_ends", { id: ed.id, [ed.end === "a" ? "start" : "end"]: ed.now });
+    } else if (ed.kind === "outline") {
+      const next = this.outlineAfter(ed);
+      if (next) await this.store.run("model.set_boundary", { id: ed.id, points: next });
     } else if (ed.kind === "turn") {
       const degrees = (this.turnAngle(ed) * 180) / Math.PI;
       if (Math.abs(degrees) > 1e-9) await this.store.run("model.rotate", { ids: ed.ids, centre: ed.centre, angle: degrees });
@@ -687,7 +747,11 @@ export class DrawingView {
       const o = this.store.formOptions;
       const pts = this.pts.filter((p, i) => i === 0 || dist(p, this.pts[i - 1] ?? p) > 1e-9);
       if (pts.length >= (closed ? 3 : 2) && level) {
-        const out = await this.store.run("model.add_sweep", { points: pts, closed, level, shape: o.sweepShape, width: o.sweepWidth, height: o.sweepHeight, base: o.sweepBase });
+        if (o.sweepShape === "user" && !o.sweepPolygon) { toast("Pick the closed polygon the sweep uses as its profile first: select it, then choose Use selected polygon.", { kind: "info" }); this.pts = []; this.draw(); return; }
+        const params = o.sweepShape === "user"
+          ? { points: pts, closed, level, base: o.sweepBase, profile: "user", polygon: o.sweepPolygon, pivot: o.sweepPivot, angle: o.sweepAngle, offset_x: o.sweepOffset[0], offset_y: o.sweepOffset[1], offset_z: o.sweepOffset[2], mirror: o.sweepMirror, radius: o.sweepRadius }
+          : { points: pts, closed, level, shape: o.sweepShape, width: o.sweepWidth, height: o.sweepHeight, base: o.sweepBase };
+        const out = await this.store.run("model.add_sweep", params);
         const id = (out?.result as { id?: string } | undefined)?.id;
         if (id) await this.store.select({ kind: "model", ids: [id] });
       } else toast("A sweep needs a path of at least two points on a floor plan.", { kind: "info" });
@@ -780,7 +844,7 @@ export class DrawingView {
   private modelDistance(w: PlanWall, p: Pt): number {
     const s = w.symbol;
     const base = polygonDistance(p, w.polygon);
-    return w.category === "door" && s?.hinge && s.leaf_end ? Math.min(base, distToSegment(p, s.hinge, s.leaf_end)) : base;
+    return (w.category === "door" || w.category === "window") && s?.hinge && s.leaf_end ? Math.min(base, distToSegment(p, s.hinge, s.leaf_end)) : base;
   }
 
   /** The nearest drawn entity of the given kinds (never a wall or a hatch). */
@@ -920,6 +984,18 @@ export class DrawingView {
     if (clickable) this.lengthBox = { x: mx - w / 2, y: my - hgt / 2, w, h: hgt, id, a, b };
   }
 
+  /** A floor's outline as a corner or edge drag would leave it: a corner goes where the pointer is; an edge slides along its own normal, so its neighbours keep their directions. */
+  private outlineAfter(ed: Extract<Edit, { kind: "outline" }>): Pt[] | null {
+    const pts = ed.points, n = pts.length;
+    if (ed.corner >= 0) return pts.map((q, i) => (i === ed.corner ? ed.now : q));
+    const a = pts[ed.edge] as Pt, b = pts[(ed.edge + 1) % n] as Pt;
+    const len = dist(a, b);
+    if (len < 1e-9) return null;
+    const nx = -(b[1] - a[1]) / len, ny = (b[0] - a[0]) / len;
+    const d = (ed.now[0] - ed.from[0]) * nx + (ed.now[1] - ed.from[1]) * ny;
+    return pts.map((q, i) => (i === ed.edge || i === (ed.edge + 1) % n ? [q[0] + nx * d, q[1] + ny * d] as Pt : q));
+  }
+
   /** What a handle drag would leave behind if it were dropped now. */
   private paintEditGhost(ed: Edit, k: Colors): void {
     const ctx = this.ctx;
@@ -932,6 +1008,9 @@ export class DrawingView {
         if (ed.axis.thickness > 0) { this.tracePolygon(wallBand(a, b, ed.axis.thickness)); ctx.fill(); } else this.line(a, b);                       // a grid has no thickness: only its line
         ctx.stroke(); this.paintLength(a, b, ed.axis.thickness, ed.id, k, false);
       }
+    } else if (ed.kind === "outline") {
+      const next = this.outlineAfter(ed);
+      if (next) { ctx.beginPath(); this.tracePolygon(next); ctx.fill(); ctx.stroke(); }
     } else if (ed.kind === "turn") {
       const angle = this.turnAngle(ed);
       for (const w of this.data?.model ?? []) if (ed.ids.includes(w.id)) { ctx.beginPath(); this.tracePolygon(w.polygon.map((p) => rotateAbout(p, ed.centre, angle))); ctx.fill(); ctx.stroke(); }
@@ -981,16 +1060,46 @@ export class DrawingView {
       ctx.beginPath();
       for (const e of item.edges) { const [ax, ay] = this.toScreen([e[0] ?? 0, e[1] ?? 0]), [bx, by] = this.toScreen([e[2] ?? 0, e[3] ?? 0]); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); }
       ctx.setLineDash([]); ctx.lineWidth = picked ? 2.2 : 1.1; ctx.strokeStyle = picked ? k.select : k.ink; ctx.stroke();
+      if (item.opening) {                                                            // opening direction: solid toward the viewer, dashed away from it, per panel
+        for (const part of [item.opening, ...(item.opening.more ?? [])]) {
+          ctx.beginPath();
+          for (const l of part.lines) { const [ax, ay] = this.toScreen([l[0] ?? 0, l[1] ?? 0]), [bx, by] = this.toScreen([l[2] ?? 0, l[3] ?? 0]); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); }
+          ctx.setLineDash(part.toward ? [] : [7, 5]); ctx.lineWidth = 1; ctx.stroke(); ctx.setLineDash([]);
+        }
+      }
     }
     for (const item of pr.items) {
       if (!item.cut.length) continue;
       const picked = sel.has(item.id);
       if (item.cut_material) { this.paintLayers(item, picked, k); continue; }                              // a foundation: each layer in its own material's hatch
+      if (item.cut_hatches) {                                                                               // a layered wall, floor or roof: each loop is a layer with its own hatch
+        const ink = picked ? k.select : k.ink;
+        item.cut.forEach((loop, n) => {
+          const hatch = item.cut_hatches?.[n] ?? null;
+          ctx.beginPath(); loop.forEach((p, i) => { const [x, y] = this.toScreen(p); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); }); ctx.closePath();
+          ctx.fillStyle = withAlpha(ink, cutWeight(item.category) * hatchFill(hatch)); ctx.fill();
+          ctx.lineWidth = picked ? 2.2 : 1.4; ctx.strokeStyle = ink; ctx.stroke();
+          if (hatch) this.paintCutHatch([loop], hatch, ink);
+        });
+        continue;
+      }
       ctx.beginPath();
       for (const loop of item.cut) { loop.forEach((p, i) => { const [x, y] = this.toScreen(p); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); }); ctx.closePath(); }
-      ctx.fillStyle = withAlpha(picked ? k.select : k.ink, cutWeight(item.category)); ctx.fill("evenodd");
+      ctx.fillStyle = withAlpha(picked ? k.select : k.ink, cutWeight(item.category) * hatchFill(item.cut_hatch)); ctx.fill("evenodd");
       ctx.lineWidth = picked ? 2.5 : 1.8; ctx.strokeStyle = picked ? k.select : k.ink; ctx.stroke();
+      if (item.cut_hatch) this.paintCutHatch(item.cut, item.cut_hatch, picked ? k.select : k.ink);
     }
+  }
+
+  /** A cut's hatch, drawn in screen units so its spacing reads the same at any zoom (the pattern's spacing on paper at about 4 px per mm). */
+  private paintCutHatch(loops: readonly (readonly Pt[])[], hatch: HatchSpec, color: string): void {
+    if (hatch.kind === "none" || hatch.kind === "solid") return;
+    const ctx = this.ctx;
+    const screen = loops.map((l) => l.map((p) => this.toScreen(p)));
+    const d = patternPath(screen, hatch, Math.max(4, hatch.spacing_mm * 4), true);
+    if (!d) return;
+    ctx.save(); ctx.strokeStyle = color; ctx.lineWidth = 0.8; ctx.setLineDash([]);
+    ctx.stroke(new Path2D(d)); ctx.restore();
   }
 
   /** The grids a section or elevation meets: a dashed vertical line across the picture with its bubble above. */
@@ -1094,7 +1203,17 @@ export class DrawingView {
       for (const ring of [w.polygon, ...(w.holes ?? [])]) { ring.forEach((p, i) => { const [x, y] = this.toScreen(p); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); }); ctx.closePath(); }
     };
     ctx.lineJoin = "round"; ctx.lineCap = "round";
-    if (w.category === "wall") { this.paintWall(w.polygon, color, selected); return; }
+    if (w.category === "wall") {
+      this.paintWall(w.polygon, color, selected);
+      if (w.bands?.length) {                                                                                // a layered wall: every layer's band with its own hatch and edges
+        for (const band of w.bands) for (const poly of band.polygons) {
+          ctx.beginPath(); poly.forEach((p, i) => { const [x, y] = this.toScreen(p); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); }); ctx.closePath();
+          ctx.lineWidth = 1; ctx.setLineDash([]); ctx.strokeStyle = color; ctx.stroke();
+          if (band.hatch) this.paintCutHatch([poly], band.hatch, color);
+        }
+      } else if (w.hatch) this.paintCutHatch([w.polygon], w.hatch, color);
+      return;
+    }
     ctx.lineWidth = selected ? 2.5 : 1.5; ctx.strokeStyle = color; ctx.fillStyle = color;
     if (w.category === "floor") {
       trace(); ctx.setLineDash([]); ctx.lineWidth = selected ? 2 : 1; ctx.fillStyle = withAlpha(color, selected ? 0.18 : 0.06); ctx.fill("evenodd");
@@ -1148,17 +1267,24 @@ export class DrawingView {
     if (w.category === "window" && w.symbol?.a && w.symbol.b) {
       trace(); ctx.fillStyle = withAlpha(k.paper, 1); ctx.fill(); ctx.stroke();
       ctx.beginPath(); this.line(w.symbol.a, w.symbol.b); ctx.stroke();
+      this.paintSwing(w.symbol);                                                                    // a casement shows its sash and swing, a fixed window has none
       return;
     }
     if (w.category === "door") {
       ctx.fillStyle = withAlpha(k.paper, 1); trace(); ctx.fill();                                   // clear the wall behind the opening
       ctx.beginPath(); edge(3, 0); edge(1, 2); ctx.stroke();                                       // the jambs
-      const s = w.symbol;
-      if (s?.hinge && s.leaf_end && s.radius !== undefined && s.start_angle !== undefined && s.end_angle !== undefined) {
-        ctx.beginPath(); this.line(s.hinge, s.leaf_end); ctx.stroke();                              // the open leaf
-        const [cx, cy] = this.toScreen(s.hinge);
-        ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(cx, cy, s.radius * this.scale, -s.end_angle, -s.start_angle, false); ctx.stroke();   // its swing
-      }
+      this.paintSwing(w.symbol);
+    }
+  }
+
+  /** The opening direction of a door or casement on a plan: the open leaf and the arc it sweeps. Absent when the view hides it. */
+  private paintSwing(s: PlanSymbol | undefined): void {
+    if (!(s?.hinge && s.leaf_end && s.radius !== undefined && s.start_angle !== undefined && s.end_angle !== undefined)) return;
+    const ctx = this.ctx;
+    for (const l of [{ hinge: s.hinge, leaf_end: s.leaf_end, radius: s.radius, start_angle: s.start_angle, end_angle: s.end_angle }, ...(s.more ?? [])]) {      // one leaf per swinging panel
+      ctx.beginPath(); this.line(l.hinge, l.leaf_end); ctx.stroke();                                // the open leaf
+      const [cx, cy] = this.toScreen(l.hinge);
+      ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(cx, cy, l.radius * this.scale, -l.end_angle, -l.start_angle, false); ctx.stroke();   // its swing
     }
   }
 
@@ -1174,6 +1300,7 @@ export class DrawingView {
     ctx.fillStyle = selected ? color : k.ink; ctx.textAlign = "center"; ctx.textBaseline = "middle";
     ctx.font = `bold 13px ${font}`; ctx.fillText(label.name, x, y - 9);
     ctx.font = `12px ${font}`; ctx.fillText(`${label.number} · ${label.area_m2.toLocaleString(undefined, { maximumFractionDigits: 2 })} m²`, x, y + 8);
+    if (label.volume_m3 !== undefined) ctx.fillText(`${label.volume_m3.toLocaleString(undefined, { maximumFractionDigits: 2 })} m³`, x, y + 22);       // the enclosed volume, beside the area
     ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
   }
 

@@ -139,7 +139,7 @@ function defineForm(store: Store, d: FamiliesResponse, created: (id: string) => 
 }
 
 // ------------------------------------------------------------------------------------------------------------------------ reports
-const REPORT_SECTIONS: Array<[string, string]> = [["summary", "Project and model summary"], ["levels", "Levels"], ["schedules", "Schedules"], ["materials", "Material quantities"], ["sheets", "Sheets and revisions"], ["checks", "Model check"]];
+const REPORT_SECTIONS: Array<[string, string]> = [["summary", "Project and model summary"], ["levels", "Levels"], ["schedules", "Schedules"], ["materials", "Material quantities"], ["sheets", "Sheets and revisions"], ["checks", "Model check"], ["requirements", "Information requirements (ILS and IDS)"]];
 
 /** Make a project report (an SLDC document) from chosen sections, as a background operation, then read it. */
 export function newReportDialog(store: Store): void {

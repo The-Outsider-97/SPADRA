@@ -2,7 +2,7 @@
 import { h, replace, s } from "../../../tools/web/src/dom.js";
 import { openMenu, type MenuEntry } from "./menus.js";
 import { entityBounds, formatDimension, segments, textBox } from "./geom2d.js";
-import { cutPath, cutStyle, cutWeight, edgePath, hatchPath, levelLabel, markArrows, markLabel, surfacePath, visibleLevels } from "./projection.js";
+import { cutPath, cutStyle, cutWeight, edgePath, hatchPath, levelLabel, markArrows, markLabel, hatchFill, patternPath, surfacePath, swingPath, visibleLevels } from "./projection.js";
 import { formatCell } from "./schedule.js";
 import { iconFor } from "./browser.js";
 import { flatten, openable, type Store } from "./store.js";
@@ -152,21 +152,29 @@ export class SheetView {
       for (const w of (vp.model ?? []).filter((m) => m.category === cat)) {
         if (cat === "room" || cat === "generic" || cat === "column" || cat === "stair" || cat === "grid" || cat === "gutter" || cat === "downpipe") this.otherItem(g, w, 1 / k);
         else if (cat === "foundation") g.appendChild(s("path", { attrs: { d: outline(w), fill: "var(--ink)", "fill-opacity": 0.06, "stroke-dasharray": "5 2 1 2", ...stroke, "stroke-width": 0.5 } }));
-        else if (cat === "wall") g.appendChild(s("path", { attrs: { d: outline(w), fill: "var(--ink)", "fill-opacity": 0.22, ...stroke } }));
+        else if (cat === "wall") {
+          g.appendChild(s("path", { attrs: { d: outline(w), fill: "var(--ink)", "fill-opacity": 0.22, ...stroke } }));
+          const d = w.hatch && !w.bands?.length ? patternPath([w.polygon], w.hatch, w.hatch.spacing_mm / k) : "";
+          if (d) g.appendChild(s("path", { attrs: { d, fill: "none", "stroke-width": 0.3, stroke: "var(--ink)", "vector-effect": "non-scaling-stroke" } }));
+          for (const band of w.bands ?? []) for (const poly of band.polygons) {                 // a layered wall: each layer's band, outlined and hatched by its material
+            g.appendChild(s("path", { attrs: { d: outline({ polygon: poly }), fill: "none", ...stroke, "stroke-width": 0.5 } }));
+            const bd = band.hatch ? patternPath([poly], band.hatch, band.hatch.spacing_mm / k) : "";
+            if (bd) g.appendChild(s("path", { attrs: { d: bd, fill: "none", "stroke-width": 0.3, stroke: "var(--ink)", "vector-effect": "non-scaling-stroke" } }));
+          }
+        }
         else if (cat === "floor") g.appendChild(s("path", { attrs: { d: outline(w), fill: "var(--ink)", "fill-opacity": 0.05, stroke: "var(--muted)", "stroke-width": 0.75, "vector-effect": "non-scaling-stroke" } }));
         else if (cat === "structural") g.appendChild(s("path", { attrs: { d: outline(w), fill: "none", "stroke-dasharray": "6 4", ...stroke } }));
         else if (cat === "window" && w.symbol?.a && w.symbol.b) {
           g.appendChild(s("path", { attrs: { d: outline(w), fill: "var(--paper)", ...stroke } }));
           g.appendChild(s("path", { attrs: { d: `M${w.symbol.a[0]} ${w.symbol.a[1]}L${w.symbol.b[0]} ${w.symbol.b[1]}`, fill: "none", ...stroke } }));
+          const d = swingPath(w.symbol);
+          if (d) g.appendChild(s("path", { attrs: { d, fill: "none", ...stroke } }));
         } else if (cat === "door") {
           const p = w.polygon, sym = w.symbol;
           g.appendChild(s("path", { attrs: { d: outline(w), fill: "var(--paper)", stroke: "none" } }));
           if (p[0] && p[1] && p[2] && p[3]) g.appendChild(s("path", { attrs: { d: `M${p[3][0]} ${p[3][1]}L${p[0][0]} ${p[0][1]}M${p[1][0]} ${p[1][1]}L${p[2][0]} ${p[2][1]}`, fill: "none", ...stroke } }));
-          if (sym?.hinge && sym.leaf_end && sym.radius !== undefined && sym.start_angle !== undefined && sym.end_angle !== undefined) {
-            const a0 = sym.start_angle, a1 = sym.end_angle, r = sym.radius, c = sym.hinge;
-            const sx = c[0] + r * Math.cos(a0), sy = c[1] + r * Math.sin(a0), ex = c[0] + r * Math.cos(a1), ey = c[1] + r * Math.sin(a1);
-            g.appendChild(s("path", { attrs: { d: `M${c[0]} ${c[1]}L${sym.leaf_end[0]} ${sym.leaf_end[1]}M${sx} ${sy}A${r} ${r} 0 ${a1 - a0 > Math.PI ? 1 : 0} 1 ${ex} ${ey}`, fill: "none", ...stroke } }));
-          }
+          const d = swingPath(sym);
+          if (d) g.appendChild(s("path", { attrs: { d, fill: "none", ...stroke } }));
         }
       }
     }
@@ -193,7 +201,8 @@ export class SheetView {
     if (w.category === "room") {
       g.appendChild(s("path", { attrs: { d: outline, fill: "var(--ink)", "fill-opacity": 0.04, "stroke-dasharray": "2 3", ...stroke, "stroke-width": 0.4 } }));
       const l = w.label as RoomLabel | undefined;
-      if (l && "number" in l) { g.appendChild(label([l.at[0], l.at[1] + 1.8 * unitsPerMm], 3 * unitsPerMm, l.name, 700)); g.appendChild(label([l.at[0], l.at[1] - 2.2 * unitsPerMm], 2.4 * unitsPerMm, `${l.number} · ${l.area_m2.toLocaleString(undefined, { maximumFractionDigits: 2 })} m²`)); }
+      if (l && "number" in l) { g.appendChild(label([l.at[0], l.at[1] + 1.8 * unitsPerMm], 3 * unitsPerMm, l.name, 700)); g.appendChild(label([l.at[0], l.at[1] - 2.2 * unitsPerMm], 2.4 * unitsPerMm, `${l.number} · ${l.area_m2.toLocaleString(undefined, { maximumFractionDigits: 2 })} m²`));
+        if (l.volume_m3 !== undefined) g.appendChild(label([l.at[0], l.at[1] - 5.6 * unitsPerMm], 2.4 * unitsPerMm, `${l.volume_m3.toLocaleString(undefined, { maximumFractionDigits: 2 })} m³`)); }
     } else if (w.category === "generic") {
       g.appendChild(s("path", { attrs: { d: outline, fill: "var(--ink)", "fill-opacity": 0.18, ...stroke } }));
     } else if (w.category === "column") {
@@ -249,6 +258,12 @@ export class SheetView {
     for (const it of pr.items) {                                              // far to near, so nearer elements cover what they hide
       g.appendChild(s("path", { attrs: { d: surfacePath(it, same), fill: "var(--paper)", "fill-rule": "nonzero", stroke: "none" }, data: { element: it.id } }));
       g.appendChild(s("path", { attrs: { d: edgePath(it, same), fill: "none", "stroke-width": 0.5, ...ink } }));
+      if (it.opening) {                                                          // opening direction: solid toward the viewer, dashed away from it, per panel
+        for (const part of [it.opening, ...(it.opening.more ?? [])]) {
+          const d = part.lines.map((l) => `M${l[0]} ${l[1]}L${l[2]} ${l[3]}`).join("");
+          g.appendChild(s("path", { attrs: { d, fill: "none", "stroke-width": 0.35, ...ink, ...(part.toward ? {} : { "stroke-dasharray": "3 2" }) }, data: { opening: it.id } }));
+        }
+      }
     }
     for (const it of pr.items) {
       if (!it.cut.length) continue;
@@ -262,7 +277,20 @@ export class SheetView {
         });
         continue;
       }
-      g.appendChild(s("path", { attrs: { d: cutPath(it, same), fill: "var(--ink)", "fill-opacity": cutWeight(it.category), "fill-rule": "evenodd", "stroke-width": 0.9, ...ink }, data: { cut: it.id } }));
+      if (it.cut_hatches) {                                                       // layers: each loop is one layer, filled and hatched by its own material
+        it.cut.forEach((loop, n) => {
+          const hatch = it.cut_hatches?.[n] ?? null;
+          g.appendChild(s("path", { attrs: { d: cutPath({ ...it, cut: [loop] }, same), fill: "var(--ink)", "fill-opacity": cutWeight(it.category) * hatchFill(hatch), "stroke-width": 0.7, ...ink }, data: { cut: it.id, layer: it.cut_layers?.[n]?.layer ?? "" } }));
+          const d = hatch ? patternPath([loop], hatch, hatch.spacing_mm * unitsPerMm) : "";
+          if (d) g.appendChild(s("path", { attrs: { d, fill: "none", "stroke-width": 0.3, ...ink } }));
+        });
+        continue;
+      }
+      g.appendChild(s("path", { attrs: { d: cutPath(it, same), fill: "var(--ink)", "fill-opacity": cutWeight(it.category) * hatchFill(it.cut_hatch), "fill-rule": "evenodd", "stroke-width": 0.9, ...ink }, data: { cut: it.id } }));
+      if (it.cut_hatch) {                                                         // the material's hatch, spaced on paper
+        const d = patternPath(it.cut, it.cut_hatch, it.cut_hatch.spacing_mm * unitsPerMm);
+        if (d) g.appendChild(s("path", { attrs: { d, fill: "none", "stroke-width": 0.3, ...ink }, data: { hatch: it.id } }));
+      }
     }
   }
 

@@ -46,10 +46,10 @@ function projectInfo(store) {
 }
 function group(store, p, g) {
     const key = `${p.kind}:${g.title.replace(/\s*\(\d+\)$/, "")}`;
-    const isOpen = open.get(key) !== false;
+    const isOpen = open.get(key) ?? !g.collapsed;
     const el = h("div", { class: "prop-group", data: { open: String(isOpen) } });
     el.appendChild(h("button", { class: "group-head", type: "button", attrs: { "aria-expanded": String(isOpen) },
-        on: { click: (e) => { const now = !(open.get(key) !== false); open.set(key, now); el.dataset["open"] = String(now); e.currentTarget.setAttribute("aria-expanded", String(now)); } } }, glyph("chevron-down"), g.title));
+        on: { click: (e) => { const now = !(open.get(key) ?? !g.collapsed); open.set(key, now); el.dataset["open"] = String(now); e.currentTarget.setAttribute("aria-expanded", String(now)); } } }, glyph("chevron-down"), g.title));
     for (const row of g.rows)
         el.appendChild(rowEl(store, p, row));
     if (g.add)
@@ -89,6 +89,8 @@ function rowEl(store, p, row) {
     const key = row.key;
     if (row.type === "sfb")
         return sfbRow(store, p, row, id, label);
+    if (row.type === "catalog")
+        return catalogRow(store, p, row, id, label);
     if (row.type === "choice") {
         const select = h("select", { id, on: { change: () => { void commit(store, p, key, select.value, "choice"); } } }, ...(row.choices ?? []).map((c) => h("option", { value: c.value, text: c.label, selected: c.value === row.value })));
         return h("div", { class: "prop-row" }, label, remove ? h("div", { class: "with-unit" }, select, remove) : select);
@@ -131,8 +133,57 @@ function sfbRow(store, p, row, id, label) {
     const clear = row.value !== "" ? h("button", { class: "iconbtn remove", type: "button", attrs: { "aria-label": `Clear ${row.label}`, title: "Clear the code" }, on: { click: () => { void commit(store, p, key, "", "text"); } } }, glyph("close")) : null;
     return h("div", { class: "prop-row sfb-row" }, label, h("div", { class: "sfb-field" }, h("div", { class: "with-unit" }, input, clear), name, list));
 }
+/** Searchable standard-backed picker. The server remains authoritative for values and crosswalk rules. */
+function catalogRow(store, p, row, id, label) {
+    const kind = row.catalog ?? "ifc";
+    const table = row.table ?? 21;
+    const key = row.key;
+    const list = h("datalist", { id: id + "-list" });
+    const help = h("div", { class: "sfb-name", text: row.text ?? "", attrs: { "aria-live": "polite" } });
+    help.id = id + "-name";
+    const input = h("input", { id, type: "text", value: String(row.value),
+        placeholder: kind === "ifc" ? "IfcWallType" : kind === "assembly" ? "Assembly code" : "OmniClass code",
+        attrs: { list: id + "-list", autocomplete: "off", maxlength: 100, "aria-describedby": help.id } });
+    const fill = (rows) => {
+        list.replaceChildren(...rows.map(e => h("option", { value: e.code, text: e.title })));
+    };
+    fill(row.catalog_suggest ?? []);
+    let timer;
+    input.addEventListener("input", () => {
+        window.clearTimeout(timer);
+        timer = window.setTimeout(async () => {
+            const q = input.value.trim();
+            if (!q) {
+                fill(row.catalog_suggest ?? []);
+                return;
+            }
+            try {
+                const uri = "/classifications/search?kind=" + encodeURIComponent(kind) +
+                    "&table=" + table + "&q=" + encodeURIComponent(q) + "&limit=40";
+                const result = await store.api.get(uri);
+                fill(result.results);
+            }
+            catch { /* Server enforces catalog integrity on commit. */ }
+        }, 150);
+    });
+    input.addEventListener("change", () => { void commit(store, p, key, input.value, "text"); });
+    input.addEventListener("keydown", e => { if (e.key === "Enter")
+        input.blur(); });
+    const clear = row.value !== "" ? h("button", { class: "iconbtn remove", type: "button",
+        attrs: { "aria-label": "Clear " + row.label, title: "Clear the selected classification" },
+        on: { click: () => { void commit(store, p, key, "", "text"); } } }, glyph("close")) : null;
+    return h("div", { class: "prop-row sfb-row" }, label, h("div", { class: "sfb-field" }, h("div", { class: "with-unit" }, input, clear), help, list));
+}
 /** A name and a value for a new custom property, or the text of a new sheet note. */
 function addForm(store, p, kind) {
+    if (kind === "layer") { // the "+": one more layer, which the person then names and sizes in its rows
+        const plus = h("button", { class: "tool-inline", type: "button", text: "+ Add layer", attrs: { title: "Add a layer to this element" }, on: { click: () => { void store.run("model.add_layer", { id: p.ref["model"] }); } } });
+        return h("div", { class: "prop-add" }, plus);
+    }
+    if (kind === "panel") { // the "+": split the widest panel of the door
+        const plus = h("button", { class: "tool-inline", type: "button", text: "+ Add panel", attrs: { title: "Split the widest panel of this door in two" }, on: { click: () => { void store.run("model.add_panel", { id: p.ref["model"] }); } } });
+        return h("div", { class: "prop-add" }, plus);
+    }
     const name = h("input", { type: "text", placeholder: "Name", attrs: { "aria-label": "New property name", maxlength: 40, autocomplete: "off" } });
     const value = h("input", { type: "text", placeholder: kind === "custom" ? "Value" : "Note text", attrs: { "aria-label": kind === "custom" ? "New property value" : "New note text", maxlength: kind === "custom" ? 200 : 500, autocomplete: "off" } });
     const add = async () => {
@@ -163,6 +214,10 @@ function addForm(store, p, kind) {
 async function removeRow(store, p, key) {
     if (p.kind === "model" && key.startsWith("custom:"))
         await store.run("model.set_property", { id: p.ref["model"], key, value: null });
+    else if (p.kind === "model" && key.startsWith("layer:"))
+        await store.run("model.remove_layer", { id: p.ref["model"], layer: key.split(":")[1] });
+    else if (p.kind === "model" && key.startsWith("panel:"))
+        await store.run("model.remove_panel", { id: p.ref["model"], panel: key.split(":")[1] });
     else if (p.kind === "sheet" && key.startsWith("note:"))
         await store.run("sheet.remove_note", { id: p.ref["sheet"], note: key.slice(5) });
 }
@@ -184,6 +239,10 @@ export function editCommand(p, key, value) {
         return { op: "view.rename", params: { id: ref["view"], name: value } };
     if (p.kind === "view" && key === "depth")
         return { op: "view.set_section", params: { id: ref["view"], depth: value } };
+    if (p.kind === "view" && (key === "opening_direction" || key === "material_hatching"))
+        return { op: "view.set_option", params: { id: ref["view"], key, value } };
+    if (p.kind === "view" && key.startsWith("hatch:"))
+        return { op: "hatch.set", params: { material: key.slice(6), pattern: value } };
     if (p.kind === "view" && key === "looking")
         return value === "flip" ? { op: "view.flip_section", params: { id: ref["view"] } } : null;
     if (p.kind === "entity" && key === "tag_field")

@@ -167,7 +167,15 @@ function catalogRow(store: Store, p: Properties, row: PropRow, id: string, label
 }
 
 /** A name and a value for a new custom property, or the text of a new sheet note. */
-function addForm(store: Store, p: Properties, kind: "custom" | "note"): HTMLElement {
+function addForm(store: Store, p: Properties, kind: "custom" | "note" | "layer" | "panel"): HTMLElement {
+  if (kind === "layer") {                                                                                   // the "+": one more layer, which the person then names and sizes in its rows
+    const plus = h("button", { class: "tool-inline", type: "button", text: "+ Add layer", attrs: { title: "Add a layer to this element" }, on: { click: () => { void store.run("model.add_layer", { id: p.ref["model"] }); } } });
+    return h("div", { class: "prop-add" }, plus);
+  }
+  if (kind === "panel") {                                                                                   // the "+": split the widest panel of the door
+    const plus = h("button", { class: "tool-inline", type: "button", text: "+ Add panel", attrs: { title: "Split the widest panel of this door in two" }, on: { click: () => { void store.run("model.add_panel", { id: p.ref["model"] }); } } });
+    return h("div", { class: "prop-add" }, plus);
+  }
   const name = h("input", { type: "text", placeholder: "Name", attrs: { "aria-label": "New property name", maxlength: 40, autocomplete: "off" } });
   const value = h("input", { type: "text", placeholder: kind === "custom" ? "Value" : "Note text", attrs: { "aria-label": kind === "custom" ? "New property value" : "New note text", maxlength: kind === "custom" ? 200 : 500, autocomplete: "off" } });
   const add = async (): Promise<void> => {
@@ -186,6 +194,8 @@ function addForm(store: Store, p: Properties, kind: "custom" | "note"): HTMLElem
 
 async function removeRow(store: Store, p: Properties, key: string): Promise<void> {
   if (p.kind === "model" && key.startsWith("custom:")) await store.run("model.set_property", { id: p.ref["model"], key, value: null });
+  else if (p.kind === "model" && key.startsWith("layer:")) await store.run("model.remove_layer", { id: p.ref["model"], layer: key.split(":")[1] });
+  else if (p.kind === "model" && key.startsWith("panel:")) await store.run("model.remove_panel", { id: p.ref["model"], panel: key.split(":")[1] });
   else if (p.kind === "sheet" && key.startsWith("note:")) await store.run("sheet.remove_note", { id: p.ref["sheet"], note: key.slice(5) });
 }
 
@@ -200,6 +210,8 @@ export function editCommand(p: Pick<Properties, "kind" | "ref">, key: string, va
   }
   if (p.kind === "view" && key === "name") return { op: "view.rename", params: { id: ref["view"], name: value } };
   if (p.kind === "view" && key === "depth") return { op: "view.set_section", params: { id: ref["view"], depth: value } };
+  if (p.kind === "view" && (key === "opening_direction" || key === "material_hatching")) return { op: "view.set_option", params: { id: ref["view"], key, value } };
+  if (p.kind === "view" && key.startsWith("hatch:")) return { op: "hatch.set", params: { material: key.slice(6), pattern: value } };
   if (p.kind === "view" && key === "looking") return value === "flip" ? { op: "view.flip_section", params: { id: ref["view"] } } : null;
   if (p.kind === "entity" && key === "tag_field") return { op: "draw.tag_field", params: { drawing: ref["drawing"], id: ref["entity"], field: value } };
   if (p.kind === "entity" && key === "layer") return { op: "draw.set_layer", params: { drawing: ref["drawing"], ids: [ref["entity"]], layer: value } };

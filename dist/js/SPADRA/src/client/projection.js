@@ -186,3 +186,73 @@ export function hatchPath(loop, hatch, step) {
         lines(-1);
     return out.join("");
 }
+/** The opening direction of a door or casement window on a plan, as an SVG path: the open leaf and the arc it sweeps. Empty when the symbol
+ *  carries none (a fixed window, or a view that hides opening direction). The arc runs counter-clockwise in drawing coordinates. */
+export function swingPath(sym) {
+    if (!(sym?.hinge && sym.leaf_end && sym.radius !== undefined && sym.start_angle !== undefined && sym.end_angle !== undefined))
+        return "";
+    const one = (c, leaf, r, a0, a1) => {
+        const sx = c[0] + r * Math.cos(a0), sy = c[1] + r * Math.sin(a0), ex = c[0] + r * Math.cos(a1), ey = c[1] + r * Math.sin(a1);
+        return `M${c[0]} ${c[1]}L${leaf[0]} ${leaf[1]}M${sx} ${sy}A${r} ${r} 0 ${a1 - a0 > Math.PI ? 1 : 0} 1 ${ex} ${ey}`;
+    };
+    return one(sym.hinge, sym.leaf_end, sym.radius, sym.start_angle, sym.end_angle) + (sym.more ?? []).map((l) => one(l.hinge, l.leaf_end, l.radius, l.start_angle, l.end_angle)).join(""); // a door of several panels: one per swinging panel
+}
+/** How a cut is filled given its hatch: a plain tint when there is no hatch (or the view hides it), solid ink for a solid pattern, and nothing
+ *  under the lines for the others. Returns the fill opacity multiplier (1 = the element's own cut weight). */
+export function hatchFill(hatch) {
+    if (!hatch)
+        return 1;
+    return hatch.kind === "solid" ? 1 : 0;
+}
+/** The lines (or dots) of a hatch laid over a cut made of several loops, filled even-odd so openings stay clear, as an SVG/canvas path in
+ *  the loops' own units. ``step`` is the spacing in those units; ``flip`` mirrors the angle for a screen whose y points down. Empty for none/solid. */
+export function patternPath(loops, hatch, step, flip = false) {
+    if ((hatch.kind !== "lines" && hatch.kind !== "cross" && hatch.kind !== "dots") || !(step > 0))
+        return "";
+    const rings = loops.filter((l) => l.length >= 3);
+    if (!rings.length)
+        return "";
+    const out = [];
+    const angle = ((flip ? -hatch.angle : hatch.angle) * Math.PI) / 180;
+    const scan = (theta) => {
+        const c = Math.cos(theta), s = Math.sin(theta);
+        const to = (p) => [p[0] * c + p[1] * s, -p[0] * s + p[1] * c];
+        const back = (x, y) => [x * c - y * s, x * s + y * c];
+        const turned = rings.map((l) => l.map(to));
+        const ys = turned.flat().map((p) => p[1]);
+        const lo = Math.min(...ys), hi = Math.max(...ys);
+        for (let y = Math.ceil(lo / step) * step; y < hi; y += step) {
+            const hits = [];
+            for (const l of turned)
+                for (let i = 0; i < l.length; i++) {
+                    const a = l[i], b = l[(i + 1) % l.length];
+                    if ((a[1] < y) !== (b[1] < y))
+                        hits.push(a[0] + ((y - a[1]) / (b[1] - a[1])) * (b[0] - a[0]));
+                }
+            hits.sort((p, q) => p - q);
+            for (let i = 0; i + 1 < hits.length; i += 2) {
+                const p = back(hits[i], y), q = back(hits[i + 1], y);
+                out.push(`M${r(p[0])} ${r(p[1])}L${r(q[0])} ${r(q[1])}`);
+            }
+        }
+    };
+    if (hatch.kind === "dots") {
+        const inside = (x, y) => { let c = false; for (const l of rings)
+            for (let i = 0; i < l.length; i++) {
+                const a = l[i], b = l[(i + 1) % l.length];
+                if ((a[1] > y) !== (b[1] > y) && x < ((b[0] - a[0]) * (y - a[1])) / (b[1] - a[1]) + a[0])
+                    c = !c;
+            } return c; };
+        const xs = rings.flat().map((p) => p[0]), ys = rings.flat().map((p) => p[1]);
+        let row = 0;
+        for (let y = Math.min(...ys) + step / 2; y < Math.max(...ys); y += step, row++)
+            for (let x = Math.min(...xs) + step / 2 + (row % 2 ? step / 2 : 0); x < Math.max(...xs); x += step)
+                if (inside(x, y))
+                    out.push(`M${r(x)} ${r(y)}l${r(step * 0.02)} 0`);
+        return out.join("");
+    }
+    scan(angle);
+    if (hatch.kind === "cross")
+        scan(angle + Math.PI / 2);
+    return out.join("");
+}

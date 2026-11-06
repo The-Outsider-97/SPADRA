@@ -90,3 +90,19 @@ Properties live in SGEO spadra: metadata and travel with supported SPADRA native
 Search and validation run on the server. The client does not contain or download the full copyrighted data. Offline import and CSI GraphQL contracts are tested with **synthetic codes only**; the actual CSI authenticated endpoint cannot be end-to-end tested without the owner's license and key. This implementation does not change IFC interchange semantics.
 
 The public repository deliberately contains **no complete OmniClass code lists**: shipping those would require specific authorization from CSI. See https://www.csiresources.org/csistore/oc-eula and https://crosswalk.squarespace.com/licensing.
+
+## IFC property and quantity sets (ifc_psets.json)
+
+`ifc_psets.json` holds the buildingSMART property sets (`Pset_*Common`) and quantity sets (`Qto_*BaseQuantities`) SPADRA offers on its elements: Wall, Slab, Roof, Door, Window, Beam, Column and Space. Every set records its `edition` and the published `source` page it was transcribed from. It is **transcribed from the published documentation pages, not parsed from the schema**, and two sets (`Pset_ColumnCommon`, `Pset_SlabCommon`) come from IFC 4.4 development pages and `Qto_ColumnBaseQuantities` from the IFC 4 page because the IFC 4.3 pages could not be fetched; the file says so per set. To take applicability and definitions from the schema itself, point the builder at the buildingSMART PSD files:
+
+    python data/build_ifc_psets.py --psd C:/ifc/psd --edition "IFC4X3_ADD2"
+
+(The PSD reader is covered by a synthetic-file test only; it has not been run against the real PSD files.) Property values are stored in the element's SGEO metadata (`spadra:psets`), type-level values in the project (`bim.type_psets`); quantities are calculated from the geometry on demand and only imported/overridden values are stored (`spadra:qto`). A property an official set does not define is a *custom* property and is listed apart from the official sets.
+
+## bSDD
+
+bSDD references are looked up through `bimdata.Bsdd` (fixed origin `https://api.bsdd.buildingsmart.org`, read-only, no key). Answers are cached in `data/bsdd_cache.local.json` (7 days; stale entries are served, marked, when the service is unreachable; the offline switch uses only the cache). The endpoint paths in `bimdata.BSDD_PATHS` follow the published v1 API but **have not been exercised against the live service**; behaviour is tested with a stand-in transport. A suggestion is never a reference until a person confirms it; an element holds one class per dictionary.
+
+## IDS and the BIM basis ILS
+
+`.ids` files are stored in the project (`bim.ids`), validated element by element, and the evidence is kept (`bim.ids_results`). The BIM basis ILS rules in `requirements.py` are each transcribed from one chapter of the published ILS (link and grading stored with the rule); the ILS is off until a project enables it and its edition label is a project setting.

@@ -162,6 +162,10 @@ export class Shell {
                 if (sheet)
                     issueDialog(store, sheet);
                 break;
+            case "arrange":
+                if (sheet)
+                    void store.arrangeSheet(sheet);
+                break;
             case "jobs":
                 jobsDialog(store);
                 break;
@@ -169,6 +173,13 @@ export class Shell {
                 void diagnosticsDialog(store);
                 break;
             default: toast(`There is no “${name}” dialog.`, { kind: "error" });
+        }
+    }
+    async exportSheetFile() {
+        const file = await store.exportSheet();
+        if (file) {
+            saveBlob(file.blob, file.filename);
+            store.setStatus(`Exported ${file.filename}`);
         }
     }
     async exportCsv() {
@@ -291,6 +302,7 @@ export class Shell {
             { label: "Export the model…", icon: "export", disabled: !has, run: () => { void exportDialog(store, "model"); } },
             { label: "Export the drawing…", icon: "export", disabled: store.tab?.ref.kind !== "drawing", run: () => { void exportDialog(store, "drawing"); } },
             { label: "Export the schedule as CSV", icon: "export", disabled: store.tab?.ref.kind !== "schedule", run: () => { void this.exportCsv(); } },
+            { label: "Export the sheet as .sldc", icon: "export", disabled: store.tab?.ref.kind !== "sheet", run: () => { void this.exportSheetFile(); } },
             "separator",
             { label: "Operations…", icon: "clock", run: () => jobsDialog(store) },
             { label: "Diagnostics…", icon: "info", run: () => { void diagnosticsDialog(store); } },
@@ -303,6 +315,29 @@ export class Shell {
         const out = await store.run("model.set_auto_rooms", { on });
         const made = out?.result?.rooms;
         store.setStatus(on ? (made && made.added ? `Automatic rooms on: ${made.added} room${made.added === 1 ? "" : "s"} made` : "Automatic rooms on") : "Automatic rooms off: the rooms stay, but no longer follow the walls");
+    }
+    /** Attach the selected walls to the selected roof, or extend them to the next level up. The server derives their height and says why when it cannot. */
+    async attachWalls(to) {
+        const sel = store.selection;
+        if (sel?.kind !== "model" || !sel.ids.length) {
+            toast(to === "roof" ? "Select the walls and a roof first." : "Select the walls first.", { kind: "info" });
+            return;
+        }
+        const out = await store.run("model.attach_wall", { ids: sel.ids, to });
+        const walls = out?.result?.walls;
+        if (walls)
+            store.setStatus(`${walls.length} wall${walls.length === 1 ? "" : "s"} ${to === "roof" ? "attached to the roof" : "extended to the upper level"}. Their height now follows it.`);
+    }
+    async detachWalls(from) {
+        const sel = store.selection;
+        if (sel?.kind !== "model" || !sel.ids.length) {
+            toast("Select the walls first.", { kind: "info" });
+            return;
+        }
+        const out = await store.run("model.detach_wall", { ids: sel.ids, from });
+        const walls = out?.result?.walls;
+        if (walls)
+            store.setStatus(`${walls.length} wall${walls.length === 1 ? "" : "s"} freed. They keep the height they had.`);
     }
     /** Turn the selected extrusions into voids: they then cut the floors, extrusions and walls they pass through. */
     async makeVoid() {
@@ -356,6 +391,10 @@ export class Shell {
                 [T("extrude", "Extrude", "extrude", onPlan, { tool: "extrude", note: "Draw an outline and stand it up to a depth" }),
                     T("void", "Void", "void", onPlan, { tool: "void", note: "Draw an outline that cuts the floors, extrusions and walls it passes through" }),
                     T("sweep", "Sweep", "sweep", onPlan, { tool: "sweep", note: "Carry a profile along a path drawn in plan" }),
+                    T("attachroof", "Attach to roof", "attach-roof", !!store.project, { run: () => this.attachWalls("roof"), note: "Select the walls and a roof: the top of each wall follows the underside of the roof" }),
+                    T("detachroof", "Detach from roof", "detach-roof", !!store.project, { run: () => this.detachWalls("roof"), note: "Free the selected walls from the roof; they keep the height they had" }),
+                    T("extendlevel", "Extend to upper level", "extend-level", !!store.project, { run: () => this.attachWalls("level"), note: "Raise the selected walls to the next level up and keep them there" }),
+                    T("disconnectlevel", "Disconnect from level", "disconnect-level", !!store.project, { run: () => this.detachWalls("level"), note: "Free the selected walls from the level; they keep the height they had" }),
                     T("makevoid", "Make void", "void", !!store.project, { run: () => this.makeVoid(), note: "Turn the selected extrusions into voids that cut" }),
                     T("array", "Array", "array", !!store.project, { run: () => arrayDialog(store), note: "Repeat the selection along X, Y, Z or round a point, and keep the pattern editable" }), T("releasearray", "Release array", "array", !!store.project, { run: () => releaseArray(store), note: "Keep the copies of the selected array as ordinary elements and drop the pattern" })],
                 [T("section", "Section", "section", on3dOrPlan, { tool: "section" }), T("elevation", "Elevation", "elevation", !!store.project, { run: () => this.elevationMenu(this.ribbon) }),
@@ -408,7 +447,10 @@ export class Shell {
                 [T("newschedule", "Schedule", "table", true, { run: () => this.scheduleMenu(this.ribbon) })]];
         if (kind === "sheet") {
             const sheet = store.tab?.ref.id;
-            return [[sel], [T("placeview", "Place View", "place-view", true, { run: () => this.sheet.placeViewMenu(this.ribbon) })],
+            return [[sel], [T("placeview", "Place View", "place-view", true, { run: () => this.sheet.placeViewMenu(this.ribbon) }),
+                    T("arrange", "Arrange", "place-view", !!sheet, { run: () => { if (sheet)
+                            void store.arrangeSheet(sheet); }, note: "Lay the viewports out so none overlaps another or the title block. Locked ones and ones you placed by hand stay put" }),
+                    T("exportsheet", "Export .sldc", "export", !!sheet, { run: () => this.exportSheetFile(), note: "Save this sheet as a .sldc file that keeps everything on it" })],
                 [nope("viewport", "Viewport", "viewport", "Select a viewport on the sheet and edit its scale in Properties")],
                 [nope("titleblock", "Title Block", "title-block", "Edit the title block in Properties with the sheet selected")],
                 [nope("stext", "Text", "text", "Add notes to the sheet from Properties")],

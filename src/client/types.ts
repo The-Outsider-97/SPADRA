@@ -64,9 +64,11 @@ export interface Layer { name: string; visible: boolean; entity_count: number }
 /** What the model shows on a plan: a wall piece, a door or window (with its symbol), a floor or a beam, as a polygon in drawing units. */
 export interface PlanSymbol {
   kind: "door" | "window"; hinge?: Pt; leaf_end?: Pt; radius?: number; start_angle?: number; end_angle?: number; a?: Pt; b?: Pt;
+  /** The other swinging panels of a door that has several: each with its own hinge, open leaf and arc. */
+  more?: Array<{ hinge: Pt; leaf_end: Pt; radius: number; start_angle: number; end_angle: number }>;
 }
 /** A room's plan label: its name and number, its area from the outline (m²) and where the label sits (drawing units). */
-export interface RoomLabel { name: string; number: string; area_m2: number; at: Pt }
+export interface RoomLabel { name: string; number: string; area_m2: number; volume_m3?: number; at: Pt }
 /** A grid line's bubble: its label, where the bubble sits (the line's start) and its radius, in drawing units. */
 /** A grid's label: where its bubble(s) are drawn (`bubbles` names the ends that carry one; an older answer without it means the start). */
 export interface GridLabel { name: string; at: Pt; radius: number; bubbles?: Array<"start" | "end"> }
@@ -74,17 +76,32 @@ export interface GridLabel { name: string; at: Pt; radius: number; bubbles?: Arr
 export interface StairArrow { from: Pt; to: Pt; label: string }
 export interface PlanWall {
   id: string; category: string; name: string; polygon: Pt[]; symbol?: PlanSymbol; cut?: boolean; label?: RoomLabel | GridLabel;
-  lines?: Array<[Pt, Pt]>; arrow?: StairArrow;
+  lines?: Array<[Pt, Pt]>; arrow?: StairArrow; hatch?: HatchSpec | null;
+  /** A layered wall in plan: each layer's band, in pieces cut around the openings that layer inherits. */
+  bands?: Array<{ layer: string; name: string; material: string; polygons: Pt[][]; hatch?: HatchSpec | null }>;
   /** Rings cut out of the polygon (a floor or extrusion with voids through it, or the inside of a closed sweep) and a sweep's centre line. */
   holes?: Pt[][]; path?: Pt[]; closed?: boolean; /** a void whose cutting is off is drawn dotted and unhatched */ off?: boolean;
   /** A wall's centre line and thickness, in the drawing's unit: what its end grips hold and what the next wall snaps to. */
   axis?: { a: Pt; b: Pt; thickness: number };
+  /** A floor's outline (its corner points, in the drawing's unit): what its corner and edge grips hold. */
+  outline?: Pt[];
   /** A foundation's kind (poer, strook, plaat...). */
   kind?: string;
 }
 /** One element as a section or elevation shows it: surfaces facing the viewer (flat triangles), their drawn lines, and the cut. Units are the drawing's. */
 /** `cut_material` (a foundation only): the material of each loop of `cut`, so a build-up is hatched layer by layer. */
-export interface ProjItem { id: string; category: string; name: string; depth: number; tris: number[][]; edges: number[][]; cut: Pt[][]; cut_material?: string[] }
+/** How a cut material is hatched (assigned per project; SPADRA's configurable patterns, not NEN 47). `spacing_mm` is on paper. */
+export interface HatchSpec { pattern: string; label: string; kind: "none" | "solid" | "lines" | "cross" | "dots"; angle: number; spacing_mm: number; standard: null }
+export interface ProjItem {
+  id: string; category: string; name: string; depth: number; tris: number[][]; edges: number[][]; cut: Pt[][]; cut_material?: string[];
+  /** A door or window's opening direction: two lines from the hinge edge, drawn solid when the leaf opens toward the viewer and dashed when away. */
+  opening?: { kind: "door" | "window"; toward: boolean; lines: number[][]; /** the other swinging panels of a door, each solid or dashed on its own */ more?: Array<{ toward: boolean; lines: number[][] }> } | null;
+  /** How the cut is hatched; absent when the view hides material hatching (the cut is then a plain fill) or the material has no assignment. */
+  cut_hatch?: HatchSpec | null;
+  /** A wall, floor or roof built in layers: which layer each loop of `cut` is, and (unless hatching is hidden) how each is hatched. */
+  cut_layers?: Array<{ layer: string; material: string; name: string }>;
+  cut_hatches?: Array<HatchSpec | null>;
+}
 export interface Projection {
   kind: "section" | "elevation"; items: ProjItem[]; levels: Array<{ name: string; z: number }>; bounds: [Pt, Pt] | null; span?: number; far?: number;
   /** The grids this picture meets: a vertical line at `x` (along the picture), with its bubble above. */
@@ -149,7 +166,7 @@ export interface PropGroup {
   /** A button under the rows that opens a dialog (``issue``: issue a revision of the sheet). */
   action?: { label: string; dialog: string };
   /** A form to add a row: ``custom`` (a custom property) or ``note`` (a sheet note). */
-  add?: "custom" | "note";
+  add?: "custom" | "note" | "layer" | "panel";
 }
 export interface Properties {
   ref: Record<string, string>; title: string; category: string; kind: "model" | "entity" | "sheet" | "view";

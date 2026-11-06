@@ -52,8 +52,12 @@ export class Store {
   /** What the next wall will be: height in metres, thickness in millimetres. Shared by the 2D and 3D wall tools. */
   wallOptions = { height: 3.2, thickness: 250 };
   /** What the Extrude, Void and Sweep tools make: depth and base in metres above the level, the sweep's profile in millimetres. */
-  formOptions: { depth: number; base: number; voidDepth: number; voidBase: number; sweepWidth: number; sweepHeight: number; sweepShape: "rectangle" | "round"; sweepBase: number } =
-    { depth: 1, base: 0, voidDepth: 4, voidBase: -0.5, sweepWidth: 200, sweepHeight: 200, sweepShape: "rectangle", sweepBase: 0 };
+  formOptions: {
+    depth: number; base: number; voidDepth: number; voidBase: number; sweepWidth: number; sweepHeight: number; sweepShape: "rectangle" | "round" | "user"; sweepBase: number;
+    /** A user-defined sweep profile: the closed polygon picked in the drawing (drawing units) and how it sits on the path. */
+    sweepPolygon: Array<[number, number]> | null; sweepPivot: string; sweepAngle: number; sweepOffset: [number, number, number]; sweepMirror: boolean; sweepRadius: number;
+  } = { depth: 1, base: 0, voidDepth: 4, voidBase: -0.5, sweepWidth: 200, sweepHeight: 200, sweepShape: "rectangle", sweepBase: 0,
+    sweepPolygon: null, sweepPivot: "center", sweepAngle: 0, sweepOffset: [0, 0, 0], sweepMirror: false, sweepRadius: 0 };
   selection: Selection = null;
   properties: Properties | null = null;
   drawing: DrawingData | null = null;
@@ -480,6 +484,20 @@ export class Store {
     const tab = this.tab;
     if (!tab || tab.ref.kind !== "schedule") { toast("Open a schedule to export it as CSV.", { kind: "info" }); return null; }
     return this.guard(() => this.api.download(`/export/schedule/${tab.ref.id}`), "Exporting");
+  }
+
+  /** The open sheet as a .sldc file (the sheet as read, plus everything it draws, so that opening the file gives the sheet back). */
+  async exportSheet(): Promise<{ blob: Blob; filename: string } | null> {
+    const tab = this.tab;
+    if (!tab || tab.ref.kind !== "sheet") { toast("Open a sheet to export it as .sldc.", { kind: "info" }); return null; }
+    return this.guard(() => this.api.download(`/export/sheet/${tab.ref.id}`), "Exporting the sheet");
+  }
+
+  /** Lay out the sheet's viewports so that none overlaps another or the title block; what is locked or placed by hand stays where it is unless ``all``. */
+  async arrangeSheet(id: string, all = false, rescale = false): Promise<boolean> {
+    const done = await this.run("sheet.arrange", { id, mode: all ? "all" : "auto", rescale });
+    if (done) toast("The viewports are arranged. Undo puts them back.", { kind: "ok" });
+    return !!done;
   }
 
   // ------------------------------------------------------------------------------------------------------------------- links

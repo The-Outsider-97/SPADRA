@@ -1,0 +1,986 @@
+{
+ "schema": "spadra.ifc_psets.v1",
+ "note": "Applicable entities are stated by the set's name (Pset_WallCommon -> IfcWall); the documentation pages these sets were transcribed from list none. Plane angles are stored in degrees by SPADRA. Regenerate from the buildingSMART PSD files with --psd to take applicability from the schema itself.",
+ "origin": "transcribed",
+ "sets": {
+  "Pset_WallCommon": {
+   "kind": "pset",
+   "entities": [
+    "IfcWall"
+   ],
+   "applicability": "by name",
+   "edition": "IFC 4.3.2 (IFC4X3_ADD2)",
+   "source": "https://ifc43-docs.standards.buildingsmart.org/IFC/RELEASE/IFC4x3/HTML/lexical/Pset_WallCommon.htm",
+   "properties": {
+    "Reference": {
+     "ifc_type": "IfcIdentifier",
+     "kind": "text"
+    },
+    "Status": {
+     "ifc_type": "PEnum_ElementStatus",
+     "kind": "enum",
+     "enum": [
+      "New",
+      "Existing",
+      "Demolish",
+      "Temporary"
+     ]
+    },
+    "AcousticRating": {
+     "ifc_type": "IfcLabel",
+     "kind": "text"
+    },
+    "FireRating": {
+     "ifc_type": "IfcLabel",
+     "kind": "text"
+    },
+    "Combustible": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    },
+    "SurfaceSpreadOfFlame": {
+     "ifc_type": "IfcLabel",
+     "kind": "text"
+    },
+    "ThermalTransmittance": {
+     "ifc_type": "IfcThermalTransmittanceMeasure",
+     "kind": "real",
+     "unit": "W/(m²·K)",
+     "rule": "nonneg"
+    },
+    "IsExternal": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    },
+    "LoadBearing": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    },
+    "ExtendToStructure": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    },
+    "Compartmentation": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    }
+   }
+  },
+  "Pset_RoofCommon": {
+   "kind": "pset",
+   "entities": [
+    "IfcRoof"
+   ],
+   "applicability": "by name",
+   "edition": "IFC 4.3.2 (IFC4X3_ADD2)",
+   "source": "https://standards.buildingsmart.org/IFC/RELEASE/IFC4_3/HTML/lexical/Pset_RoofCommon.htm",
+   "properties": {
+    "Reference": {
+     "ifc_type": "IfcIdentifier",
+     "kind": "text"
+    },
+    "Status": {
+     "ifc_type": "PEnum_ElementStatus",
+     "kind": "enum",
+     "enum": [
+      "New",
+      "Existing",
+      "Demolish",
+      "Temporary"
+     ]
+    },
+    "AcousticRating": {
+     "ifc_type": "IfcLabel",
+     "kind": "text"
+    },
+    "IsExternal": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    },
+    "ThermalTransmittance": {
+     "ifc_type": "IfcThermalTransmittanceMeasure",
+     "kind": "real",
+     "unit": "W/(m²·K)",
+     "rule": "nonneg"
+    },
+    "FireRating": {
+     "ifc_type": "IfcLabel",
+     "kind": "text"
+    },
+    "LoadBearing": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    }
+   }
+  },
+  "Pset_WindowCommon": {
+   "kind": "pset",
+   "entities": [
+    "IfcWindow"
+   ],
+   "applicability": "by name",
+   "edition": "IFC 4.3.2 (IFC4X3_ADD2)",
+   "source": "https://standards.buildingsmart.org/IFC/RELEASE/IFC4_3/HTML/lexical/Pset_WindowCommon.htm",
+   "properties": {
+    "Reference": {
+     "ifc_type": "IfcIdentifier",
+     "kind": "text"
+    },
+    "Status": {
+     "ifc_type": "PEnum_ElementStatus",
+     "kind": "enum",
+     "enum": [
+      "New",
+      "Existing",
+      "Demolish",
+      "Temporary"
+     ]
+    },
+    "AcousticRating": {
+     "ifc_type": "IfcLabel",
+     "kind": "text"
+    },
+    "FireRating": {
+     "ifc_type": "IfcLabel",
+     "kind": "text"
+    },
+    "SecurityRating": {
+     "ifc_type": "IfcLabel",
+     "kind": "text"
+    },
+    "IsExternal": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    },
+    "Infiltration": {
+     "ifc_type": "IfcVolumetricFlowRateMeasure",
+     "kind": "real",
+     "unit": "m³/s",
+     "rule": "nonneg"
+    },
+    "ThermalTransmittance": {
+     "ifc_type": "IfcThermalTransmittanceMeasure",
+     "kind": "real",
+     "unit": "W/(m²·K)",
+     "rule": "nonneg"
+    },
+    "GlazingAreaFraction": {
+     "ifc_type": "IfcPositiveRatioMeasure",
+     "kind": "real",
+     "rule": "positive"
+    },
+    "HasSillExternal": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    },
+    "HasSillInternal": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    },
+    "HasDrive": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    },
+    "SmokeStop": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    },
+    "FireExit": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    },
+    "WaterTightnessRating": {
+     "ifc_type": "IfcLabel",
+     "kind": "text"
+    },
+    "MechanicalLoadRating": {
+     "ifc_type": "IfcLabel",
+     "kind": "text"
+    },
+    "WindLoadRating": {
+     "ifc_type": "IfcLabel",
+     "kind": "text"
+    }
+   }
+  },
+  "Pset_DoorCommon": {
+   "kind": "pset",
+   "entities": [
+    "IfcDoor"
+   ],
+   "applicability": "by name",
+   "edition": "IFC 4.3.2 (IFC4X3_ADD2)",
+   "source": "https://standards.buildingsmart.org/IFC/RELEASE/IFC4_3/HTML/lexical/Pset_DoorCommon.htm",
+   "properties": {
+    "Reference": {
+     "ifc_type": "IfcIdentifier",
+     "kind": "text"
+    },
+    "Status": {
+     "ifc_type": "PEnum_ElementStatus",
+     "kind": "enum",
+     "enum": [
+      "New",
+      "Existing",
+      "Demolish",
+      "Temporary"
+     ]
+    },
+    "FireRating": {
+     "ifc_type": "IfcLabel",
+     "kind": "text"
+    },
+    "AcousticRating": {
+     "ifc_type": "IfcLabel",
+     "kind": "text"
+    },
+    "SecurityRating": {
+     "ifc_type": "IfcLabel",
+     "kind": "text"
+    },
+    "DurabilityRating": {
+     "ifc_type": "IfcLabel",
+     "kind": "text"
+    },
+    "HygrothermalRating": {
+     "ifc_type": "IfcLabel",
+     "kind": "text"
+    },
+    "WaterTightnessRating": {
+     "ifc_type": "IfcLabel",
+     "kind": "text"
+    },
+    "MechanicalLoadRating": {
+     "ifc_type": "IfcLabel",
+     "kind": "text"
+    },
+    "WindLoadRating": {
+     "ifc_type": "IfcLabel",
+     "kind": "text"
+    },
+    "Infiltration": {
+     "ifc_type": "IfcVolumetricFlowRateMeasure",
+     "kind": "real",
+     "unit": "m³/s",
+     "rule": "nonneg"
+    },
+    "IsExternal": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    },
+    "ThermalTransmittance": {
+     "ifc_type": "IfcThermalTransmittanceMeasure",
+     "kind": "real",
+     "unit": "W/(m²·K)",
+     "rule": "nonneg"
+    },
+    "GlazingAreaFraction": {
+     "ifc_type": "IfcPositiveRatioMeasure",
+     "kind": "real",
+     "rule": "positive"
+    },
+    "HandicapAccessible": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    },
+    "FireExit": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    },
+    "HasDrive": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    },
+    "SelfClosing": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    },
+    "SmokeStop": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    }
+   }
+  },
+  "Pset_BeamCommon": {
+   "kind": "pset",
+   "entities": [
+    "IfcBeam"
+   ],
+   "applicability": "by name",
+   "edition": "IFC 4.3.2 (IFC4X3_ADD2)",
+   "source": "https://standards.buildingsmart.org/IFC/RELEASE/IFC4_3/HTML/lexical/Pset_BeamCommon.htm",
+   "properties": {
+    "Reference": {
+     "ifc_type": "IfcIdentifier",
+     "kind": "text"
+    },
+    "Status": {
+     "ifc_type": "PEnum_ElementStatus",
+     "kind": "enum",
+     "enum": [
+      "New",
+      "Existing",
+      "Demolish",
+      "Temporary"
+     ]
+    },
+    "Span": {
+     "ifc_type": "IfcPositiveLengthMeasure",
+     "kind": "real",
+     "unit": "m",
+     "rule": "positive"
+    },
+    "Slope": {
+     "ifc_type": "IfcPlaneAngleMeasure",
+     "kind": "real",
+     "unit": "°"
+    },
+    "Roll": {
+     "ifc_type": "IfcPlaneAngleMeasure",
+     "kind": "real",
+     "unit": "°"
+    },
+    "IsExternal": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    },
+    "ThermalTransmittance": {
+     "ifc_type": "IfcThermalTransmittanceMeasure",
+     "kind": "real",
+     "unit": "W/(m²·K)",
+     "rule": "nonneg"
+    },
+    "LoadBearing": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    },
+    "FireRating": {
+     "ifc_type": "IfcLabel",
+     "kind": "text"
+    }
+   }
+  },
+  "Pset_ColumnCommon": {
+   "kind": "pset",
+   "entities": [
+    "IfcColumn"
+   ],
+   "applicability": "by name",
+   "edition": "IFC 4.4 development page (the IFC 4.3 release page could not be fetched)",
+   "source": "https://standards.buildingsmart.org/IFC/DEV/IFC4_4/HTML/lexical/Pset_ColumnCommon.html",
+   "properties": {
+    "Reference": {
+     "ifc_type": "IfcIdentifier",
+     "kind": "text"
+    },
+    "Status": {
+     "ifc_type": "PEnum_ElementStatus",
+     "kind": "enum",
+     "enum": [
+      "New",
+      "Existing",
+      "Demolish",
+      "Temporary"
+     ]
+    },
+    "Slope": {
+     "ifc_type": "IfcPlaneAngleMeasure",
+     "kind": "real",
+     "unit": "°"
+    },
+    "Roll": {
+     "ifc_type": "IfcPlaneAngleMeasure",
+     "kind": "real",
+     "unit": "°"
+    },
+    "IsExternal": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    },
+    "ThermalTransmittance": {
+     "ifc_type": "IfcThermalTransmittanceMeasure",
+     "kind": "real",
+     "unit": "W/(m²·K)",
+     "rule": "nonneg"
+    },
+    "LoadBearing": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    },
+    "FireRating": {
+     "ifc_type": "IfcLabel",
+     "kind": "text"
+    }
+   }
+  },
+  "Pset_SlabCommon": {
+   "kind": "pset",
+   "entities": [
+    "IfcSlab"
+   ],
+   "applicability": "by name",
+   "edition": "IFC 4.4 development page (the IFC 4.3 release page could not be fetched)",
+   "source": "https://standards.buildingsmart.org/IFC/DEV/IFC4_4/HTML/lexical/Pset_SlabCommon.html",
+   "properties": {
+    "Reference": {
+     "ifc_type": "IfcIdentifier",
+     "kind": "text"
+    },
+    "Status": {
+     "ifc_type": "PEnum_ElementStatus",
+     "kind": "enum",
+     "enum": [
+      "New",
+      "Existing",
+      "Demolish",
+      "Temporary"
+     ]
+    },
+    "AcousticRating": {
+     "ifc_type": "IfcLabel",
+     "kind": "text"
+    },
+    "FireRating": {
+     "ifc_type": "IfcLabel",
+     "kind": "text"
+    },
+    "PitchAngle": {
+     "ifc_type": "IfcPlaneAngleMeasure",
+     "kind": "real",
+     "unit": "°"
+    },
+    "Combustible": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    },
+    "SurfaceSpreadOfFlame": {
+     "ifc_type": "IfcLabel",
+     "kind": "text"
+    },
+    "Compartmentation": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    },
+    "IsExternal": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    },
+    "ThermalTransmittance": {
+     "ifc_type": "IfcThermalTransmittanceMeasure",
+     "kind": "real",
+     "unit": "W/(m²·K)",
+     "rule": "nonneg"
+    },
+    "LoadBearing": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    }
+   }
+  },
+  "Pset_SpaceCommon": {
+   "kind": "pset",
+   "entities": [
+    "IfcSpace"
+   ],
+   "applicability": "by name",
+   "edition": "IFC 4.3.2 (IFC4X3_ADD2)",
+   "source": "https://standards.buildingsmart.org/IFC/RELEASE/IFC4_3/HTML/lexical/Pset_SpaceCommon.htm",
+   "properties": {
+    "Reference": {
+     "ifc_type": "IfcIdentifier",
+     "kind": "text"
+    },
+    "IsExternal": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    },
+    "GrossPlannedArea": {
+     "ifc_type": "IfcAreaMeasure",
+     "kind": "real",
+     "unit": "m²",
+     "rule": "nonneg"
+    },
+    "NetPlannedArea": {
+     "ifc_type": "IfcAreaMeasure",
+     "kind": "real",
+     "unit": "m²",
+     "rule": "nonneg"
+    },
+    "PubliclyAccessible": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    },
+    "HandicapAccessible": {
+     "ifc_type": "IfcBoolean",
+     "kind": "bool"
+    }
+   }
+  },
+  "Qto_WallBaseQuantities": {
+   "kind": "qto",
+   "entities": [
+    "IfcWall"
+   ],
+   "applicability": "by name",
+   "edition": "IFC 4.3.2 (IFC4X3_ADD2)",
+   "source": "https://standards.buildingsmart.org/IFC/RELEASE/IFC4_3/HTML/lexical/Qto_WallBaseQuantities.htm",
+   "quantities": {
+    "Length": {
+     "kind": "length",
+     "unit": "m",
+     "ifc_type": "IfcQuantityLength",
+     "description": "Length along the centre line of the wall"
+    },
+    "Width": {
+     "kind": "length",
+     "unit": "m",
+     "ifc_type": "IfcQuantityLength",
+     "description": "Constant thickness, perpendicular to the wall path (prismatic walls only)"
+    },
+    "Height": {
+     "kind": "length",
+     "unit": "m",
+     "ifc_type": "IfcQuantityLength",
+     "description": "Total nominal height, only where it is constant along the wall"
+    },
+    "GrossFootPrintArea": {
+     "kind": "area",
+     "unit": "m²",
+     "ifc_type": "IfcQuantityArea",
+     "description": "Footprint area before openings"
+    },
+    "NetFootPrintArea": {
+     "kind": "area",
+     "unit": "m²",
+     "ifc_type": "IfcQuantityArea",
+     "description": "Footprint area after openings"
+    },
+    "GrossSideArea": {
+     "kind": "area",
+     "unit": "m²",
+     "ifc_type": "IfcQuantityArea",
+     "description": "Elevation area of the middle plane, ignoring openings"
+    },
+    "NetSideArea": {
+     "kind": "area",
+     "unit": "m²",
+     "ifc_type": "IfcQuantityArea",
+     "description": "Elevation area of the middle plane, openings subtracted"
+    },
+    "GrossVolume": {
+     "kind": "volume",
+     "unit": "m³",
+     "ifc_type": "IfcQuantityVolume",
+     "description": "Volume excluding openings and recesses"
+    },
+    "NetVolume": {
+     "kind": "volume",
+     "unit": "m³",
+     "ifc_type": "IfcQuantityVolume",
+     "description": "Volume after subtracting openings and recesses"
+    },
+    "GrossWeight": {
+     "kind": "weight",
+     "unit": "kg",
+     "ifc_type": "IfcQuantityWeight",
+     "description": "Weight of the gross volume"
+    },
+    "NetWeight": {
+     "kind": "weight",
+     "unit": "kg",
+     "ifc_type": "IfcQuantityWeight",
+     "description": "Weight of the net volume"
+    }
+   }
+  },
+  "Qto_SlabBaseQuantities": {
+   "kind": "qto",
+   "entities": [
+    "IfcSlab"
+   ],
+   "applicability": "by name",
+   "edition": "IFC 4.3.2 (IFC4X3_ADD2)",
+   "source": "https://standards.buildingsmart.org/IFC/RELEASE/IFC4_3/HTML/lexical/Qto_SlabBaseQuantities.htm",
+   "quantities": {
+    "Width": {
+     "kind": "length",
+     "unit": "m",
+     "ifc_type": "IfcQuantityLength",
+     "description": "Thickness of a slab of constant thickness"
+    },
+    "Length": {
+     "kind": "length",
+     "unit": "m",
+     "ifc_type": "IfcQuantityLength",
+     "description": "Length, rectangular slabs only"
+    },
+    "Depth": {
+     "kind": "length",
+     "unit": "m",
+     "ifc_type": "IfcQuantityLength",
+     "description": "Footprint depth, rectangular slabs only"
+    },
+    "Perimeter": {
+     "kind": "length",
+     "unit": "m",
+     "ifc_type": "IfcQuantityLength",
+     "description": "Distance around the outer boundary (prismatic slabs)"
+    },
+    "GrossArea": {
+     "kind": "area",
+     "unit": "m²",
+     "ifc_type": "IfcQuantityArea",
+     "description": "Area excluding openings and cut-outs"
+    },
+    "NetArea": {
+     "kind": "area",
+     "unit": "m²",
+     "ifc_type": "IfcQuantityArea",
+     "description": "Area after subtracting openings and cut-outs"
+    },
+    "GrossVolume": {
+     "kind": "volume",
+     "unit": "m³",
+     "ifc_type": "IfcQuantityVolume",
+     "description": "Volume excluding openings and recesses"
+    },
+    "NetVolume": {
+     "kind": "volume",
+     "unit": "m³",
+     "ifc_type": "IfcQuantityVolume",
+     "description": "Volume after subtracting openings and recesses"
+    },
+    "GrossWeight": {
+     "kind": "weight",
+     "unit": "kg",
+     "ifc_type": "IfcQuantityWeight",
+     "description": "Weight of the gross volume"
+    },
+    "NetWeight": {
+     "kind": "weight",
+     "unit": "kg",
+     "ifc_type": "IfcQuantityWeight",
+     "description": "Weight of the net volume"
+    }
+   }
+  },
+  "Qto_RoofBaseQuantities": {
+   "kind": "qto",
+   "entities": [
+    "IfcRoof"
+   ],
+   "applicability": "by name",
+   "edition": "IFC 4.3.2 (IFC4X3_ADD2)",
+   "source": "https://standards.buildingsmart.org/IFC/RELEASE/IFC4_3/HTML/lexical/Qto_RoofBaseQuantities.htm",
+   "quantities": {
+    "GrossArea": {
+     "kind": "area",
+     "unit": "m²",
+     "ifc_type": "IfcQuantityArea",
+     "description": "Area of the roof's outer surface, ignoring openings"
+    },
+    "NetArea": {
+     "kind": "area",
+     "unit": "m²",
+     "ifc_type": "IfcQuantityArea",
+     "description": "Area of the outer surface with openings subtracted"
+    },
+    "ProjectedArea": {
+     "kind": "area",
+     "unit": "m²",
+     "ifc_type": "IfcQuantityArea",
+     "description": "Outer surface projected onto the ground"
+    }
+   }
+  },
+  "Qto_DoorBaseQuantities": {
+   "kind": "qto",
+   "entities": [
+    "IfcDoor"
+   ],
+   "applicability": "by name",
+   "edition": "IFC 4.3.2 (IFC4X3_ADD2)",
+   "source": "https://standards.buildingsmart.org/IFC/DEV/IFC4_3/HTML/lexical/Qto_DoorBaseQuantities.html",
+   "quantities": {
+    "Width": {
+     "kind": "length",
+     "unit": "m",
+     "ifc_type": "IfcQuantityLength",
+     "description": "Overall width (outer lining of a rectangular door)"
+    },
+    "Height": {
+     "kind": "length",
+     "unit": "m",
+     "ifc_type": "IfcQuantityLength",
+     "description": "Overall height (outer lining of a rectangular door)"
+    },
+    "Perimeter": {
+     "kind": "length",
+     "unit": "m",
+     "ifc_type": "IfcQuantityLength",
+     "description": "Perimeter of the outline"
+    },
+    "Area": {
+     "kind": "area",
+     "unit": "m²",
+     "ifc_type": "IfcQuantityArea",
+     "description": "Area of the outer lining"
+    }
+   }
+  },
+  "Qto_WindowBaseQuantities": {
+   "kind": "qto",
+   "entities": [
+    "IfcWindow"
+   ],
+   "applicability": "by name",
+   "edition": "IFC 4.3.2 (IFC4X3_ADD2)",
+   "source": "https://standards.buildingsmart.org/IFC/RELEASE/IFC4_3/HTML/lexical/Qto_WindowBaseQuantities.htm",
+   "quantities": {
+    "Width": {
+     "kind": "length",
+     "unit": "m",
+     "ifc_type": "IfcQuantityLength",
+     "description": "Overall width (outer lining of a rectangular window)"
+    },
+    "Height": {
+     "kind": "length",
+     "unit": "m",
+     "ifc_type": "IfcQuantityLength",
+     "description": "Overall height (outer lining of a rectangular window)"
+    },
+    "Perimeter": {
+     "kind": "length",
+     "unit": "m",
+     "ifc_type": "IfcQuantityLength",
+     "description": "Length of the outline"
+    },
+    "Area": {
+     "kind": "area",
+     "unit": "m²",
+     "ifc_type": "IfcQuantityArea",
+     "description": "Area of the outer lining"
+    }
+   }
+  },
+  "Qto_BeamBaseQuantities": {
+   "kind": "qto",
+   "entities": [
+    "IfcBeam"
+   ],
+   "applicability": "by name",
+   "edition": "IFC 4.3.2 (IFC4X3_ADD2)",
+   "source": "https://ifc43-docs.standards.buildingsmart.org/IFC/RELEASE/IFC4x3/HTML/lexical/Qto_BeamBaseQuantities.htm",
+   "quantities": {
+    "Length": {
+     "kind": "length",
+     "unit": "m",
+     "ifc_type": "IfcQuantityLength",
+     "description": "Overall length, ignoring cut-outs"
+    },
+    "CrossSectionArea": {
+     "kind": "area",
+     "unit": "m²",
+     "ifc_type": "IfcQuantityArea",
+     "description": "Area of the cross section"
+    },
+    "OuterSurfaceArea": {
+     "kind": "area",
+     "unit": "m²",
+     "ifc_type": "IfcQuantityArea",
+     "description": "Side surface excluding the end caps"
+    },
+    "GrossSurfaceArea": {
+     "kind": "area",
+     "unit": "m²",
+     "ifc_type": "IfcQuantityArea",
+     "description": "Total surface including the end caps"
+    },
+    "NetSurfaceArea": {
+     "kind": "area",
+     "unit": "m²",
+     "ifc_type": "IfcQuantityArea",
+     "description": "Surface after cut-outs"
+    },
+    "GrossVolume": {
+     "kind": "volume",
+     "unit": "m³",
+     "ifc_type": "IfcQuantityVolume",
+     "description": "Volume ignoring cut-outs"
+    },
+    "NetVolume": {
+     "kind": "volume",
+     "unit": "m³",
+     "ifc_type": "IfcQuantityVolume",
+     "description": "Volume after cut-outs"
+    },
+    "GrossWeight": {
+     "kind": "weight",
+     "unit": "kg",
+     "ifc_type": "IfcQuantityWeight",
+     "description": "Weight of the gross volume"
+    },
+    "NetWeight": {
+     "kind": "weight",
+     "unit": "kg",
+     "ifc_type": "IfcQuantityWeight",
+     "description": "Weight of the net volume"
+    }
+   }
+  },
+  "Qto_ColumnBaseQuantities": {
+   "kind": "qto",
+   "entities": [
+    "IfcColumn"
+   ],
+   "applicability": "by name",
+   "edition": "IFC 4 (the IFC 4.3 page could not be fetched)",
+   "source": "https://standards.buildingsmart.org/IFC/RELEASE/IFC4/FINAL/HTML/schema/ifcsharedbldgelements/qset/qto_columnbasequantities.htm",
+   "quantities": {
+    "Length": {
+     "kind": "length",
+     "unit": "m",
+     "ifc_type": "IfcQuantityLength",
+     "description": "Physical length, ignoring cut-outs"
+    },
+    "CrossSectionArea": {
+     "kind": "area",
+     "unit": "m²",
+     "ifc_type": "IfcQuantityArea",
+     "description": "Area of the cross section"
+    },
+    "OuterSurfaceArea": {
+     "kind": "area",
+     "unit": "m²",
+     "ifc_type": "IfcQuantityArea",
+     "description": "Side surface excluding the end caps"
+    },
+    "GrossSurfaceArea": {
+     "kind": "area",
+     "unit": "m²",
+     "ifc_type": "IfcQuantityArea",
+     "description": "Total surface including both ends"
+    },
+    "NetSurfaceArea": {
+     "kind": "area",
+     "unit": "m²",
+     "ifc_type": "IfcQuantityArea",
+     "description": "Surface after cut-outs"
+    },
+    "GrossVolume": {
+     "kind": "volume",
+     "unit": "m³",
+     "ifc_type": "IfcQuantityVolume",
+     "description": "Volume ignoring cut-outs"
+    },
+    "NetVolume": {
+     "kind": "volume",
+     "unit": "m³",
+     "ifc_type": "IfcQuantityVolume",
+     "description": "Volume after cut-outs"
+    },
+    "GrossWeight": {
+     "kind": "weight",
+     "unit": "kg",
+     "ifc_type": "IfcQuantityWeight",
+     "description": "Weight of the gross volume"
+    },
+    "NetWeight": {
+     "kind": "weight",
+     "unit": "kg",
+     "ifc_type": "IfcQuantityWeight",
+     "description": "Weight of the net volume"
+    }
+   }
+  },
+  "Qto_SpaceBaseQuantities": {
+   "kind": "qto",
+   "entities": [
+    "IfcSpace"
+   ],
+   "applicability": "by name",
+   "edition": "IFC 4.3.2 (IFC4X3_ADD2)",
+   "source": "https://standards.buildingsmart.org/IFC/DEV/IFC4_3/HTML/lexical/Qto_SpaceBaseQuantities.html",
+   "quantities": {
+    "Height": {
+     "kind": "length",
+     "unit": "m",
+     "ifc_type": "IfcQuantityLength",
+     "description": "Space height from floor slab to ceiling slab, constant-height spaces only"
+    },
+    "FinishCeilingHeight": {
+     "kind": "length",
+     "unit": "m",
+     "ifc_type": "IfcQuantityLength",
+     "description": "Height of a suspended ceiling"
+    },
+    "FinishFloorHeight": {
+     "kind": "length",
+     "unit": "m",
+     "ifc_type": "IfcQuantityLength",
+     "description": "Thickness of the floor finish"
+    },
+    "GrossPerimeter": {
+     "kind": "length",
+     "unit": "m",
+     "ifc_type": "IfcQuantityLength",
+     "description": "Perimeter at floor level, openings included"
+    },
+    "NetPerimeter": {
+     "kind": "length",
+     "unit": "m",
+     "ifc_type": "IfcQuantityLength",
+     "description": "Perimeter at floor level without openings (skirting)"
+    },
+    "GrossFloorArea": {
+     "kind": "area",
+     "unit": "m²",
+     "ifc_type": "IfcQuantityArea",
+     "description": "Floor area including internal elements"
+    },
+    "NetFloorArea": {
+     "kind": "area",
+     "unit": "m²",
+     "ifc_type": "IfcQuantityArea",
+     "description": "Usable floor area"
+    },
+    "GrossWallArea": {
+     "kind": "area",
+     "unit": "m²",
+     "ifc_type": "IfcQuantityArea",
+     "description": "Bounding wall and column area, openings included"
+    },
+    "NetWallArea": {
+     "kind": "area",
+     "unit": "m²",
+     "ifc_type": "IfcQuantityArea",
+     "description": "Bounding wall and column area, openings excluded"
+    },
+    "GrossCeilingArea": {
+     "kind": "area",
+     "unit": "m²",
+     "ifc_type": "IfcQuantityArea",
+     "description": "Ceiling area including internal elements"
+    },
+    "NetCeilingArea": {
+     "kind": "area",
+     "unit": "m²",
+     "ifc_type": "IfcQuantityArea",
+     "description": "Ceiling area without internal elements"
+    },
+    "GrossVolume": {
+     "kind": "volume",
+     "unit": "m³",
+     "ifc_type": "IfcQuantityVolume",
+     "description": "Volume ignoring recesses and enclosed objects"
+    },
+    "NetVolume": {
+     "kind": "volume",
+     "unit": "m³",
+     "ifc_type": "IfcQuantityVolume",
+     "description": "Volume enclosed by the space"
+    }
+   }
+  }
+ }
+}

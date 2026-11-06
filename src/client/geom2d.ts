@@ -62,6 +62,18 @@ export function hatchLoops(e: Entity): Pt[][] {
   return loops;
 }
 
+/** The outline of a closed drawing entity as one polygon (a closed polyline, a circle sampled, a hatch with a single outline), or null: what Extrude and Sweep can take as a shape. */
+export function closedLoop(e: Entity): Pt[] | null {
+  const g = e.geometry;
+  if (e.kind === "polyline" && g["closed"] === true && isPts(g["points"]) && g["points"].length >= 3) return g["points"].map((q) => [q[0], q[1]] as Pt);
+  if (e.kind === "circle" && isPt(g["center"]) && typeof g["radius"] === "number" && g["radius"] > 0) {
+    const [cx, cy] = g["center"], r = g["radius"];
+    return Array.from({ length: 48 }, (_, i) => [cx + r * Math.cos((i / 48) * Math.PI * 2), cy + r * Math.sin((i / 48) * Math.PI * 2)] as Pt);
+  }
+  const loops = hatchLoops(e);
+  return loops.length === 1 ? (loops[0] as Pt[]) : null;
+}
+
 /** True when the point is inside a hatch's outline by the even-odd rule (holes stay open). */
 export function hatchContains(e: Entity, p: Pt): boolean {
   let inside = false;
