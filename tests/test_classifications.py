@@ -179,19 +179,25 @@ class AuthorizedCsvImport(unittest.TestCase):
             t21 = p / "table21.csv"
             t23 = p / "table23.csv"
             ass = p / "assemblies.csv"
+            t13 = p / "table13.csv"
             mapping = p / "crosswalk.csv"
             target = p / "private-catalog.json"
             t21.write_text("OmniClass Number,Level 1 Title,Level 2 Title\n21-FAKE-01,Synthetic Element,\n21-FAKE-02,Synthetic Element,Synthetic Part\n", encoding="utf-8")
             t23.write_text("Code,Title\n23-FAKE-01,Synthetic Product\n", encoding="utf-8")
+            t13.write_text("Code,Title\n13-FAKE-01,Synthetic Space\n", encoding="utf-8")
             ass.write_text("Assembly Code,Assembly Description\nTEST-A,Test Shell System\nTEST-B,Unmapped System\n", encoding="utf-8")
             mapping.write_text("assembly_code,omniclass_code,table,verified,source\nTEST-A,21-FAKE-01,21,true,Synthetic crosswalk\n", encoding="utf-8")
             counts = CL.import_authorized_catalog(table21=t21, table23=t23,
-                edition="SYNTHETIC", output=target, assembly=ass, mapping=mapping)
+                edition="SYNTHETIC", output=target, assembly=ass, mapping=mapping,
+                other_tables={13: t13})
             self.assertEqual(counts, {"table21": 2, "table23": 1,
                                       "assembly_codes": 2, "verified_mappings": 1})
             with patch.dict(os.environ, {"SPADRA_OMNICLASS_CATALOG": str(target),
                                           "SPADRA_CSI_CROSSWALK_KEY": ""}):
                 self.assertEqual(CL.search("assembly", "Unmapped")[0]["code"], "TEST-B")
+                self.assertEqual(len(CL.info()["omniclass"]["supported_tables"]), 15)
+                self.assertEqual(CL.search("omniclass", "Synthetic Space", table=13)[0]["code"],
+                                 "13-FAKE-01")
                 self.assertEqual(CL.search("omniclass", "Synthetic Part", table=21)[0]["code"],
                                  "21-FAKE-02")
                 self.assertEqual(CL.search("omniclass", "Synthetic Product", table=23)[0]["code"],
@@ -270,6 +276,7 @@ class CsiCrosswalkLiveAdapter(unittest.TestCase):
             self.assertEqual(CL.info()["omniclass"]["provider"], "csi_crosswalk")
             self.assertEqual(CL.search("assembly", "TEST")[0]["code"], "TEST-A")
             self.assertEqual(CL.search("omniclass", "wall", table=21)[0]["code"], "21-FAKE-01")
+            self.assertEqual(len(CL.info()["omniclass"]["supported_tables"]), 15)
             self.assertEqual(CL._manual_omni("21-FAKE-01", 21), "21-FAKE-01")
             with self.assertRaises(BadRequest):
                 CL._manual_omni("INVALID", 21)
