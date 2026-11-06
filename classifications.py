@@ -519,6 +519,9 @@ def info() -> dict[str, Any]:
                       "edition": cs["edition"] if cs else None,
                       "tables": {t: len(cs["codes"][t]) if cs else None if _csi_key() else 0 for t in ("21", "23")},
                       "verified_assembly_codes": len(cs["mappings"]) if cs else None if _csi_key() else 0,
+                      "supported_tables": {str(t): title for t, title in OMNICLASS_TABLES.items()},
+                      "counts_by_table": {str(t): len(cs["codes"][str(t)]) if cs else None if _csi_key() else 0
+                                          for t in OMNICLASS_TABLES},
                       "notice": "CSI-licensed table content requires appropriate access; no official mapping is bundled."},
     }
 
@@ -675,7 +678,13 @@ def groups_for(meta: Mapping[str, Any], category: str) -> list[dict[str, Any]]:
          "choices": [{"value": "", "label": "— Unassigned —"}] +
                     [{"value": v, "label": v} for v in predefined]},
     ]}
-    return [omniclass, ifc]
+    additional = {"title": "OmniClass (Other tables)", "collapsed": True, "rows": [
+        {"key": "omniclass_" + str(t), "label": f"Table {t} — {name}",
+         "type": "catalog", "catalog": "omniclass", "table": t,
+         "value": read(meta, "omniclass_" + str(t)),
+         "text": title(str(t), read(meta, "omniclass_" + str(t))) if read(meta, "omniclass_" + str(t)) else ""}
+        for t, name in OMNICLASS_TABLES.items() if t not in (21, 23)]}
+    return [omniclass, additional, ifc]
 
 if __name__ == "__main__":
     _cli()
