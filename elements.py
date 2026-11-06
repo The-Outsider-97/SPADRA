@@ -29,7 +29,7 @@ DOOR_LEAF = 0.05                      # thickness of the drawn door leaf, m
 GLASS = 0.03                          # thickness of the drawn glazing panel, m
 ROOF_TYPES = {"flat": "Flat Roof", "shed": "Shed Roof", "gable": "Gable Roof", "hip": "Hip Roof"}      # the four everyday roofs; each can be changed to another later
 OPENINGS = ("door", "window")
-SPECIAL = ("wall", "door", "window", "floor", "roof", "structural", "room", "stair", "generic", "extrusion", "void", "sweep", "gutter", "downpipe")
+SPECIAL = ("wall", "door", "window", "floor", "roof", "structural", "room", "stair", "generic", "extrusion", "void", "sweep", "gutter", "downpipe", "foundation")
 FORMS = ("extrusion", "void", "sweep")                     # solids made from a profile (see forms.py)
 FLOOR_TYPES = ("Generic Floor", "Structural Slab")
 IDENTITY = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
@@ -165,12 +165,18 @@ def wall_joins(project: Any, oid: str, table: Mapping[str, _WallRow] | None = No
     Returns ``{"ends": ((start +y, start -y), (end +y, end -y)), "with": [ids that shaped it]}`` in the wall's own frame."""
     f = wall_frame(project, oid)
     level = str(m(f["meta"], "level"))
-    table = {k: row for k, row in (table if table is not None else _wall_table(project)).items() if row.level == level}     # walls join on their own level only
-    t = f["thickness"]
-    u = G.unit(G.sub(f["end"], f["start"])) if f["length"] > 1e-9 else (1.0, 0.0)
+    rows = {k: row for k, row in (table if table is not None else _wall_table(project)).items() if row.level == level}     # walls join on their own level only
+    return join_ends(rows, oid, f["start"], f["end"], f["thickness"])
+
+
+def join_ends(table: Mapping[str, _WallRow], oid: str, start: tuple[float, float], end: tuple[float, float], t: float) -> dict[str, Any]:
+    """The joint rule for any thick line (a wall, a strip foundation): how the two ends of ``oid`` (from ``start`` to ``end``, ``t`` thick) meet the other
+    lines of ``table`` (already limited to one level). See ``wall_joins`` for what is returned."""
+    length = math.dist(start, end)
+    u = G.unit(G.sub(end, start)) if length > 1e-9 else (1.0, 0.0)
     ends: list[tuple[float, float]] = []
     shaped: set[str] = set()
-    for at_start, point, d in ((True, f["start"], u), (False, f["end"], (-u[0], -u[1]))):
+    for at_start, point, d in ((True, start, u), (False, end, (-u[0], -u[1]))):
         members = [(oid, d, t)]
         for xid, row in table.items():
             if xid == oid:
@@ -381,9 +387,9 @@ def regenerate_floor(project: Any, oid: str) -> None:
     meta = project.model.get(oid)["metadata"]
     top = level_elevation(project, m(meta, "level")) + float(m(meta, "offset", 0.0))
     from . import forms as FX
-    holes = [h["poly"] for h in FX.remember_cuts(project, oid)]                      # voids wholly inside the slab, through its thickness
+    cut = FX.remember_cuts(project, oid)                                             # voids through the slab's thickness: holes, and notches in its edge
     try:
-        _set_mesh(project, oid, FX._solid([tuple(q) for q in m(meta, "boundary")], holes, top - float(m(meta, "thickness")), top))
+        _set_mesh(project, oid, FX._solid(cut.outline or [tuple(q) for q in m(meta, "boundary")], cut.holes, top - float(m(meta, "thickness")), top))
     except G.GeometryError as exc:
         raise BadRequest(str(exc)) from exc
 
@@ -674,6 +680,9 @@ def regenerate(project: Any, oid: str) -> None:
     elif cat in FORMS:
         from . import forms as FX
         FX.regenerate(project, oid)
+    elif cat == "foundation":
+        from . import foundations as FD
+        FD.regenerate(project, oid)
     elif cat == "room":
         from . import rooms as R
         R.check_boundary(meta)
@@ -695,7 +704,7 @@ def regenerate_all(project: Any) -> None:
         if m(project.model.get(oid)["metadata"], "category") == "wall":
             regenerate_wall(project, oid)
     for oid in ids:
-        if m(project.model.get(oid)["metadata"], "category") in ("floor", "roof", "structural", "stair", "generic", "gutter", "downpipe", *FORMS):
+        if m(project.model.get(oid)["metadata"], "category") in ("floor", "roof", "structural", "stair", "generic", "gutter", "downpipe", "foundation", *FORMS):
             regenerate(project, oid)
 
 
@@ -862,7 +871,7 @@ def set_property(project: Any, oid: str, key: str, value: Any) -> None:
             raise BadRequest(f"'{key}' is not an editable beam property")
     elif cat in ("gutter", "downpipe"):
         from . import gutters as GU
-        values.update((GU.set_gutter_property if cat == "gutter" else GU.set_downpipe_property)(project, meta, key, value))
+        values.update(GU.set_gutter_property(project, oid, meta, key, value) if cat == "gutter" else GU.set_downpipe_property(project, meta, key, value))
     elif cat == "stair":
         from . import stairs as SR
         values.update(SR.set_property(project, meta, key, value))
@@ -878,9 +887,19 @@ def set_property(project: Any, oid: str, key: str, value: Any) -> None:
         if changed is None:                                                         # the solid/void switch rebuilt it already
             return
         values.update(changed)
+    elif cat == "foundation":
+        from . import foundations as FD
+        values.update(FD.set_property(project, oid, meta, key, value))
+    elif cat == "array":
+        from . import arrays as AY
+        AY.set_property(project, oid, key, value)
+        return
     elif cat == "grid":
         from . import datums as DT
         part = {"start_x": ("start", 0), "start_y": ("start", 1), "end_x": ("end", 0), "end_y": ("end", 1)}.get(key)
+        if key in ("length", "angle", "bubble"):                                     # drawing units are millimetres' worth of metres here: the panel speaks mm
+            DT.edit_grid(project, oid, {key: number(value, key, 0.0, 1e9) if key == "length" else value}, 0.001 if key == "length" else 1.0)
+            return
         if part is None:
             raise BadRequest(f"'{key}' is not an editable grid property")
         pt = list(m(meta, part[0]))
@@ -890,6 +909,9 @@ def set_property(project: Any, oid: str, key: str, value: Any) -> None:
     else:
         raise BadRequest(f"'{key}' cannot be edited on this element")
     _attach(project, oid, values)
+    if cat == "gutter":
+        from . import gutters as GU
+        GU.share(project, oid, values)                                              # the run's settings are the whole run's
     regenerate(project, oid)
     if key == "host" and cat in OPENINGS and old_host and old_host != values["host"] and alive(project, old_host):
         regenerate_wall(project, old_host)                                         # the wall it left is whole again
@@ -934,10 +956,15 @@ def move(project: Any, oid: str, dx: float, dy: float, dz: float) -> None:
     elif cat in FORMS:
         from . import forms as FX
         FX.move(project, oid, meta, dx, dy, dz)
+    elif cat == "foundation":
+        from . import foundations as FD
+        FD.move(project, oid, meta, dx, dy, dz)
     elif cat == "grid":
         s, e = m(meta, "start"), m(meta, "end")
         _attach(project, oid, {"start": [s[0] + dx, s[1] + dy], "end": [e[0] + dx, e[1] + dy]})
         return
+    elif cat == "array":
+        raise BadRequest("An array has no place of its own: move its source and the array follows (or release the array first)")
     else:
         project.model.move(oid, dx, dy, dz)
         return
@@ -976,6 +1003,8 @@ def rotate(project: Any, oid: str, angle: float, centre: tuple[float, float], re
         raise BadRequest(f"A {cat} turns with its wall: select the wall to rotate it")
     if cat in ("gutter", "downpipe"):
         raise BadRequest(f"A {cat} turns with its roof: select the roof to rotate it")
+    if cat == "array":
+        raise BadRequest("An array has no place of its own: turn its source and the array follows (or release the array first)")
     if cat in ("wall", "grid") or (cat == "structural" and not is_column(meta)):
         _attach(project, oid, {"start": _turn(m(meta, "start"), angle, centre), "end": _turn(m(meta, "end"), angle, centre)})
     elif cat in ("floor", "roof", "room"):
@@ -989,6 +1018,9 @@ def rotate(project: Any, oid: str, angle: float, centre: tuple[float, float], re
     elif cat in FORMS:
         from . import forms as FX
         FX.rotate(project, oid, meta, angle, centre)
+    elif cat == "foundation":
+        from . import foundations as FD
+        FD.rotate(project, oid, meta, angle, centre)
     else:
         raise BadRequest(f"A {cat} cannot be rotated in plan")
     if rebuild and cat != "grid":
@@ -1012,6 +1044,10 @@ def remove(project: Any, oid: str) -> None:
     """Delete an element. A wall takes its doors and windows with it; a door or window leaves its wall whole again."""
     meta = meta_of(project, oid)
     cat = m(meta, "category")
+    if cat == "array":
+        from . import arrays as AY
+        AY.remove(project, oid)
+        return
     if cat == "wall":
         f = wall_frame(project, oid)
         affected = set(m(meta, "joins") or ()) | (_touching(_wall_table(project), oid, str(m(meta, "level")), f["start"], f["end"], f["thickness"])
@@ -1027,9 +1063,12 @@ def remove(project: Any, oid: str) -> None:
             regenerate_wall(project, host)
     else:
         from . import gutters as GU
+        run = (m(meta, "roof"), GU.run_key(project, oid, meta)) if cat == "gutter" and alive(project, m(meta, "roof")) else None
         for did in GU.dependents(project, oid):                                    # a roof takes its gutters and their downpipes, a gutter its downpipes
             project.model.remove(did)
         project.model.remove(oid)
+        if run:
+            GU.settle_after_delete(project, *run)                                   # its neighbours lose the mitre and get a stop end
 
 
 # ------------------------------------------------------------------------------------------------------------------------ plan
@@ -1091,13 +1130,16 @@ def plan_items(project: Any, level_id: str, f: float) -> list[dict[str, Any]]:
                     out.append({"id": oid, "category": "wall", "name": obj["name"], "polygon": _wall_piece(fr, cursor, x0, f), "axis": axis})
                 cursor = max(cursor, x1)
         elif cat == "floor":
-            item = {"id": oid, "category": "floor", "name": obj["name"], "polygon": [[q[0] * f, q[1] * f] for q in m(meta, "boundary")]}
+            item = {"id": oid, "category": "floor", "name": obj["name"], "polygon": [[q[0] * f, q[1] * f] for q in (m(meta, "cut_outline") or m(meta, "boundary"))]}
             if m(meta, "cut"):
                 item["holes"] = [[[q[0] * f, q[1] * f] for q in h] for h in m(meta, "cut")]
             out.append(item)
         elif cat in FORMS:
             from . import forms as FX
             out.append(FX.plan_item(project, oid, f))
+        elif cat == "foundation":
+            from . import foundations as FD
+            out.append(FD.plan_item(project, oid, f))
         elif cat == "structural" and is_column(meta):
             x, y = m(meta, "point")
             ang = float(m(meta, "rotation", 0.0))
@@ -1177,6 +1219,63 @@ def properties(project: Any, oid: str, relations: bool = False) -> dict[str, Any
     return RL.augment(project, oid, _properties(project, oid), relations)
 
 
+# ---------------------------------------------------------------------------------------------------------------------- solid status
+class Solid(NamedTuple):
+    """What can honestly be said about an element's volume. ``state`` is one of ``solid`` (a valid closed solid, ``volume`` in m³), ``surface`` (a valid open
+    surface or shell: no volume), ``none`` (an element with no geometry of its own: a grid, a group), ``unresolved`` (an instance whose geometry has not been
+    built yet) or ``invalid`` (geometry that SGEO refuses to measure; ``message`` says why). A missing volume is never reported as zero."""
+    state: str
+    volume: float | None
+    message: str
+
+
+def solid_status(project: Any, oid: str) -> Solid:
+    """Classify an element's geometry and measure its volume once per model revision (the answer is cached until the revision moves)."""
+    key = ("solid-status", oid)
+    cached = project._cache.get(key)
+    if cached is not None:
+        return cached
+    obj = project.model.get(oid)
+    geometry = obj.get("geometry")
+    cat = str(m(obj["metadata"], "category", "generic"))
+    if geometry is None:
+        if obj.get("family_id"):
+            result = Solid("unresolved", None, "The geometry of this family instance has not been built yet")
+        elif cat == "grid":
+            result = Solid("none", None, "Not applicable")
+        else:
+            result = Solid("none", None, "No volumetric geometry")
+    else:
+        kind = geometry.get("kind")
+        try:
+            if kind == "mesh":
+                from src.utils.spatial_formats.sgeo.analysis import analyze_mesh
+                if not analyze_mesh(geometry).is_closed_oriented_surface:
+                    raise _OpenSurface()
+            result = Solid("solid", float(project.model.volume(oid, unit="m")), "")
+        except _OpenSurface:
+            result = Solid("surface", None, "Open surface: it encloses no volume")
+        except SpatialFormatError as exc:
+            result = Solid("invalid", None, str(exc))
+    project._cache[key] = result
+    return result
+
+
+class _OpenSurface(Exception):
+    pass
+
+
+def volume_row(project: Any, oid: str) -> dict[str, Any]:
+    """The Properties row for an element's volume: the figure for a valid solid, otherwise the reason there is none."""
+    st = solid_status(project, oid)
+    if st.state == "solid":
+        return {"label": "Volume", "type": "readonly", "value": f"{st.volume:.3f} m³"}
+    row: dict[str, Any] = {"label": "Volume", "type": "readonly", "value": st.message if st.state != "invalid" else f"Invalid geometry: {st.message}"}
+    if st.state == "invalid":
+        row["error"] = st.message
+    return row
+
+
 def _properties(project: Any, oid: str) -> dict[str, Any]:
     obj = project.model.get(oid) if alive(project, oid) else None
     if obj is None:
@@ -1186,23 +1285,32 @@ def _properties(project: Any, oid: str) -> dict[str, Any]:
     out: dict[str, Any] = {"ref": {"model": oid}, "title": obj["name"] or cat.title(), "category": cat, "kind": "model", "groups": [], "top": []}
     name_row = {"key": "name", "label": "Name", "type": "text", "value": obj["name"]}
     mm = lambda v: f"{v * 1000:,.0f} mm"                                                    # noqa: E731
-    volume = {"label": "Volume", "type": "readonly", "value": f"{project.model.volume(oid, unit='m'):.3f} m³"} if cat not in ("room", "void") else {}        # a room has no solid
-    if cat in ("stair", "generic", "grid", "gutter", "downpipe", *FORMS):
+    volume = volume_row(project, oid) if cat not in ("room", "void") else {}                # a room has no solid; a void's volume is not a quantity
+    if cat in ("stair", "generic", "grid", "gutter", "downpipe", "foundation", "array", *FORMS):
+        if cat == "array":
+            from . import arrays as AY
+            return AY.properties(project, oid, out)
         if cat in ("gutter", "downpipe"):
             from . import gutters as GU
             GU.properties(project, oid, out, volume)
+        elif cat == "foundation":
+            from . import foundations as FD
+            FD.properties(project, oid, out, volume)
         elif cat in FORMS:
             from . import forms as FX
             FX.properties(project, oid, out, {} if cat == "void" else volume)
         elif cat == "stair":
             from . import stairs as SR
             SR.properties(project, oid, out, volume)
-        elif cat == "generic":
+        elif cat == "generic" and obj.get("family_id"):
             from . import families as FM
             FM.properties(project, oid, out, volume)
+        elif cat == "generic":                                                      # an object that is not a family instance (a group, an imported object)
+            out["top"] = [{"label": "Type", "type": "readonly", "value": m(meta, "type", "Generic Model")}, name_row]
+            out["groups"] = [{"title": "Geometry", "rows": [volume]}]
         else:
             from . import datums as DT
-            DT.grid_properties(project, oid, out)
+            DT.grid_properties(project, oid, out, volume)
             out["top"][1] = name_row | {"label": "Label"}
         out["groups"].append({"title": "Identity", "rows": [name_row]})
         return out
@@ -1361,6 +1469,10 @@ def check(project: Any) -> list[dict[str, str]]:
         label = obj["name"] or str(cat).title()
         if cat in SPECIAL and m(meta, "level") not in level_ids:
             issues.append(issue("error", oid, f"{label} refers to a level that no longer exists", "references"))
+        if cat not in ("room", "void", "grid") and obj.get("geometry") is not None:
+            st = solid_status(project, oid)
+            if st.state == "invalid":
+                issues.append(issue("error", oid, f"{label} has invalid solid geometry: {st.message}", "geometry"))
         if cat == "wall":
             s, e = m(meta, "start"), m(meta, "end")
             if s and e and math.dist(s, e) < 1e-6:
@@ -1393,6 +1505,9 @@ def check(project: Any) -> list[dict[str, str]]:
         elif cat in ("gutter", "downpipe"):
             from . import gutters as GU
             issues.extend(GU.issues(project, oid, label, issue))
+        elif cat == "foundation":
+            from . import foundations as FD
+            issues.extend(FD.issues(project, oid, label, issue))
         elif cat == "stair":
             from . import stairs as SR
             if m(meta, "top_level") not in level_ids:

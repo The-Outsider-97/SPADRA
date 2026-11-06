@@ -51,6 +51,8 @@ from . import elements as E
 from . import geometry as G
 from . import annotations as AN
 from . import autorooms as AR
+from . import cutting as CU
+from . import foundations as FD
 from . import forms as FX
 from . import arrays as AY
 from . import datums as DT
@@ -71,9 +73,9 @@ _BACKUP_ID = re.compile(r"^\d{8}T\d{6}Z-r\d{1,9}(-\d{1,3})?$")
 NO_DRAWING = ("3d", "schedule")                 # view kinds that have no SDRW document of their own
 MAX_COORD = 1.0e9                              # drawing units; anything larger is a typo, not a building
 MAX_POINTS = 10_000
-CATEGORIES = ("Walls", "Doors", "Windows", "Floors", "Roofs", "Gutters", "Downpipes", "Stairs", "Structural", "Rooms", "Grids", "Generic Models")
+CATEGORIES = ("Walls", "Doors", "Windows", "Floors", "Roofs", "Gutters", "Downpipes", "Stairs", "Structural", "Rooms", "Grids", "Generic Models", "Extrusions", "Voids", "Sweeps", "Foundations", "Arrays")
 CATEGORY_KEY = {"wall": "Walls", "door": "Doors", "window": "Windows", "floor": "Floors", "roof": "Roofs", "gutter": "Gutters", "downpipe": "Downpipes", "stair": "Stairs", "structural": "Structural", "room": "Rooms",
-                "grid": "Grids", "generic": "Generic Models"}
+                "grid": "Grids", "generic": "Generic Models", "extrusion": "Extrusions", "void": "Voids", "sweep": "Sweeps", "foundation": "Foundations", "array": "Arrays"}
 
 
 def _finite(value: Any, label: str, limit: float = MAX_COORD) -> float:
@@ -434,6 +436,8 @@ class Project:
         try:
             result = handler(self, params)
             if key == "model" and op.split(".")[0] not in ("anim", "project", "report"):
+                FD.reconcile(self)                                      # foundations follow the walls and columns they stand on, and strips re-cut their joints
+                AY.reconcile(self)                                      # linked arrays follow their sources; items a person edited or deleted are let go
                 FX.reconcile(self)                                      # solids follow the voids that cut them
                 AR.reconcile(self)                                      # rooms follow the walls that enclose them, inside the same command
                 AN.sync_tags(self)                                      # tags follow their elements inside the same command
@@ -732,6 +736,16 @@ class Project:
             raise NotFound("The model has no animation yet")
         return AA.clean_spec(spec, settings["duration"]), settings["fps"]
 
+    def forget_animation(self, going: set[str]) -> None:
+        """Take the tracks and events of elements that are about to be deleted out of the animation (the model refuses an animation of something that is not there)."""
+        spec = self.model.animation()
+        if spec is not None and (any(t["object_id"] in going for t in spec["tracks"]) or any(e.get("object_id") in going for e in spec.get("events", []))):
+            spec = AA.clean_spec(spec)
+            spec["tracks"] = [t for t in spec["tracks"] if t["object_id"] not in going]
+            if spec.get("events"):
+                spec["events"] = [e for e in spec["events"] if e.get("object_id") not in going]
+            self._commit_animation(spec)
+
     def _commit_animation(self, spec: dict[str, Any]) -> None:
         if not AB.BRIDGE.available:
             raise BadRequest("The SLAI Animation Agent is not available, so the animation cannot be edited", details={"reason": AB.BRIDGE.reason})
@@ -775,6 +789,38 @@ class Project:
         if roof is not None and not isinstance(roof, str):
             raise BadRequest("roof must be an element id")
         return GU.drainage(self, roof or None)
+
+    def trace_drainage(self, gutter: Any, offset: Any = 0.0) -> dict[str, Any]:
+        """Where the rain that falls on a gutter, ``offset`` metres along it, goes: down the run to its low point and out of the downpipe there. Read-only."""
+        if not isinstance(gutter, str):
+            raise BadRequest("gutter must be an element id")
+        if isinstance(offset, bool) or not isinstance(offset, (int, float)):
+            raise BadRequest("offset must be a number of metres")
+        if not E.alive(self, gutter) or E.category(self, gutter) != "gutter":
+            raise NotFound(f"Gutter {gutter} does not exist")
+        return GU.trace(self, gutter, float(offset))
+
+    def foundation_report(self, oid: Any) -> dict[str, Any]:
+        """Quantities, build-up, thermal resistance and indicative bars of one foundation. Read-only; nothing is checked structurally."""
+        if not isinstance(oid, str):
+            raise BadRequest("id must be an element id")
+        if not E.alive(self, oid) or E.category(self, oid) != "foundation":
+            raise NotFound(f"Foundation {oid} does not exist")
+        return {"id": oid, **FD.quantities(self, oid)}
+
+    def cutting_report(self, void: Any) -> dict[str, Any]:
+        """What a void does to every element it meets (cut, not supported, or left alone by its policy), with the reasons. Read-only."""
+        if not isinstance(void, str):
+            raise BadRequest("void must be an element id")
+        if not E.alive(self, void) or E.category(self, void) != "void":
+            raise NotFound(f"Void {void} does not exist")
+        v = next(x for x in FX.voids(self) if x["id"] == void)
+        return {"void": void, "settings": {"enabled": v["enabled"], "policy": v["policy"], "targets": v["targets"], "host": v["host"]},
+                "elements": CU.classify(self, void), "missing": CU.stale(self, v)}
+
+    def preview_gutters(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        """What ``model.add_gutters`` would make for the same parameters, as plan outlines, without making it. Read-only."""
+        return GU.preview_gutters(self, params, MM_PER[self.manifest["unit"]] / 1000.0)
 
     def properties(self, ref: Mapping[str, Any], relations: bool = False) -> dict[str, Any]:
         """The Properties panel for a selection: ``{"model": id}``, ``{"drawing": view_id, "entity": id}`` or ``{"sheet": id}``. ``relations``
@@ -1312,7 +1358,9 @@ class _Commands:
         oid, key = text(p.get("id"), "id", 80), text(p.get("key"), "key", 60)
         if not E.alive(project, oid):
             raise NotFound(f"Element {oid} does not exist")
-        if key == "name":
+        if key == "name" and E.category(project, oid) == "grid":
+            DT.edit_grid(project, oid, {"label": p.get("value")}, 1.0)               # a grid label is unique
+        elif key == "name":
             project.model.rename_object(oid, text(p.get("value"), "name", 80))
         else:
             E.set_property(project, oid, key, p.get("value"))
@@ -1379,13 +1427,7 @@ class _Commands:
         if not E.alive(project, oid):
             raise NotFound(f"Element {oid} does not exist")
         going = {oid, *(E.hosted(project, oid) if E.m(E.meta_of(project, oid), "category") == "wall" else []), *GU.dependents(project, oid)}
-        spec = project.model.animation()
-        if spec is not None and any(t["object_id"] in going for t in spec["tracks"]) or spec is not None and any(e.get("object_id") in going for e in spec.get("events", [])):
-            spec = AA.clean_spec(spec)                     # the animation of a deleted element goes with it (the model refuses an animation of something that is not there)
-            spec["tracks"] = [t for t in spec["tracks"] if t["object_id"] not in going]
-            if spec.get("events"):
-                spec["events"] = [e for e in spec["events"] if e.get("object_id") not in going]
-            project._commit_animation(spec)
+        project.forget_animation(going)
         E.remove(project, oid)
         return {"deleted": oid}
 
@@ -1457,24 +1499,51 @@ class _Commands:
     @staticmethod
     @command(_model_target("Array elements"))
     def model__array(project: Project, p: dict[str, Any]) -> dict[str, Any]:
-        """Copy elements along a line (``mode`` "linear": ``step`` [dx, dy, dz] in drawing units) or round a point ("radial": ``centre`` in drawing units and
-        ``angle`` in degrees). ``count`` is the number of items including the originals."""
+        """Repeat elements and keep the pattern (an ``array`` element that regenerates its copies). ``count`` is the number of items including the originals.
+        Rectangular (``mode`` "grid", or "linear"): ``axes`` is up to three of {count, spacing, direction ("x", "y", "z", a vector or an angle in plan)} or
+        {count, step [dx, dy, dz]}; or ``dimension`` "X", "Y", "Z", "XY", "XYZ" … with ``counts`` and ``spacings``; or the one-axis form ``count`` + ``step``.
+        Radial: ``centre`` and ``angle`` in degrees. Lengths are in drawing units. ``linked`` (default true) makes the copies follow the source when it changes.
+        ``persistent`` false makes plain copies with no array to edit."""
         ids = p.get("ids")
         if not isinstance(ids, list) or not ids or len(ids) > 500:
             raise BadRequest("ids must be a list of 1 to 500 elements")
-        f = MM_PER[project.manifest["unit"]] / 1000.0
-        mode = text(p.get("mode", "linear"), "mode", 20)
-        count = integer(p.get("count"), "count", 2, AY.MAX_COUNT)
-        if mode == "linear":
-            raw = p.get("step")
-            if not isinstance(raw, (list, tuple)) or len(raw) not in (2, 3):
-                raise BadRequest("step must be [dx, dy] or [dx, dy, dz] in drawing units")
-            step = tuple(_finite(v, "step", 1e9) * f for v in raw) + (0.0,) * (3 - len(raw))
-            result = AY.make(project, [text(i, "id", 80) for i in ids], mode, count, step=step)
-        else:
-            centre = tuple(c * f for c in _point(p.get("centre"), "centre"))
-            result = AY.make(project, [text(i, "id", 80) for i in ids], mode, count, centre=centre, angle=number(p.get("angle", 360), "angle", -360, 360))
+        spec = AY.parse(p, MM_PER[project.manifest["unit"]] / 1000.0)
+        result = AY.make(project, [text(i, "id", 80) for i in ids], spec)
+        if p.get("persistent") is False:
+            AY.release(project, result["array"])
+            result["array"] = None
         return result
+
+    @staticmethod
+    @command(_model_target("Edit array"))
+    def model__set_array(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Change an array: any of ``axes`` / ``dimension`` + ``counts`` + ``spacings`` / ``count`` (one axis, or radial), ``centre``, ``angle``, ``linked``
+        (turning it on makes the copies follow the source again). The copies are regenerated; those a person has edited are left alone."""
+        rid = text(p.get("id"), "id", 80)
+        meta = AY.require(project, rid)
+        spec = AY.parse(p, MM_PER[project.manifest["unit"]] / 1000.0, AY.spec_of(meta))
+        return AY.set_parameters(project, rid, spec)
+
+    @staticmethod
+    @command(_model_target("Release array"))
+    def model__release_array(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Dissolve an array (``id``, or any item of it) and keep every item as an ordinary element."""
+        oid = text(p.get("id"), "id", 80)
+        if not E.alive(project, oid):
+            raise NotFound(f"Element {oid} does not exist")
+        rid = oid if E.category(project, oid) == "array" else AY.of(project, oid)
+        if rid is None:
+            raise BadRequest("That is not an array, and not an item of one")
+        return AY.release(project, rid)
+
+    @staticmethod
+    @command(_model_target("Make array item independent"))
+    def model__detach_array_item(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Let one item of an array go its own way: it stays as it is, and the array no longer changes it (it keeps its place in the pattern)."""
+        oid = text(p.get("id"), "id", 80)
+        if not E.alive(project, oid):
+            raise NotFound(f"Element {oid} does not exist")
+        return {"array": AY.make_independent(project, oid)}
 
     @staticmethod
     @command(_model_target("Add room"))
@@ -1486,10 +1555,37 @@ class _Commands:
     @staticmethod
     @command(_model_target("Add gutters"))
     def model__add_gutters(project: Project, p: dict[str, Any]) -> dict[str, Any]:
-        """Gutters on the eaves of a roof (``roof``; ``edges`` picks outline edges, default every eave), each with a downpipe at its low end unless
-        ``downpipe`` is false. ``gutter`` is the type: half_round, ogee, box or fascia; width, depth, thickness, fall, material and rainfall are optional."""
+        """Gutters on the eaves of a roof (``roof``; ``edges`` picks outline edges, default every eave). Edges that follow one another become one run
+        with mitred corners (``connect`` false keeps them apart; ``run`` is a gutter id to add to an existing run). Each run falls towards ``fall_to``
+        (end, start, middle or corners) and gets a downpipe at each low point unless ``downpipe`` is false. ``gutter`` is the type: half_round, ogee, box
+        or fascia; width, depth, thickness, fall (mm/m), material, rainfall, gap (mm out from the eave line), drop (mm below the eave), ext_start,
+        ext_end (mm, free ends only) and end_start, end_end (cap or open) are optional. ``model.preview_gutters`` shows what a request would make."""
         made = GU.add_gutters(project, p, MM_PER[project.manifest["unit"]] / 1000.0)
         return {"ids": made, "gutters": [i for i in made if E.category(project, i) == "gutter"]}
+
+    @staticmethod
+    @command(_model_target("Add foundation"))
+    def model__add_foundation(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """A foundation of ``kind``: poer (pad: ``point`` or a column in ``support``; ``width``, ``length``, ``height`` mm; ``shape`` rect or round), strook (strip:
+        a wall in ``support``, or ``start`` and ``end``; ``width``, ``height``, ``offset`` mm), funderingsbalk (beam between the two columns in ``support``, or
+        ``start`` and ``end``), plaat (raft) or vloer (ground-bearing slab: ``points`` and ``thickness``, with ``above`` and ``below`` layers of
+        ``{name, material, thickness (mm), conductivity (W/m·K)}``). ``top`` (m above the level) defaults to the base of what it stands on. Reinforcement is
+        declared (``bars``, ``cover``, ``concrete_class``, ``steel``), never designed."""
+        return {"id": FD.add_foundation(project, p, MM_PER[project.manifest["unit"]] / 1000.0)}
+
+    @staticmethod
+    @command(_model_target("Add foundations under supports"))
+    def model__add_foundations_under(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """A strip under each wall and a pad under each column in ``supports``, with the same sizes (``width``, ``height`` mm, ``top``, ...); all or none."""
+        made = FD.add_under(project, p, MM_PER[project.manifest["unit"]] / 1000.0)
+        return {"ids": made}
+
+    @staticmethod
+    @command(_model_target("Edit foundation"))
+    def model__set_foundation_data(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Replace the layers (``above``, ``below``) and/or reinforcement (``bars``, ``cover``, ``concrete_class``, ``steel``) of the foundation ``id``."""
+        FD.set_data(project, text(p.get("id"), "id", 80), p)
+        return {"id": p["id"]}
 
     @staticmethod
     @command(_model_target("Add downpipe"))
@@ -1508,6 +1604,17 @@ class _Commands:
     def model__add_grid(project: Project, p: dict[str, Any]) -> dict[str, Any]:
         """A named grid line between two points (drawing units); it is shown on every floor plan."""
         return {"id": DT.add_grid(project, p, MM_PER[project.manifest["unit"]] / 1000.0)}
+
+    @staticmethod
+    @command(_model_target("Edit grid"))
+    def model__set_grid(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Change a grid line in one step: ``start`` / ``end`` (drawing units), or ``length`` (drawing units) and ``angle`` (degrees) from its start
+        (``hold`` "end" or "middle" keeps that point), ``label``, ``bubble`` (start, end, both, none). Every view shows the change."""
+        oid = text(p.get("id"), "id", 80)
+        if not E.alive(project, oid):
+            raise NotFound(f"Element {oid} does not exist")
+        DT.edit_grid(project, oid, p, MM_PER[project.manifest["unit"]] / 1000.0)
+        return {"id": oid}
 
     # -- levels --------------------------------------------------------------------------------------------------------------
     @staticmethod

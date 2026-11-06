@@ -10,7 +10,9 @@ Every check reports what was *observed* (a version read from the installed distr
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.metadata
+import json
 import importlib.util
 import re
 import shutil
@@ -28,6 +30,7 @@ Status = Literal["ok", "warn", "error"]
 #: (distribution, import name, minimum version, why SPADRA needs it). ``required`` ones stop start-up; the others only switch features off.
 REQUIRED: tuple[tuple[str, str, str, str], ...] = (
     ("PyYAML", "yaml", "6.0", "SLAI's configuration repository (src.utils.configuration) reads every YAML file"),
+    ("jsonschema", "jsonschema", "4.18", "every SGEO, SDRW and project file is validated against its JSON Schema 2020-12 when it is saved or opened (older versions lack Draft202012Validator)"),
 )
 OPTIONAL: tuple[tuple[str, str, str, str], ...] = (
     ("numpy", "numpy", "1.24", "the STEM, Simulation, Spatial and Optimization agents"),
@@ -121,25 +124,77 @@ def check_slai(root: Path | None) -> Finding:
     return Finding("SLAI checkout", "ok", str(root))
 
 
+BUILD_RECORD = "build.json"
+
+
+def _input_files(app_dir: Path) -> list[Path]:
+    """Every file the client build reads: the application's ``src``, the shared UI kit's ``src`` and the two TypeScript configurations."""
+    tools = app_dir.parent / "tools"
+    files: list[Path] = []
+    for place in (app_dir / "src", tools / "web" / "src"):
+        if place.is_dir():
+            files += [f for f in place.rglob("*") if f.is_file() and "node_modules" not in f.parts]
+    files += [f for f in (app_dir / "tsconfig.build.json", tools / "tsconfig.json") if f.is_file()]
+    return sorted(files, key=lambda f: f.relative_to(app_dir.parent).as_posix())
+
+
+def client_inputs(app_dir: Path) -> dict[str, str]:
+    """Path (relative to ``applications/``, with ``/``) -> SHA-256 of its bytes, for every file the build reads. The build script writes the same map
+    to ``dist/build.json``; the two are compared by content, so file times (clock differences between machines, files unpacked from an archive,
+    copies that do not keep their times) cannot make a fresh build look stale."""
+    return {f.relative_to(app_dir.parent).as_posix(): hashlib.sha256(f.read_bytes()).hexdigest() for f in _input_files(app_dir)}
+
+
+def client_changes(app_dir: Path, client_dir: Path) -> list[str] | None:
+    """The source files whose content differs from what the build was made from (changed, added or removed); ``None`` when the build has no record."""
+    record = client_dir / BUILD_RECORD
+    try:
+        built = json.loads(record.read_text(encoding="utf-8"))["files"]
+    except (OSError, ValueError, KeyError):
+        return None
+    now = client_inputs(app_dir)
+    return sorted({k for k in now if built.get(k) != now[k]} | {k for k in built if k not in now})
+
+
+def client_missing_outputs(app_dir: Path, client_dir: Path) -> list[str]:
+    """Compiled modules that should exist in ``dist/js`` for the sources there are (a build that stopped half way, or output that was deleted)."""
+    out = []
+    for place, target in ((app_dir / "src" / "client", client_dir / "js" / app_dir.name / "src" / "client"), (app_dir.parent / "tools" / "web" / "src", client_dir / "js" / "tools" / "web" / "src")):
+        if not place.is_dir():
+            continue
+        for ts in place.glob("*.ts"):
+            if not ts.name.endswith(".d.ts") and not (target / (ts.stem + ".js")).is_file():
+                out.append((target / (ts.stem + ".js")).relative_to(client_dir).as_posix())
+    return sorted(out)
+
+
 def client_sources_newer(app_dir: Path, client_dir: Path) -> bool:
-    """True when something under ``src/client`` or the shared UI kit is newer than the built ``index.html``."""
+    """For a build without a record (made by an older build script): True when something it was built from is newer than the built ``index.html``.
+    File times are all there is to go on then; a build with a record is compared by content (``client_changes``)."""
     built = client_dir / "index.html"
     if not built.is_file():
         return True
     stamp = built.stat().st_mtime
-    roots = [app_dir / "src", app_dir.parent / "tools" / "web" / "src", app_dir / "tsconfig.build.json"]
-    for place in roots:
-        files = [place] if place.is_file() else [f for f in place.rglob("*") if f.is_file()] if place.is_dir() else []
-        if any(f.stat().st_mtime > stamp for f in files):
-            return True
-    return False
+    return any(f.stat().st_mtime > stamp for f in _input_files(app_dir))
 
 
 def check_client(app_dir: Path, client_dir: Path) -> Finding:
     if not (client_dir / "index.html").is_file() or not (client_dir / "js").is_dir():
         return Finding("Web client", "error", f"not built ({client_dir / 'index.html'} is missing)", f"In {app_dir}: npm install, then npm run build (or start with --dev).")
-    if (app_dir / "src").is_dir() and client_sources_newer(app_dir, client_dir):
-        return Finding("Web client", "warn", "built, but its sources are newer than the build", f"In {app_dir}: npm run build (or start with --dev).")
+    if not (app_dir / "src").is_dir():
+        return Finding("Web client", "ok", str(client_dir))
+    changed = client_changes(app_dir, client_dir)
+    if changed is None:
+        if client_sources_newer(app_dir, client_dir):
+            return Finding("Web client", "warn", "built, but its sources are newer than the build (this build has no record, so only file times could be compared)",
+                           f"In {app_dir}: npm run build (or start with --dev).")
+        return Finding("Web client", "ok", str(client_dir))
+    missing = client_missing_outputs(app_dir, client_dir)
+    if missing:
+        return Finding("Web client", "error", f"the build is incomplete: {len(missing)} compiled file(s) are missing, for example {missing[0]}", f"In {app_dir}: npm run build (or start with --dev).")
+    if changed:
+        shown = ", ".join(changed[:3]) + (f" and {len(changed) - 3} more" if len(changed) > 3 else "")
+        return Finding("Web client", "warn", f"built, but {len(changed)} source file(s) changed since the build: {shown}", f"In {app_dir}: npm run build (or start with --dev).")
     return Finding("Web client", "ok", str(client_dir))
 
 

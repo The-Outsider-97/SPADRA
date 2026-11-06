@@ -129,6 +129,13 @@ describe("roofs, gutters and profiles in a browser", () => {
 
   it("hangs gutters and a downpipe on the roof from the Gutter dialog, and Drainage reports the flow", async () => {
     await tool("Gutter");
+    const status = page.getByRole("dialog").getByRole("status");
+    await page.getByRole("dialog").getByRole("img", { name: /Plan of the roof/ }).waitFor();
+    await status.getByText(/1 run: 4 pieces in a closed loop, 26\.00 m\. 4 downpipes/).waitFor();
+    await page.getByLabel("Eave 4", { exact: true }).uncheck();
+    await status.getByText(/1 run: 3 pieces, 21\.00 m\. 1 downpipe at/).waitFor();                  // an open chain falls to its end: one outlet
+    await page.getByLabel("Eave 4", { exact: true }).check();
+    await status.getByText(/4 pieces in a closed loop/).waitFor();
     await page.getByRole("button", { name: "Add gutters" }).click(); await settle();
     const gutters = await ofCategory("gutter");
     assert.equal(gutters.length, 4, `a hip roof sheds water on all four eaves (${(await scene()).map((o) => `${o.category}:${o.name}`).join(", ")})`);
@@ -138,10 +145,20 @@ describe("roofs, gutters and profiles in a browser", () => {
     await table.waitFor();
     assert.equal(await table.locator("tbody tr").count(), 5, "a heading row for the roof and one row for each gutter");
     assert.match(await table.innerText(), /l\/s/);
+    await page.getByText(/run of 4 gutters \(closed loop\)/).waitFor();
+    assert.equal(await page.getByText(/Low point .* m along the run/).count(), 4, "a low point at every corner");
     await page.getByRole("button", { name: "Done" }).click(); await settle();
     const d = await api("/drainage", { method: "POST", body: JSON.stringify({}) });
     const total = d.roofs[0].gutters.reduce((n, g) => n + g.flow_l_s, 0);
     assert.ok(Math.abs(total - 40 * 0.03) < 1e-6, `the whole plan area (40 m2) times 0.03 l/s per m2 (${total})`);
+    const first = d.roofs[0].runs[0].gutters[0];
+    const rows = (await props(first)).groups.flatMap((g) => g.rows);
+    assert.equal(rows.find((r) => r.label === "Position in the run").value, "1 of 4 (closed loop)");
+    assert.match(rows.find((r) => r.label === "Start corner").value, /^Mitred to /);
+    assert.match(rows.find((r) => r.label === "Drains to").value, /Downpipe \(/);
+    await cmd("model.set_property", { id: first, key: "gap", value: 40 });
+    for (const g of d.roofs[0].runs[0].gutters) assert.equal((await props(g)).groups.flatMap((x) => x.rows).find((r) => r.key === "gap").value, 40, "the offset is the whole run's");
+    await cmd("model.set_property", { id: first, key: "gap", value: 0 });
   });
 
   it("draws a beam with an IPE profile from the Beam tool", async () => {

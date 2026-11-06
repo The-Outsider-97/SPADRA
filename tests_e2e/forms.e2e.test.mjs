@@ -158,10 +158,10 @@ describe("extrude, void, sweep and array in a browser", () => {
     await clickAt([1500, 12000]);
     await page.getByRole("tab", { name: "Insert", exact: true }).click(); await settle();
     await page.getByRole("button", { name: "Array", exact: true }).first().click(); await settle();
-    await page.getByLabel("Number of items").fill("3");
-    await page.getByLabel(/Step Y/).fill("2000");
-    await page.getByLabel(/Step X/).fill("0");
-    await page.getByRole("button", { name: "Make copies" }).click(); await settle();
+    await page.getByLabel("Directions").selectOption("Y");
+    await page.getByLabel("Y: number of items").fill("3");
+    await page.getByLabel(/Y: spacing/).fill("2000");
+    await page.getByRole("button", { name: "Make array" }).click(); await settle();
     const after = new Set((await items("wall")).map((m) => m.id));
     assert.ok(wall && after.size === 3 + (before - 1), `two copies were added (${before} -> ${after.size})`);
   });

@@ -101,7 +101,11 @@ def _row(project: Any, oid: str, densities: Mapping[str, tuple[float, str]], mat
         row["centroid_m"] = centre
     except _REFUSALS as exc:
         row["notes"].append(f"centre: {exc}")
-    if material in densities:
+    layered = row["category"] == "foundation" and bool(E.m(meta, "above") or E.m(meta, "below"))
+    if layered:                                                       # several materials in one element: the mass is the sum over its layers (see take_off)
+        row["notes"].append("built up of layers of different materials: volumes and mass are given per material")
+        row["layers"] = _layer_volumes(project, oid)
+    elif material in densities:
         density, source = densities[material]
         row.update(density_kg_m3=density, density_source=source, mass_kg=volume * density)
     elif material:
@@ -109,6 +113,11 @@ def _row(project: Any, oid: str, densities: Mapping[str, tuple[float, str]], mat
     else:
         row["notes"].append("no material, so no density")
     return row
+
+
+def _layer_volumes(project: Any, oid: str) -> list[dict[str, Any]]:
+    from . import foundations as FD
+    return [{"material": l["material"], "volume_m3": l["volume_m3"]} for l in FD.quantities(project, oid)["layers"]]
 
 
 def take_off(project: Any, ids: Sequence[str] | None, densities: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -150,6 +159,18 @@ def take_off(project: Any, ids: Sequence[str] | None, densities: Mapping[str, An
                   "complete": len(centred) == len(rows)}
     materials: dict[str, dict[str, Any]] = {}
     for r in rows:
+        if r.get("layers"):                                          # a built-up element counts each layer under its own material; its surface goes to the element's
+            for ly in r["layers"]:
+                lb = materials.setdefault(ly["material"], {"material": ly["material"], "count": 0, "volume_m3": 0.0, "surface_area_m2": 0.0, "mass_kg": 0.0, "mass_complete": True})
+                lb["count"] += 1
+                lb["volume_m3"] += ly["volume_m3"]
+                if ly["material"] in table:
+                    lb["mass_kg"] += ly["volume_m3"] * table[ly["material"]][0]
+                else:
+                    lb["mass_complete"] = False
+            sb = materials.setdefault(r["material"] or "(none)", {"material": r["material"] or "(none)", "count": 0, "volume_m3": 0.0, "surface_area_m2": 0.0, "mass_kg": 0.0, "mass_complete": True})
+            sb["surface_area_m2"] += r["surface_area_m2"] or 0.0      # the whole outer surface is counted once, under the element's own material
+            continue
         bucket = materials.setdefault(r["material"] or "(none)", {"material": r["material"] or "(none)", "count": 0, "volume_m3": 0.0, "surface_area_m2": 0.0, "mass_kg": 0.0, "mass_complete": True})
         bucket["count"] += 1
         bucket["volume_m3"] += r["volume_m3"] or 0.0

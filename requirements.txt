@@ -5,6 +5,7 @@
 # The versions in the comments are the ones the test suites were run with; older versions were not tried.
 #
 # Needed to start:
+jsonschema>=4.18      # SGEO, SDRW and project files are validated against JSON Schema 2020-12 on save and open (4.18 added `referencing`; older versions fail)
 PyYAML>=6.0           # tested with 6.0.3 : SLAI's configuration repository (src.utils.configuration)
 #
 # Needed only by the feature named. Without them SPADRA still starts and reports what is unavailable (GET /api/agents):
@@ -13,5 +14,5 @@ scipy>=1.10           # tested with 1.18.1: STEM Agent integrator, Optimization 
 psutil>=5.9           # tested with 7.2.2 : resource monitoring imported by the agents
 #
 # Not on PyPI, part of the SLAI checkout: src/utils (SGEO, SDRW, SLDC, spatial_formats) and src/agents.
-# Not needed by SPADRA itself: ezdxf (DXF), ifcopenshell (IFC), reportlab (PDF). SPADRA reports those formats as unavailable without them.
+# Optional file exchange (DXF, IFC) is in requirements-interop.txt. SPADRA reports those formats as unavailable without it. There is no PDF writer: sheets print from the browser.
 # Web client (Node.js 20 or newer): npm install, then npm run build, in applications/SPADRA.

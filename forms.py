@@ -7,14 +7,21 @@
 
 What a void cuts is exactly what can be computed exactly, and nothing is guessed:
 
-* a **floor** or a solid **extrusion** gets a hole when the void lies wholly inside its outline and spans its full thickness (the solid is then
-  an exact B-rep with holes, tessellated by SGEO);
+* a **floor** or a solid **extrusion** is cut by every void that spans its full thickness: a void wholly inside its outline makes a hole, one that crosses
+  or lies along its edge takes a notch out of the outline, and voids that overlap each other act as their union (``planar``, an exact polygon boolean). The solid
+  is then an exact B-rep with holes, tessellated by SGEO. A void that would split it into separate pieces, leave nothing of it, or touch another outline at
+  a single point is not cut, and the reason is given;
 * a **wall** gets a rectangular opening when the void is a rectangle whose sides run along and across the wall, passes through the whole
   thickness and overlaps the wall (it can start at the ground, reach the top or cut the wall in two);
-* any other overlap (a void across the edge of a floor, one that stops half-way through, one at an angle to a wall, a roof, a beam ...) cuts
+* any other overlap (a pocket that stops half-way through, a void that would split an element in two, one at an angle to a wall, a roof, a beam ...) cuts
   nothing. The Properties panel and the model check say which voids cut nothing and why.
 
-Two voids that overlap each other inside the same floor or wall are refused, because their union is not computed.
+Which elements a void acts on is controlled per void (``cutting``): the "Cut Intersecting Geometry" switch and a policy (Automatic, Selected Targets,
+Hosted Objects, Disabled). Nothing is written into the cut element: it is rebuilt from the void's parameters, so turning a void off or deleting it
+gives the element back whole. ``cutting.classify`` says, for every element a void meets, whether it is cut, not supported (and why) or left alone.
+
+Voids that overlap each other in the same floor or extrusion act as their union. Voids that overlap in a wall each cut their own opening, and the wall is
+cut by the union of those openings.
 A sweep follows a path in plan at one height: it does not climb, curve or follow a 3D path, and a corner sharper than ``MITER_LIMIT``
 thicknesses, or a profile wider than the path can turn, is refused.
 """
@@ -25,8 +32,10 @@ from typing import Any, Mapping, Sequence
 
 from ..tools.errors import BadRequest
 from ..tools.validation import boolean, number, text
+from . import cutting as CU
 from . import elements as E
 from . import geometry as G
+from . import planar as P
 
 Pt = tuple[float, float]
 CATEGORIES = ("extrusion", "void", "sweep")
@@ -100,14 +109,36 @@ def voids(project: Any) -> list[dict[str, Any]]:
         obj = project.model.get(vid)
         meta = obj["metadata"]
         z0, z1 = z_range(project, meta)
-        out.append({"id": vid, "name": obj["name"] or "Void", "poly": [(float(q[0]), float(q[1])) for q in E.m(meta, "profile")], "z0": z0, "z1": z1})
+        out.append({"id": vid, "name": obj["name"] or "Void", "poly": [(float(q[0]), float(q[1])) for q in E.m(meta, "profile")], "z0": z0, "z1": z1, **CU.settings(meta)})
     return out
 
 
-def holes_for(vs: Sequence[Mapping[str, Any]], outline: Sequence[Pt], z0: float, z1: float, label: str) -> tuple[list[dict[str, Any]], list[tuple[str, str]]]:
-    """The voids that make holes in a slab-like solid (outline and height range given), and a note for each void that touches it without doing so."""
-    holes: list[dict[str, Any]] = []
+class SlabCut(list):
+    """The voids that cut a slab-like solid (a floor or an extrusion), as a list, and what is left of its plan: ``holes`` (rings inside it) and ``outline`` (its
+    new outline when a void takes a notch out of the edge, otherwise ``None``: the outline is unchanged)."""
+
+    def __init__(self, voids: Sequence[Mapping[str, Any]] = (), outline: Sequence[Pt] | None = None, holes: Sequence[Sequence[Pt]] = ()) -> None:
+        super().__init__(voids)
+        self.outline = [tuple(q) for q in outline] if outline else None
+        self.holes = [[tuple(q) for q in h] for h in holes]
+
+
+def _remaining(outline: Sequence[Pt], voids: Sequence[Mapping[str, Any]], label: str) -> P.Region:
+    """What is left of ``outline`` once ``voids`` are taken away: one region, or ``PlanarError`` saying why there is not exactly one."""
+    regions = P.difference(outline, [v["poly"] for v in voids])
+    if not regions:
+        raise P.PlanarError(f"leaves nothing of {label}")
+    if len(regions) > 1:
+        raise P.PlanarError(f"would split {label} into {len(regions)} separate pieces, which one element cannot hold")
+    return regions[0]
+
+
+def holes_for(vs: Sequence[Mapping[str, Any]], outline: Sequence[Pt], z0: float, z1: float, label: str) -> tuple[SlabCut, list[tuple[str, str]]]:
+    """The voids that cut a slab-like solid (outline and height range given) and the plan that is left, with a note for each void that touches it without cutting.
+    Voids wholly inside and apart from each other make holes exactly as drawn; any void that crosses or lies along the edge, or overlaps another, goes through the
+    planar boolean, where voids that cannot all be applied are applied one at a time in model order and the rest are noted."""
     notes: list[tuple[str, str]] = []
+    acting: list[tuple[Mapping[str, Any], str]] = []
     for v in vs:
         if v["z1"] <= z0 + TOL or v["z0"] >= z1 - TOL:
             continue                                                          # apart in height
@@ -116,18 +147,31 @@ def holes_for(vs: Sequence[Mapping[str, Any]], outline: Sequence[Pt], z0: float,
             continue
         if v["z0"] > z0 + TOL or v["z1"] < z1 - TOL:
             notes.append((v["id"], f"{v['name']} does not span the full thickness of {label}, and a pocket is not cut"))
-        elif rel == "inside":
-            holes.append(v)
-        elif rel == "crossing":
-            notes.append((v["id"], f"{v['name']} crosses the edge of {label}: only a void wholly inside the outline is cut"))
-        else:
+        elif rel == "covers":
             notes.append((v["id"], f"{v['name']} covers all of {label}, which is not cut away"))
-    for i, a in enumerate(holes):
-        for b in holes[i + 1:]:
-            if relation(a["poly"], b["poly"]) != "outside":
-                raise BadRequest(f"{a['name']} and {b['name']} overlap inside {label}",
-                                 hint="Keep voids in the same floor or solid apart; the union of overlapping voids is not computed")
-    return holes, notes
+        else:
+            acting.append((v, rel))
+    if not acting:
+        return SlabCut(), notes
+    voids = [v for v, _ in acting]
+    if all(rel == "inside" for _, rel in acting) and all(relation(a["poly"], b["poly"]) == "outside" for i, a in enumerate(voids) for b in voids[i + 1:]):
+        return SlabCut(voids, None, [v["poly"] for v in voids]), notes
+    try:
+        region = _remaining(outline, voids, label)
+    except P.PlanarError:
+        kept: list[Mapping[str, Any]] = []
+        region = None
+        for v in voids:
+            try:
+                region = _remaining(outline, [*kept, v], label)
+                kept.append(v)
+            except P.PlanarError as exc:
+                notes.append((v["id"], f"{v['name']} is not cut out of {label}: it {exc}" if not str(exc).startswith("two outlines") else f"{v['name']} is not cut out of {label}: {exc}"))
+        voids = kept
+        if not voids or region is None:
+            return SlabCut(), notes
+    notched = any(rel != "inside" for v, rel in acting if v in voids)
+    return SlabCut(voids, region[0] if notched else None, region[1]), notes
 
 
 def wall_spans(vs: Sequence[Mapping[str, Any]], frame: Mapping[str, Any], label: str) -> tuple[list[tuple[float, float, float, float, str]], list[tuple[str, str]]]:
@@ -148,8 +192,16 @@ def wall_spans(vs: Sequence[Mapping[str, Any]], frame: Mapping[str, Any], label:
         x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
         corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
         rectangle = len(local) == 4 and all(min(math.dist(p, q) for q in corners) < 1e-4 for p in local) and len({(round(p[0], 4), round(p[1], 4)) for p in local}) == 4
+        zs = (max(v["z0"] - base, 0.0), min(v["z1"] - base, height))
         if not rectangle:
-            notes.append((v["id"], f"{v['name']} is not a rectangle along {label}, and only a rectangular opening is cut in a wall"))
+            # Not a rectangle itself, but what it leaves of the wall may be: an L-shaped void whose arm runs through the wall square to it, for instance.
+            found = _section_spans(footprint, local, half)
+            if found is None:
+                notes.append((v["id"], f"{v['name']} is not a rectangle along {label}, and only a rectangular opening is cut in a wall"))
+            elif found == "niche":
+                notes.append((v["id"], f"{v['name']} stops short of the whole thickness of {label}, and a niche is not cut"))
+            else:
+                spans.extend((cx0, cx1, zs[0], zs[1], v["id"]) for cx0, cx1 in found)
             continue
         if y0 > -half + TOL or y1 < half - TOL:
             notes.append((v["id"], f"{v['name']} stops short of the whole thickness of {label}, and a niche is not cut"))
@@ -157,8 +209,32 @@ def wall_spans(vs: Sequence[Mapping[str, Any]], frame: Mapping[str, Any], label:
         cx0, cx1 = max(x0, 0.0), min(x1, length)
         if cx1 - cx0 < TOL:
             continue
-        spans.append((cx0, cx1, max(v["z0"] - base, 0.0), min(v["z1"] - base, height), v["id"]))
+        spans.append((cx0, cx1, zs[0], zs[1], v["id"]))
     return spans, notes
+
+
+def _section_spans(footprint: Sequence[Pt], void: Sequence[Pt], half: float) -> list[tuple[float, float]] | str | None:
+    """The stretches (x0, x1) along a wall where a void of any outline passes square through its whole thickness, ``"niche"`` if the part of it that is
+    inside the wall stops short of a face, or ``None`` if what it leaves of the wall's plan is not a set of rectangles square to the wall."""
+    try:
+        regions = P.intersection(footprint, void)
+    except P.PlanarError:
+        return None
+    stretches: list[tuple[float, float]] = []
+    niche = False
+    for outer, holes in regions:
+        xs, ys = [q[0] for q in outer], [q[1] for q in outer]
+        x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+        corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        if holes or len(outer) != 4 or any(min(math.dist(q, c) for c in corners) > 1e-4 for q in outer) or len({(round(q[0], 4), round(q[1], 4)) for q in outer}) != 4:
+            return None
+        if y0 > -half + TOL or y1 < half - TOL:
+            niche = True
+        elif x1 - x0 >= TOL:
+            stretches.append((x0, x1))
+    if niche:
+        return "niche"
+    return stretches
 
 
 def _targets(project: Any) -> list[str]:
@@ -168,8 +244,12 @@ def _targets(project: Any) -> list[str]:
     return ids
 
 
-def _cuts(project: Any, oid: str, vs: Sequence[Mapping[str, Any]]) -> tuple[list[Any], list[tuple[str, str]], list[Any]]:
-    """(what the voids cut in this element as comparable numbers, notes for voids that touch it but cut nothing, the cuts themselves)."""
+def _cuts(project: Any, oid: str, vs: Sequence[Mapping[str, Any]], policy: bool = True) -> tuple[list[Any], list[tuple[str, str]], list[Any]]:
+    """(what the voids cut in this element as comparable numbers, notes for voids that touch it but cut nothing, the cuts themselves). For a wall the numbers
+    are its opening spans; for a floor or extrusion they are ``[holes, new outline or []]`` and the cuts are a ``SlabCut``. Only the voids whose
+    cutting settings apply to this element are considered, unless ``policy`` is false (the classification asks what a void *would* do)."""
+    if policy:
+        vs = [v for v in vs if CU.applies(v, oid)[0]]
     obj = project.model.get(oid)
     meta, label = obj["metadata"], obj["name"] or str(E.m(obj["metadata"], "category")).title()
     cat = E.m(meta, "category")
@@ -182,17 +262,28 @@ def _cuts(project: Any, oid: str, vs: Sequence[Mapping[str, Any]]) -> tuple[list
     else:
         z0, z1 = z_range(project, meta)
     outline = [(float(q[0]), float(q[1])) for q in E.m(meta, "boundary" if cat == "floor" else "profile")]
-    holes, notes = holes_for(vs, outline, z0, z1, label)
-    return [_round(h["poly"]) for h in holes], notes, holes
+    cut, notes = holes_for(vs, outline, z0, z1, label)
+    return [[_round(h) for h in cut.holes], _round(cut.outline) if cut.outline else []], notes, cut
+
+
+def _stored(meta: Mapping[str, Any]) -> Any:
+    """What an element's metadata says its cuts were when it was last built, in the shape ``_cuts`` returns them."""
+    if E.m(meta, "category") == "wall":
+        return E.m(meta, "cut") or []
+    return [E.m(meta, "cut") or [], E.m(meta, "cut_outline") or []]
 
 
 def remember_cuts(project: Any, oid: str, vs: Sequence[Mapping[str, Any]] | None = None) -> list[Any]:
-    """Record on an element which cuts its solid now carries, so ``reconcile`` can tell when a void has changed them. Returns the cuts."""
+    """Record on an element which cuts its solid now carries, so ``reconcile`` can tell when a void has changed them. Returns the cuts: the wall's opening spans,
+    or a ``SlabCut`` for a floor or extrusion."""
     vs = voids(project) if vs is None else vs
     sig, _, cuts = _cuts(project, oid, vs)
     meta = E.meta_of(project, oid)
-    if sig != (E.m(meta, "cut") or []):
-        E._attach(project, oid, {"cut": sig, "cutflag": bool(sig)})
+    if sig != _stored(meta):
+        if E.m(meta, "category") == "wall":
+            E._attach(project, oid, {"cut": sig, "cutflag": bool(sig)})
+        else:
+            E._attach(project, oid, {"cut": sig[0], "cut_outline": sig[1], "cutflag": bool(sig[0] or sig[1])})
     return cuts
 
 
@@ -206,7 +297,7 @@ def reconcile(project: Any) -> int:
     rebuilt = 0
     for oid in (_targets(project) if vs else sorted(flagged)):
         sig = _cuts(project, oid, vs)[0]
-        if sig != (E.m(E.meta_of(project, oid), "cut") or []):
+        if sig != _stored(E.meta_of(project, oid)):
             E.regenerate(project, oid)
             rebuilt += 1
     return rebuilt
@@ -247,9 +338,10 @@ def regenerate_extrusion(project: Any, oid: str) -> None:
     z0, z1 = z_range(project, meta)
     if z1 - z0 < 1e-3:
         raise BadRequest("The depth must be at least 1 mm")
-    holes = []
+    holes: Sequence[Sequence[Pt]] = []
     if E.m(meta, "category") == "extrusion":
-        holes = [h["poly"] for h in remember_cuts(project, oid)]
+        cut = remember_cuts(project, oid)
+        holes, profile = cut.holes, cut.outline or profile
     try:
         E._set_mesh(project, oid, _solid(profile, holes, z0, z1))
     except G.GeometryError as exc:
@@ -269,6 +361,8 @@ def add_extrusion(project: Any, p: Mapping[str, Any], to_m: float) -> str:
                               "base": base, "depth": depth}
     if not void:
         values["material"] = E._choice(p.get("material", "Concrete"), E.MATERIALS, "material")
+    else:
+        values.update(CU.creation_values(project, p))
     E._attach(project, oid, values)
     regenerate_extrusion(project, oid)
     return oid
@@ -452,6 +546,8 @@ def set_property(project: Any, oid: str, meta: Mapping[str, Any], key: str, valu
         return {"level": project.level(text(value, "level", 80))["id"]}
     if key == "base":
         return {"base": number(value, "base", -500, 500)}
+    if cat == "void" and key in ("cut_enabled", "cut_policy", "target_add", "target_remove", "host"):
+        return CU.set_property(project, oid, meta, key, value)
     if key == "form" and cat in ("extrusion", "void"):
         make_void(project, oid, value == "Void") if (value == "Void") != (cat == "void") else None
         return None
@@ -493,12 +589,45 @@ def plan_item(project: Any, oid: str, f: float) -> dict[str, Any]:
         else:
             item["polygon"] = [[q[0] * f, q[1] * f] for q in left + right[::-1]]
         return item
-    key = "profile"
-    item = {"id": oid, "category": cat, "name": obj["name"], "polygon": [[q[0] * f, q[1] * f] for q in E.m(meta, key)]}
+    outline = (E.m(meta, "cut_outline") or E.m(meta, "profile")) if cat == "extrusion" else E.m(meta, "profile")            # a notched extrusion is drawn as it is left
+    item = {"id": oid, "category": cat, "name": obj["name"], "polygon": [[q[0] * f, q[1] * f] for q in outline]}
+    if cat == "void" and not (CU.settings(meta)["enabled"] and CU.settings(meta)["policy"] != "disabled"):
+        item["off"] = True
     holes = E.m(meta, "cut") or []
     if holes and cat == "extrusion":
         item["holes"] = [[[q[0] * f, q[1] * f] for q in h] for h in holes]
     return item
+
+
+def _target_choices(project: Any, vid: str, exclude: Sequence[str] = ()) -> list[dict[str, Any]]:
+    return [{"value": o, "label": f"{project.model.get(o)['name'] or str(E.category(project, o)).title()} ({E.category(project, o)})"}
+            for o in E.element_ids(project) if o != vid and o not in exclude and E.category(project, o) not in CU.NEVER_HIT]
+
+
+def _cutting_rows(project: Any, vid: str, meta: Mapping[str, Any]) -> list[dict[str, Any]]:
+    s = CU.settings(meta)
+    rows: list[dict[str, Any]] = [
+        {"key": "cut_enabled", "label": "Cut Intersecting Geometry", "type": "choice", "value": "Enabled" if s["enabled"] else "Disabled",
+         "choices": [{"value": "Enabled", "label": "Enabled"}, {"value": "Disabled", "label": "Disabled"}]},
+        {"key": "cut_policy", "label": "Cutting policy", "type": "choice", "value": s["policy"], "choices": [{"value": k, "label": v} for k, v in CU.POLICIES.items()]}]
+    if s["policy"] == "targets":
+        rows.append({"label": "Selected targets", "type": "readonly", "value": ", ".join(project.model.get(t)["name"] if E.alive(project, t) else f"{t} (deleted)" for t in s["targets"]) or "none chosen"})
+        rows.append({"key": "target_add", "label": "Add a target", "type": "choice", "value": "", "choices": [{"value": "", "label": "Choose an element…"}, *_target_choices(project, vid, s["targets"])]})
+        if s["targets"]:
+            rows.append({"key": "target_remove", "label": "Remove a target", "type": "choice", "value": "",
+                         "choices": [{"value": "", "label": "Choose a target…"}, *({"value": t, "label": project.model.get(t)["name"] if E.alive(project, t) else f"{t} (deleted)"} for t in s["targets"])]})
+    elif s["policy"] == "hosted":
+        rows.append({"key": "host", "label": "Host element", "type": "choice", "value": s["host"] or "", "choices": [{"value": "", "label": "None chosen"}, *_target_choices(project, vid)]})
+    return rows
+
+
+def _diagnostic_rows(project: Any, vid: str) -> list[dict[str, Any]]:
+    rows = CU.classify(project, vid)
+    out: list[dict[str, Any]] = [{"label": "Effect", "type": "readonly", "value": CU.summary(rows)}]
+    word = {"cut": "Cut", "unsupported": "Not cut", "excluded": "Left alone"}
+    out += [{"label": f"{r['name']} ({r['category']})", "type": "readonly", "value": f"{word[r['state']]}: {r['reason']}"} for r in rows]
+    out += [{"label": "Missing", "type": "readonly", "value": f"{i} no longer exists"} for i in CU.stale(project, next(v for v in voids(project) if v["id"] == vid))]
+    return out
 
 
 def properties(project: Any, oid: str, out: dict[str, Any], volume: Mapping[str, Any]) -> None:
@@ -521,11 +650,12 @@ def properties(project: Any, oid: str, out: dict[str, Any], volume: Mapping[str,
                        {"key": "depth", "label": "Depth", "type": "number", "unit": "m", "value": float(E.m(meta, "depth"))}]
         if cat == "extrusion" and E.m(meta, "cut"):
             rows.append({"label": "Holes cut by voids", "type": "readonly", "value": str(len(E.m(meta, "cut")))})
+        if cat == "extrusion" and E.m(meta, "cut_outline"):
+            rows.append({"label": "Edge cut by voids", "type": "readonly", "value": "yes"})
         out["groups"] = [{"title": "Geometry", "rows": rows}, {"title": "Constraints", "rows": constraints}]
         if cat == "void":
-            what = report(project, oid)
-            out["groups"].insert(1, {"title": "Cuts", "rows": [{"label": "Cuts", "type": "readonly", "value": ", ".join(what["cuts"]) or "nothing"}]
-                                     + [{"label": "Not cut", "type": "readonly", "value": n} for n in what["notes"]]})
+            out["groups"][0]["title"] = "Geometry"
+            out["groups"] += [{"title": "Cutting", "rows": _cutting_rows(project, oid, meta)}, {"title": "Diagnostics", "rows": _diagnostic_rows(project, oid)}]
         return
     path = [tuple(q) for q in E.m(meta, "path")]
     closed = bool(E.m(meta, "closed", False))
@@ -555,8 +685,14 @@ def check(project: Any, oid: str, label: str) -> list[dict[str, str]]:
     except BadRequest as exc:
         return [E.issue("error", oid, f"{label}: {exc.message}", "parameters")]
     if cat == "void":
-        what = report(project, oid)
-        out += [E.issue("warning", oid, note, "geometry") for note in what["notes"]]
-        if not what["cuts"] and not what["notes"]:
+        s = CU.settings(meta)
+        rows = CU.classify(project, oid)
+        out += [E.issue("warning", oid, f"{label}: {r['name']} is reached but not cut: {r['reason']}", "geometry") for r in rows if r["state"] == "unsupported"]
+        out += [E.issue("warning", oid, f"{label}: {i} no longer exists", "hosting") for i in CU.stale(project, next(v for v in voids(project) if v["id"] == oid))]
+        if s["enabled"] and s["policy"] == "targets" and not s["targets"]:
+            out.append(E.issue("warning", oid, f"{label} cuts nothing: its policy is Selected Targets and none is chosen", "geometry"))
+        elif s["enabled"] and s["policy"] == "hosted" and not s["host"]:
+            out.append(E.issue("warning", oid, f"{label} cuts nothing: its policy is Hosted Objects and it has no host", "geometry"))
+        elif s["enabled"] and s["policy"] != "disabled" and not rows:
             out.append(E.issue("warning", oid, f"{label} does not touch anything it can cut", "geometry"))
     return out

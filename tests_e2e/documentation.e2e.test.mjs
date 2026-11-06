@@ -246,6 +246,7 @@ describe("sections, elevations and schedules in a browser", () => {
       await page.getByRole("menuitem", { name: label, exact: true }).click(); await settle();
     }
     const svg = page.locator(".sheet-wrap svg");
+    await svg.locator("[data-viewport]").nth(3).waitFor();                       // the last view takes a moment to be drawn; count only once it is there
     assert.equal(await svg.locator("[data-viewport]").count(), 4);
     assert.ok(await svg.locator("[data-cut]").count() >= 2, "the section's cut is drawn");
     assert.ok(await svg.locator("[data-element]").count() > 4, "the elevation and section surfaces are drawn");

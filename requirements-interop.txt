@@ -1,0 +1,7 @@
+# SPADRA: optional libraries for file exchange. Install on top of requirements.txt:
+#     python -m pip install -r applications/SPADRA/requirements.txt -r applications/SPADRA/requirements-interop.txt
+# Without them SPADRA still runs; GET /api/agents and the import/export dialogs name each format as unavailable and say which library is missing.
+# Nothing here is pinned to a tested version yet: the CI workflow (.github/workflows/ci.yml, "interop on" jobs) is where they are first exercised.
+ezdxf>=1.1             # DXF import and export
+ifcopenshell>=0.8      # IFC import (the IFC adapter reports what it could not read)
+# Not on PyPI or needing a licence, so not listed: Open CASCADE (OCP) for STEP, an ODA converter for DWG. PDF is printed from the browser.

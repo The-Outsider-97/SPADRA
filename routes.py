@@ -161,6 +161,33 @@ def drainage(app: SpadraApp, req: Request) -> Any:
         return app.require().drainage(body.get("roof"))
 
 
+@router.route("POST", "/api/drainage/trace")
+def drainage_trace(app: SpadraApp, req: Request) -> Any:
+    body = req.json()
+    with app.lock:
+        return app.require().trace_drainage(body.get("gutter"), body.get("offset", 0.0))
+
+
+@router.route("POST", "/api/void/report")
+def void_report(app: SpadraApp, req: Request) -> Any:
+    body = req.json()
+    with app.lock:
+        return app.require().cutting_report(body.get("void"))
+
+
+@router.route("POST", "/api/foundation/report")
+def foundation_report(app: SpadraApp, req: Request) -> Any:
+    body = req.json()
+    with app.lock:
+        return app.require().foundation_report(body.get("id"))
+
+
+@router.route("POST", "/api/gutters/preview")
+def gutters_preview(app: SpadraApp, req: Request) -> Any:
+    with app.lock:
+        return app.require().preview_gutters(req.json())
+
+
 @router.route("POST", "/api/properties")
 def properties(app: SpadraApp, req: Request) -> Any:
     with app.lock:

@@ -273,10 +273,14 @@ def project_view(project: Any, view: Mapping[str, Any], f: float) -> dict[str, A
         edge_count += len(edges)
         if edge_count > MAX_EDGES:
             raise LimitExceeded(f"This view has more than {MAX_EDGES} lines to draw", hint="Hide or simplify some of the model")
-        items.append({"id": oid, "category": category, "name": obj["name"], "depth": depth,
-                      "tris": [[round(c * f, 4) for p in t for c in p] for t in tris],
-                      "edges": [[round(c * f, 4) for p in e for c in p] for e in edges],
-                      "cut": [[[round(x * f, 4), round(y * f, 4)] for x, y in loop] for loop in loops]})
+        item = {"id": oid, "category": category, "name": obj["name"], "depth": depth,
+                "tris": [[round(c * f, 4) for p in t for c in p] for t in tris],
+                "edges": [[round(c * f, 4) for p in e for c in p] for e in edges],
+                "cut": [[[round(x * f, 4), round(y * f, 4)] for x, y in loop] for loop in loops]}
+        if category == "foundation" and loops and fr.cut:
+            from . import foundations as FD
+            item["cut_material"] = FD.loop_materials(project, obj["metadata"], loops)           # each layer of a build-up is hatched as its own material
+        items.append(item)
     items.sort(key=lambda i: -i["depth"])                            # far first, so nearer elements paint over what they hide
     xs: list[float] = []
     ys: list[float] = []
@@ -290,6 +294,8 @@ def project_view(project: Any, view: Mapping[str, Any], f: float) -> dict[str, A
     levels = [{"name": l["name"], "z": round(float(l["elevation"]) * f, 4)} for l in project.manifest["levels"]]
     out: dict[str, Any] = {"kind": view["kind"], "items": items, "levels": levels,
                            "bounds": [[min(xs), min(ys)], [max(xs), max(ys)]] if xs else None}
+    from . import datums as DT
+    out["grid_marks"] = DT.grid_marks(project, fr, f)                        # the grids that meet this picture, so a change to a grid reaches every view
     if fr.cut:
         out["span"] = round(float(fr.span or 0) * f, 4)
         out["far"] = round(float(fr.far or 0) * f, 4)
@@ -327,6 +333,7 @@ SCHEDULES: dict[str, dict[str, Any]] = {
     "room": {"title": "Room Schedule", "noun": "Room"},
     "stair": {"title": "Stair Schedule", "noun": "Stair"},
     "generic": {"title": "Generic Model Schedule", "noun": "Generic model"},
+    "foundation": {"title": "Foundation Schedule", "noun": "Foundation"},
     "count": {"title": "Element Count", "noun": "Category", "summary": True},                       # one row per category, over the whole model
     "material": {"title": "Material Quantities", "noun": "Material", "summary": True},            # one row per material, from the quantity take-off
 }
@@ -371,6 +378,11 @@ COLUMNS: dict[str, list[dict[str, Any]]] = {
     "generic": [_col("no", "No.", text=True), _col("name", "Name", text=True), _col("family", "Family", text=True), _col("level", "Level", text=True),
                 _col("size_x", "Size X", "mm"), _col("size_y", "Size Y", "mm"), _col("size_z", "Size Z", "mm"), _col("volume", "Volume", "m³", total=True),
                 _col("material", "Material", text=True)],
+    "foundation": [_col("no", "No.", text=True), _col("name", "Name", text=True), _col("type", "Type", text=True), _col("level", "Level", text=True), _col("stands_on", "Stands on", text=True),
+                   _col("length", "Length", "m", total=True), _col("width", "Width", "mm"), _col("height", "Height / thickness", "mm"), _col("area", "Plan area", "m²", total=True),
+                   _col("concrete", "Concrete", "m³", total=True), _col("formwork", "Formwork (edges)", "m²", total=True), _col("layers", "Layers", text=True),
+                   _col("r_value", "R (build-up)", "m²K/W"), _col("class", "Concrete class", text=True), _col("bars", "Bars (indicative)", total=True),
+                   _col("steel_kg", "Steel (indicative)", "kg", total=True), _col("material", "Material", text=True)],
     "count": [_col("category", "Category", text=True), _col("count", "Elements", total=True), _col("detail", "Counted as", text=True)],
     "material": [_col("material", "Material", text=True), _col("count", "Elements", total=True), _col("volume", "Volume", "m³", total=True),
                  _col("area", "Surface area", "m²", total=True), _col("mass", "Mass", "kg", total=True)],
@@ -379,7 +391,7 @@ for _category, _columns in COLUMNS.items():                                     
     if not SCHEDULES[_category].get("summary"):
         _columns.append(_col("sfb", "NL-SfB", text=True))
 COUNT_AS = {"wall": "Walls", "door": "Doors", "window": "Windows", "floor": "Floors", "roof": "Roofs", "gutter": "Gutters", "downpipe": "Downpipes", "structural": "Columns and beams", "room": "Rooms",
-            "stair": "Stairs", "generic": "Generic models", "grid": "Grids"}
+            "stair": "Stairs", "generic": "Generic models", "grid": "Grids", "foundation": "Foundations"}
 
 
 def _r(value: float, digits: int = 3) -> float:
@@ -430,7 +442,8 @@ def schedule_data(project: Any, category: str) -> dict[str, Any]:
         if E.m(meta, "category") != category:
             continue
         name = obj["name"] or SCHEDULES[category]["noun"]
-        volume = _r(project.model.volume(oid, unit="m")) if category != "room" else None                   # a room has no solid
+        solid_volume = E.solid_status(project, oid).volume
+        volume = _r(solid_volume) if category != "room" and solid_volume is not None else None                   # a room has no solid; a missing volume stays missing (None), it is not zero
         row: dict[str, Any] = {"id": oid, "name": name, "sfb": SF.read(meta, "sfb") or "-"}
         host = E.m(meta, "host")
         level_id = E.m(meta, "level") if category not in E.OPENINGS else (E.m(E.meta_of(project, host), "level") if host and E.alive(project, host) else None)
@@ -487,9 +500,8 @@ def schedule_data(project: Any, category: str) -> dict[str, Any]:
         elif category == "downpipe":
             from . import gutters as GU
             pf = GU.pipe_frame(project, oid)
-            share = len(GU.downpipes_of(project, pf["gutter"])) or 1
             row.update(gutter=project.model.get(pf["gutter"])["name"], diameter=_r(pf["diameter"] * 1000, 1), length=_r(pf["top"] - pf["bottom"]), bottom=_r(pf["bottom"]),
-                       flow=_r(GU.catchment(project, pf["gutter"]) * float(E.m(pf["g"]["meta"], "rainfall", GU.RAINFALL_DEFAULT)) / share, 3), volume=volume, material=E.m(meta, "material", "-"))
+                       flow=_r(GU.pipe_flow(project, oid), 3), volume=volume, material=E.m(meta, "material", "-"))
             order = (order[0], pf["at"][0], pf["at"][1])
         elif category == "stair":
             from . import stairs as SR
@@ -497,6 +509,27 @@ def schedule_data(project: Any, category: str) -> dict[str, Any]:
             row.update(top_level=project.level(E.m(meta, "top_level"))["name"], width=_r(fr["width"] * 1000, 1), risers=fr["risers"], riser=_r(fr["riser"] * 1000, 1),
                        tread=_r(fr["tread"] * 1000, 1), rise=_r(fr["height"]), run=_r(fr["run"]), volume=volume, material=E.m(meta, "material", "-"))
             order = (order[0], fr["start"][0], fr["start"][1])
+        elif category == "foundation":
+            from . import foundations as FD
+            q = FD.quantities(project, oid)
+            kind = FD.kind_of(meta)
+            ids = FD.support_ids(meta)
+            r = q.get("thermal")
+            rf = q["reinforcement"]
+            row.update(type=FD.KINDS[kind]["name"].split(" (")[0], stands_on=", ".join(project.model.get(s)["name"] for s in ids if E.alive(project, s)) or "-",
+                       area=_r(q["plan_area_m2"]), height=_r(q["depth_m"] * 1000, 1),
+                       concrete=_r(q["concrete_m3"]), formwork=_r(q["formwork_m2"]),
+                       layers="; ".join(f"{l['name']} {l['thickness_m'] * 1000:.0f}" for l in q["layers"] if not l["concrete"]) or "-",
+                       r_value=(_r(r["r_m2k_w"], 2) if r["complete"] else f"{_r(r['r_m2k_w'], 2)}+") if r else "-", **{"class": q["concrete_class"] or "-"},
+                       bars=rf["bars"] if rf else 0, volume=volume, material=E.m(meta, "material", "-"))
+            if kind in ("poer", *FD.LINES):
+                row["width"] = _r(float(E.m(meta, "width")) * 1000, 1)
+            if "length_m" in q:                                                  # numbers that do not apply are left out of the row, not written as dashes: the totals add numbers
+                row["length"] = _r(q["length_m"])
+            if rf and rf["mass_kg"] is not None:
+                row["steel_kg"] = _r(rf["mass_kg"], 1)
+            ctr = project.model.world_bounds(oid)
+            order = (order[0], (ctr[0][0] + ctr[1][0]) / 2, (ctr[0][1] + ctr[1][1]) / 2)
         elif category == "generic":
             lo, hi = project.model.world_bounds(oid)
             from . import families as FM
@@ -516,7 +549,7 @@ def schedule_data(project: Any, category: str) -> dict[str, Any]:
             order = (order[0], (s[0] + e[0]) / 2, (s[1] + e[1]) / 2)
         rows.append({"_order": order, **row})
     rows.sort(key=lambda r: r["_order"])
-    prefix = {"door": "D", "window": "W", "wall": "WL", "floor": "F", "roof": "R", "gutter": "GT", "downpipe": "DP", "structural": "S", "room": "RM", "stair": "ST", "generic": "G"}[category]
+    prefix = {"door": "D", "window": "W", "wall": "WL", "floor": "F", "roof": "R", "gutter": "GT", "downpipe": "DP", "structural": "S", "room": "RM", "stair": "ST", "generic": "G", "foundation": "FD"}[category]
     for n, r in enumerate(rows, 1):
         r.pop("_order")
         r["no"] = f"{prefix}{n:02d}"

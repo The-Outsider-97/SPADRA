@@ -205,6 +205,10 @@ def augment(project: Any, oid: str, out: dict[str, Any], relations: bool = False
         identity = {"title": "Identity", "rows": []}
         out["groups"].append(identity)
     identity["rows"] += [{"label": "Category", "type": "readonly", "value": cat.title()}, {"label": "Element ID", "type": "readonly", "value": oid}]
+    from . import arrays as AY
+    item = AY.item_rows(project, oid)
+    if item:
+        out["groups"].append({"title": "Array", "rows": item})
     out["groups"].append(SF.rows_for(meta, cat))
     custom = custom_of(meta)
     out["groups"].append({"title": "Custom properties", "rows": [
