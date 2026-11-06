@@ -127,6 +127,31 @@ class OmniClassWithPrivateCatalog(unittest.TestCase):
         self.set("assembly_code", "")
         self.assertEqual(self.get("omniclass_21"), "FAKE-T21-02")
 
+    def test_assembly_codes_can_be_browsed_level_by_level_from_the_codes_themselves(self):
+        doc = fixture()
+        doc["assemblies"] = [{"code": "TEST-A", "title": "Synthetic group"}, {"code": "TEST-A1", "title": "Synthetic sub-group"},
+                             {"code": "TEST-A101", "title": "Synthetic leaf"}, {"code": "TEST-B", "title": "Synthetic other group"}]
+        self.write(doc)
+        top = CL.browse("assembly")
+        self.assertEqual([c["code"] for c in top["children"]], ["TEST-A", "TEST-B"])
+        self.assertEqual(top["children"][0]["children"], 2)
+        self.assertEqual(top["children"][0]["mapped"], ["FAKE-T21-01"])
+        self.assertEqual([c["code"] for c in CL.browse("assembly", "TEST-A")["children"]], ["TEST-A1"])
+        self.assertEqual([c["code"] for c in CL.browse("assembly", "TEST-A1")["children"]], ["TEST-A101"])
+        self.assertEqual(top["edition"], "SYNTHETIC-TEST-ONLY")
+        with self.assertRaises(BadRequest):
+            CL.browse("assembly", "NOPE")
+
+    def test_the_edition_of_the_catalogue_is_recorded_with_the_codes(self):
+        self.set("omniclass_21", "FAKE-T21-02")
+        self.assertEqual(self.project.model.get(self.wall)["metadata"]["spadra:classification_edition"], "SYNTHETIC-TEST-ONLY")
+        self.set("omniclass_21", "")
+        self.assertNotIn("spadra:classification_edition", self.project.model.get(self.wall)["metadata"])
+
+    def test_table_23_is_never_filled_by_a_mapping(self):
+        self.set("assembly_code", "TEST-A")
+        self.assertEqual(self.get("omniclass_23"), "")
+
     def test_auto_mapping_removed_when_code_changes_or_clears(self):
         self.set("assembly_code", "TEST-A")
         self.set("assembly_code", "UNKNOWN-TEST")

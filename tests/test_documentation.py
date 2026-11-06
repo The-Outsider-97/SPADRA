@@ -264,7 +264,8 @@ class Schedules(Room):
         self.cmd("model.set_property", id=self.door, key="name", value='Front, "main" door')
         csv = D.schedule_csv(D.schedule_data(self.p, "door"))
         lines = csv.strip().split("\r\n")
-        self.assertEqual(lines[0], "No.,Name,Level,Host wall,Width (mm),Height (mm),Area (m²),Material,Hinge,Swing,NL-SfB")
+        self.assertEqual(lines[0], "No.,Name,Level,Host wall,Width (mm),Height (mm),Area (m²),Material,Hinge,Swing,"
+                                  "Assembly Code (UniFormat),OmniClass T21,OmniClass T23,IFC Type Product,IFC PredefinedType,NL-SfB")
         self.assertIn('"Front, ""main"" door"', lines[1])
         self.assertTrue(lines[-1].startswith("Total,"))
         self.assertIn("1.89", lines[-1])

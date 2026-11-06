@@ -171,7 +171,7 @@ class Contents(Case):
         messages = [i["message"] for i in self.p.check()["issues"] if i.get("category") == "references"]
         self.assertEqual(messages, [])
         rows = [r for g in self.p.properties({"sheet": self.sheet})["groups"] for r in g["rows"] if str(r.get("key", "")).startswith("vp:")]
-        self.assertEqual(len(rows), 3 + 1 + 3)                                                   # model: scale, azimuth, elevation; snapshot: width; report: width, size, lines
+        self.assertEqual(len(rows), (3 + 1 + 3) + 3 * 3)                                         # model: scale, azimuth, elevation; snapshot: width; report: width, size, lines; and x, y, position for each of the three
 
 
 if __name__ == "__main__":
