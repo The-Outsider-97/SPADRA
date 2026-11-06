@@ -352,8 +352,8 @@ def classification_search(app: SpadraApp, req: Request) -> Any:
         table, limit = int(req.query.get("table", "21")), int(req.query.get("limit", "30"))
     except (ValueError, TypeError):
         raise BadRequest("table and limit must be whole numbers") from None
-    if table not in (21, 23):
-        raise BadRequest("OmniClass table must be 21 or 23")
+    if table not in CL.OMNICLASS_TABLES:
+        raise BadRequest("Unknown OmniClass table; use /api/classifications for supported tables")
     limit = integer(limit, "limit", 1, 200)
     return {"results": CL.search(kind, q, table=table, limit=limit)}
 
