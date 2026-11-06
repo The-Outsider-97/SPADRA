@@ -20,6 +20,7 @@ from src.utils.spatial_formats.common.errors import SpatialFormatError
 
 from . import geometry as G
 from . import sfb as SF
+from . import classifications as CL
 
 NS = "spadra"
 MATERIALS = ("Concrete", "Timber", "Glass", "Masonry", "Steel", "Plasterboard")
@@ -751,6 +752,9 @@ def set_property(project: Any, oid: str, key: str, value: Any) -> None:
         return
     if SF.is_field(key):                                                         # a classification code changes no geometry
         SF.set_code(project, oid, key, value)
+        return
+    if CL.is_field(key):                                                         # IFC/OmniClass classification is also metadata-only
+        CL.set_field(project, oid, key, value)
         return
     old_host = m(meta, "host")
     if cat == "wall":
