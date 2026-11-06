@@ -5,7 +5,7 @@ import { h } from "../../../tools/web/src/dom.js";
 import { glyph } from "../../../tools/web/src/icons.js";
 import { toast } from "../../../tools/web/src/ui.js";
 import type { Store } from "./store.js";
-import type { PropGroup, Properties, PropRow, SfbEntry } from "./types.js";
+import type { PropGroup, Properties, PropRow, SfbEntry, CatalogEntry } from "./types.js";
 
 const open = new Map<string, boolean>();     // which property groups the person has collapsed, kept across refreshes
 
@@ -90,6 +90,7 @@ function rowEl(store: Store, p: Properties, row: PropRow): HTMLElement {
   if (row.type === "readonly" || !row.key) return h("div", { class: "prop-row" }, h("span", { class: "label", text: row.label }), h("div", { class: "value", text: String(row.value) }));
   const key = row.key;
   if (row.type === "sfb") return sfbRow(store, p, row, id, label);
+  if (row.type === "catalog") return catalogRow(store, p, row, id, label);
   if (row.type === "choice") {
     const select = h("select", { id, on: { change: () => { void commit(store, p, key, select.value, "choice"); } } },
       ...(row.choices ?? []).map((c) => h("option", { value: c.value, text: c.label, selected: c.value === row.value })));
@@ -125,6 +126,44 @@ function sfbRow(store: Store, p: Properties, row: PropRow, id: string, label: HT
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") input.blur(); });
   const clear = row.value !== "" ? h("button", { class: "iconbtn remove", type: "button", attrs: { "aria-label": `Clear ${row.label}`, title: "Clear the code" }, on: { click: () => { void commit(store, p, key, "", "text"); } } }, glyph("close")) : null;
   return h("div", { class: "prop-row sfb-row" }, label, h("div", { class: "sfb-field" }, h("div", { class: "with-unit" }, input, clear), name, list));
+}
+
+/** Searchable standard-backed picker. The server remains authoritative for values and crosswalk rules. */
+function catalogRow(store: Store, p: Properties, row: PropRow, id: string, label: HTMLElement): HTMLElement {
+  const kind = row.catalog ?? "ifc";
+  const table = row.table ?? 21;
+  const key = row.key as string;
+  const list = h("datalist", { id: id + "-list" });
+  const help = h("div", { class: "sfb-name", text: row.text ?? "", attrs: { "aria-live": "polite" } });
+  help.id = id + "-name";
+  const input = h("input", { id, type: "text", value: String(row.value),
+    placeholder: kind === "ifc" ? "IfcWallType" : kind === "assembly" ? "Assembly code" : "OmniClass code",
+    attrs: { list: id + "-list", autocomplete: "off", maxlength: 100, "aria-describedby": help.id } });
+  const fill = (rows: readonly CatalogEntry[]): void => {
+    list.replaceChildren(...rows.map(e => h("option", { value: e.code, text: e.title })));
+  };
+  fill(row.catalog_suggest ?? []);
+  let timer: number | undefined;
+  input.addEventListener("input", () => {
+    window.clearTimeout(timer);
+    timer = window.setTimeout(async () => {
+      const q = input.value.trim();
+      if (!q) { fill(row.catalog_suggest ?? []); return; }
+      try {
+        const uri = "/classifications/search?kind=" + encodeURIComponent(kind) +
+          "&table=" + table + "&q=" + encodeURIComponent(q) + "&limit=40";
+        const result = await store.api.get<{ results: CatalogEntry[] }>(uri);
+        fill(result.results);
+      } catch { /* Server enforces catalog integrity on commit. */ }
+    }, 150);
+  });
+  input.addEventListener("change", () => { void commit(store, p, key, input.value, "text"); });
+  input.addEventListener("keydown", e => { if (e.key === "Enter") input.blur(); });
+  const clear = row.value !== "" ? h("button", { class: "iconbtn remove", type: "button",
+    attrs: { "aria-label": "Clear " + row.label, title: "Clear the selected classification" },
+    on: { click: () => { void commit(store, p, key, "", "text"); } } }, glyph("close")) : null;
+  return h("div", { class: "prop-row sfb-row" }, label,
+    h("div", { class: "sfb-field" }, h("div", { class: "with-unit" }, input, clear), help, list));
 }
 
 /** A name and a value for a new custom property, or the text of a new sheet note. */

@@ -389,7 +389,12 @@ COLUMNS: dict[str, list[dict[str, Any]]] = {
 }
 for _category, _columns in COLUMNS.items():                                                       # every schedule of elements ends with the element's NL-SfB code
     if not SCHEDULES[_category].get("summary"):
-        _columns.append(_col("sfb", "NL-SfB", text=True))
+        _columns.extend([_col("assembly_code", "Assembly Code (UniFormat)", text=True),
+                         _col("omniclass_21", "OmniClass T21", text=True),
+                         _col("omniclass_23", "OmniClass T23", text=True),
+                         _col("ifc_type", "IFC Type Product", text=True),
+                         _col("ifc_predefined_type", "IFC PredefinedType", text=True),
+                         _col("sfb", "NL-SfB", text=True)])
 COUNT_AS = {"wall": "Walls", "door": "Doors", "window": "Windows", "floor": "Floors", "roof": "Roofs", "gutter": "Gutters", "downpipe": "Downpipes", "structural": "Columns and beams", "room": "Rooms",
             "stair": "Stairs", "generic": "Generic models", "grid": "Grids", "foundation": "Foundations"}
 
@@ -444,7 +449,9 @@ def schedule_data(project: Any, category: str) -> dict[str, Any]:
         name = obj["name"] or SCHEDULES[category]["noun"]
         solid_volume = E.solid_status(project, oid).volume
         volume = _r(solid_volume) if category != "room" and solid_volume is not None else None                   # a room has no solid; a missing volume stays missing (None), it is not zero
-        row: dict[str, Any] = {"id": oid, "name": name, "sfb": SF.read(meta, "sfb") or "-"}
+        row: dict[str, Any] = {"id": oid, "name": name, "sfb": SF.read(meta, "sfb") or "-",
+                               **{field: str(E.m(meta, field) or "-") for field in
+                                  ("assembly_code", "omniclass_21", "omniclass_23", "ifc_type", "ifc_predefined_type")}}
         host = E.m(meta, "host")
         level_id = E.m(meta, "level") if category not in E.OPENINGS else (E.m(E.meta_of(project, host), "level") if host and E.alive(project, host) else None)
         row["level"] = project.level(level_id)["name"] if level_id in elevations else "-"

@@ -1,0 +1,1703 @@
+{
+  "schema": "IFC4X3_ADD2",
+  "version": "4.3.2.0",
+  "source": "buildingSMART IFC 4.3 ADD2 EXPRESS schema",
+  "source_url": "https://standards.buildingsmart.org/IFC/RELEASE/IFC4_3/",
+  "derived_from": "https://github.com/Autodesk/revit-ifc/blob/master/Source/RevitIFCTools/IFC4X3_ADD2.exp",
+  "notes": "All concrete descendants of IfcTypeProduct in IFC4X3_ADD2; predefined_types are EXPRESS enum literals, not invented mappings.",
+  "types": {
+    "IfcActuatorType": {
+      "predefined_types": [
+        "ELECTRICACTUATOR",
+        "HANDOPERATEDACTUATOR",
+        "HYDRAULICACTUATOR",
+        "PNEUMATICACTUATOR",
+        "THERMOSTATICACTUATOR",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcActuator"
+    },
+    "IfcAirTerminalBoxType": {
+      "predefined_types": [
+        "CONSTANTFLOW",
+        "VARIABLEFLOWPRESSUREDEPENDANT",
+        "VARIABLEFLOWPRESSUREINDEPENDANT",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcAirTerminalBox"
+    },
+    "IfcAirTerminalType": {
+      "predefined_types": [
+        "DIFFUSER",
+        "GRILLE",
+        "LOUVRE",
+        "REGISTER",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcAirTerminal"
+    },
+    "IfcAirToAirHeatRecoveryType": {
+      "predefined_types": [
+        "FIXEDPLATECOUNTERFLOWEXCHANGER",
+        "FIXEDPLATECROSSFLOWEXCHANGER",
+        "FIXEDPLATEPARALLELFLOWEXCHANGER",
+        "HEATPIPE",
+        "ROTARYWHEEL",
+        "RUNAROUNDCOILLOOP",
+        "THERMOSIPHONCOILTYPEHEATEXCHANGERS",
+        "THERMOSIPHONSEALEDTUBEHEATEXCHANGERS",
+        "TWINTOWERENTHALPYRECOVERYLOOPS",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcAirToAirHeatRecovery"
+    },
+    "IfcAlarmType": {
+      "predefined_types": [
+        "BELL",
+        "BREAKGLASSBUTTON",
+        "LIGHT",
+        "MANUALPULLBOX",
+        "RAILWAYCROCODILE",
+        "RAILWAYDETONATOR",
+        "SIREN",
+        "WHISTLE",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcAlarm"
+    },
+    "IfcAudioVisualApplianceType": {
+      "predefined_types": [
+        "AMPLIFIER",
+        "CAMERA",
+        "COMMUNICATIONTERMINAL",
+        "DISPLAY",
+        "MICROPHONE",
+        "PLAYER",
+        "PROJECTOR",
+        "RECEIVER",
+        "RECORDINGEQUIPMENT",
+        "SPEAKER",
+        "SWITCHER",
+        "TELEPHONE",
+        "TUNER",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcAudioVisualAppliance"
+    },
+    "IfcBeamType": {
+      "predefined_types": [
+        "BEAM",
+        "CORNICE",
+        "DIAPHRAGM",
+        "EDGEBEAM",
+        "GIRDER_SEGMENT",
+        "HATSTONE",
+        "HOLLOWCORE",
+        "JOIST",
+        "LINTEL",
+        "PIERCAP",
+        "SPANDREL",
+        "T_BEAM",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcBeam"
+    },
+    "IfcBearingType": {
+      "predefined_types": [
+        "CYLINDRICAL",
+        "DISK",
+        "ELASTOMERIC",
+        "GUIDE",
+        "POT",
+        "ROCKER",
+        "ROLLER",
+        "SPHERICAL",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcBearing"
+    },
+    "IfcBoilerType": {
+      "predefined_types": [
+        "STEAM",
+        "WATER",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcBoiler"
+    },
+    "IfcBuildingElementPartType": {
+      "predefined_types": [
+        "APRON",
+        "ARMOURUNIT",
+        "INSULATION",
+        "PRECASTPANEL",
+        "SAFETYCAGE",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcBuildingElementPart"
+    },
+    "IfcBuildingElementProxyType": {
+      "predefined_types": [
+        "COMPLEX",
+        "ELEMENT",
+        "PARTIAL",
+        "PROVISIONFORSPACE",
+        "PROVISIONFORVOID",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcBuildingElementProxy"
+    },
+    "IfcBuiltElementType": {
+      "predefined_types": [],
+      "occurrence": "IfcBuiltElement"
+    },
+    "IfcBurnerType": {
+      "predefined_types": [
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcBurner"
+    },
+    "IfcCableCarrierFittingType": {
+      "predefined_types": [
+        "BEND",
+        "CONNECTOR",
+        "CROSS",
+        "JUNCTION",
+        "REDUCER",
+        "TEE",
+        "TRANSITION",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcCableCarrierFitting"
+    },
+    "IfcCableCarrierSegmentType": {
+      "predefined_types": [
+        "CABLEBRACKET",
+        "CABLELADDERSEGMENT",
+        "CABLETRAYSEGMENT",
+        "CABLETRUNKINGSEGMENT",
+        "CATENARYWIRE",
+        "CONDUITSEGMENT",
+        "DROPPER",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcCableCarrierSegment"
+    },
+    "IfcCableFittingType": {
+      "predefined_types": [
+        "CONNECTOR",
+        "ENTRY",
+        "EXIT",
+        "FANOUT",
+        "JUNCTION",
+        "TRANSITION",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcCableFitting"
+    },
+    "IfcCableSegmentType": {
+      "predefined_types": [
+        "BUSBARSEGMENT",
+        "CABLESEGMENT",
+        "CONDUCTORSEGMENT",
+        "CONTACTWIRESEGMENT",
+        "CORESEGMENT",
+        "FIBERSEGMENT",
+        "FIBERTUBE",
+        "OPTICALCABLESEGMENT",
+        "STITCHWIRE",
+        "WIREPAIRSEGMENT",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcCableSegment"
+    },
+    "IfcCaissonFoundationType": {
+      "predefined_types": [
+        "CAISSON",
+        "WELL",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcCaissonFoundation"
+    },
+    "IfcChillerType": {
+      "predefined_types": [
+        "AIRCOOLED",
+        "HEATRECOVERY",
+        "WATERCOOLED",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcChiller"
+    },
+    "IfcChimneyType": {
+      "predefined_types": [
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcChimney"
+    },
+    "IfcCivilElementType": {
+      "predefined_types": [],
+      "occurrence": "IfcCivilElement"
+    },
+    "IfcCoilType": {
+      "predefined_types": [
+        "DXCOOLINGCOIL",
+        "ELECTRICHEATINGCOIL",
+        "GASHEATINGCOIL",
+        "HYDRONICCOIL",
+        "STEAMHEATINGCOIL",
+        "WATERCOOLINGCOIL",
+        "WATERHEATINGCOIL",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcCoil"
+    },
+    "IfcColumnType": {
+      "predefined_types": [
+        "COLUMN",
+        "PIERSTEM",
+        "PIERSTEM_SEGMENT",
+        "PILASTER",
+        "STANDCOLUMN",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcColumn"
+    },
+    "IfcCommunicationsApplianceType": {
+      "predefined_types": [
+        "ANTENNA",
+        "AUTOMATON",
+        "COMPUTER",
+        "FAX",
+        "GATEWAY",
+        "INTELLIGENTPERIPHERAL",
+        "IPNETWORKEQUIPMENT",
+        "LINESIDEELECTRONICUNIT",
+        "MODEM",
+        "NETWORKAPPLIANCE",
+        "NETWORKBRIDGE",
+        "NETWORKHUB",
+        "OPTICALLINETERMINAL",
+        "OPTICALNETWORKUNIT",
+        "PRINTER",
+        "RADIOBLOCKCENTER",
+        "REPEATER",
+        "ROUTER",
+        "SCANNER",
+        "TELECOMMAND",
+        "TELEPHONYEXCHANGE",
+        "TRANSITIONCOMPONENT",
+        "TRANSPONDER",
+        "TRANSPORTEQUIPMENT",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcCommunicationsAppliance"
+    },
+    "IfcCompressorType": {
+      "predefined_types": [
+        "BOOSTER",
+        "DYNAMIC",
+        "HERMETIC",
+        "OPENTYPE",
+        "RECIPROCATING",
+        "ROLLINGPISTON",
+        "ROTARY",
+        "ROTARYVANE",
+        "SCROLL",
+        "SEMIHERMETIC",
+        "SINGLESCREW",
+        "SINGLESTAGE",
+        "TROCHOIDAL",
+        "TWINSCREW",
+        "WELDEDSHELLHERMETIC",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcCompressor"
+    },
+    "IfcCondenserType": {
+      "predefined_types": [
+        "AIRCOOLED",
+        "EVAPORATIVECOOLED",
+        "WATERCOOLED",
+        "WATERCOOLEDBRAZEDPLATE",
+        "WATERCOOLEDSHELLCOIL",
+        "WATERCOOLEDSHELLTUBE",
+        "WATERCOOLEDTUBEINTUBE",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcCondenser"
+    },
+    "IfcControllerType": {
+      "predefined_types": [
+        "FLOATING",
+        "MULTIPOSITION",
+        "PROGRAMMABLE",
+        "PROPORTIONAL",
+        "TWOPOSITION",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcController"
+    },
+    "IfcConveyorSegmentType": {
+      "predefined_types": [
+        "BELTCONVEYOR",
+        "BUCKETCONVEYOR",
+        "CHUTECONVEYOR",
+        "SCREWCONVEYOR",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcConveyorSegment"
+    },
+    "IfcCooledBeamType": {
+      "predefined_types": [
+        "ACTIVE",
+        "PASSIVE",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcCooledBeam"
+    },
+    "IfcCoolingTowerType": {
+      "predefined_types": [
+        "MECHANICALFORCEDDRAFT",
+        "MECHANICALINDUCEDDRAFT",
+        "NATURALDRAFT",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcCoolingTower"
+    },
+    "IfcCourseType": {
+      "predefined_types": [
+        "ARMOUR",
+        "BALLASTBED",
+        "CORE",
+        "FILTER",
+        "PAVEMENT",
+        "PROTECTION",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcCourse"
+    },
+    "IfcCoveringType": {
+      "predefined_types": [
+        "CEILING",
+        "CLADDING",
+        "COPING",
+        "FLOORING",
+        "INSULATION",
+        "MEMBRANE",
+        "MOLDING",
+        "ROOFING",
+        "SKIRTINGBOARD",
+        "SLEEVING",
+        "TOPPING",
+        "WRAPPING",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcCovering"
+    },
+    "IfcCurtainWallType": {
+      "predefined_types": [
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcCurtainWall"
+    },
+    "IfcDamperType": {
+      "predefined_types": [
+        "BACKDRAFTDAMPER",
+        "BALANCINGDAMPER",
+        "BLASTDAMPER",
+        "CONTROLDAMPER",
+        "FIREDAMPER",
+        "FIRESMOKEDAMPER",
+        "FUMEHOODEXHAUST",
+        "GRAVITYDAMPER",
+        "GRAVITYRELIEFDAMPER",
+        "RELIEFDAMPER",
+        "SMOKEDAMPER",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcDamper"
+    },
+    "IfcDeepFoundationType": {
+      "predefined_types": [],
+      "occurrence": "IfcDeepFoundation"
+    },
+    "IfcDiscreteAccessoryType": {
+      "predefined_types": [
+        "ANCHORPLATE",
+        "BIRDPROTECTION",
+        "BRACKET",
+        "CABLEARRANGER",
+        "ELASTIC_CUSHION",
+        "EXPANSION_JOINT_DEVICE",
+        "FILLER",
+        "FLASHING",
+        "INSULATOR",
+        "LOCK",
+        "PANEL_STRENGTHENING",
+        "POINTMACHINEMOUNTINGDEVICE",
+        "POINT_MACHINE_LOCKING_DEVICE",
+        "RAILBRACE",
+        "RAILPAD",
+        "RAIL_LUBRICATION",
+        "RAIL_MECHANICAL_EQUIPMENT",
+        "SHOE",
+        "SLIDINGCHAIR",
+        "SOUNDABSORPTION",
+        "TENSIONINGEQUIPMENT",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcDiscreteAccessory"
+    },
+    "IfcDistributionBoardType": {
+      "predefined_types": [
+        "CONSUMERUNIT",
+        "DISPATCHINGBOARD",
+        "DISTRIBUTIONBOARD",
+        "DISTRIBUTIONFRAME",
+        "MOTORCONTROLCENTRE",
+        "SWITCHBOARD",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcDistributionBoard"
+    },
+    "IfcDistributionChamberElementType": {
+      "predefined_types": [
+        "FORMEDDUCT",
+        "INSPECTIONCHAMBER",
+        "INSPECTIONPIT",
+        "MANHOLE",
+        "METERCHAMBER",
+        "SUMP",
+        "TRENCH",
+        "VALVECHAMBER",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcDistributionChamberElement"
+    },
+    "IfcDistributionElementType": {
+      "predefined_types": [],
+      "occurrence": "IfcDistributionElement"
+    },
+    "IfcDoorType": {
+      "predefined_types": [
+        "BOOM_BARRIER",
+        "DOOR",
+        "GATE",
+        "TRAPDOOR",
+        "TURNSTILE",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcDoor"
+    },
+    "IfcDuctFittingType": {
+      "predefined_types": [
+        "BEND",
+        "CONNECTOR",
+        "ENTRY",
+        "EXIT",
+        "JUNCTION",
+        "OBSTRUCTION",
+        "TRANSITION",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcDuctFitting"
+    },
+    "IfcDuctSegmentType": {
+      "predefined_types": [
+        "FLEXIBLESEGMENT",
+        "RIGIDSEGMENT",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcDuctSegment"
+    },
+    "IfcDuctSilencerType": {
+      "predefined_types": [
+        "FLATOVAL",
+        "RECTANGULAR",
+        "ROUND",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcDuctSilencer"
+    },
+    "IfcElectricApplianceType": {
+      "predefined_types": [
+        "DISHWASHER",
+        "ELECTRICCOOKER",
+        "FREESTANDINGELECTRICHEATER",
+        "FREESTANDINGFAN",
+        "FREESTANDINGWATERCOOLER",
+        "FREESTANDINGWATERHEATER",
+        "FREEZER",
+        "FRIDGE_FREEZER",
+        "HANDDRYER",
+        "KITCHENMACHINE",
+        "MICROWAVE",
+        "PHOTOCOPIER",
+        "REFRIGERATOR",
+        "TUMBLEDRYER",
+        "VENDINGMACHINE",
+        "WASHINGMACHINE",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcElectricAppliance"
+    },
+    "IfcElectricDistributionBoardType": {
+      "predefined_types": [
+        "CONSUMERUNIT",
+        "DISTRIBUTIONBOARD",
+        "MOTORCONTROLCENTRE",
+        "SWITCHBOARD",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcElectricDistributionBoard"
+    },
+    "IfcElectricFlowStorageDeviceType": {
+      "predefined_types": [
+        "BATTERY",
+        "CAPACITOR",
+        "CAPACITORBANK",
+        "COMPENSATOR",
+        "HARMONICFILTER",
+        "INDUCTOR",
+        "INDUCTORBANK",
+        "RECHARGER",
+        "UPS",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcElectricFlowStorageDevice"
+    },
+    "IfcElectricFlowTreatmentDeviceType": {
+      "predefined_types": [
+        "ELECTRONICFILTER",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcElectricFlowTreatmentDevice"
+    },
+    "IfcElectricGeneratorType": {
+      "predefined_types": [
+        "CHP",
+        "ENGINEGENERATOR",
+        "STANDALONE",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcElectricGenerator"
+    },
+    "IfcElectricMotorType": {
+      "predefined_types": [
+        "DC",
+        "INDUCTION",
+        "POLYPHASE",
+        "RELUCTANCESYNCHRONOUS",
+        "SYNCHRONOUS",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcElectricMotor"
+    },
+    "IfcElectricTimeControlType": {
+      "predefined_types": [
+        "RELAY",
+        "TIMECLOCK",
+        "TIMEDELAY",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcElectricTimeControl"
+    },
+    "IfcElementAssemblyType": {
+      "predefined_types": [
+        "ABUTMENT",
+        "ACCESSORY_ASSEMBLY",
+        "ARCH",
+        "BEAM_GRID",
+        "BRACED_FRAME",
+        "CROSS_BRACING",
+        "DECK",
+        "DILATATIONPANEL",
+        "ENTRANCEWORKS",
+        "GIRDER",
+        "GRID",
+        "MAST",
+        "PIER",
+        "PYLON",
+        "RAIL_MECHANICAL_EQUIPMENT_ASSEMBLY",
+        "REINFORCEMENT_UNIT",
+        "RIGID_FRAME",
+        "SHELTER",
+        "SIGNALASSEMBLY",
+        "SLAB_FIELD",
+        "SUMPBUSTER",
+        "SUPPORTINGASSEMBLY",
+        "SUSPENSIONASSEMBLY",
+        "TRACKPANEL",
+        "TRACTION_SWITCHING_ASSEMBLY",
+        "TRAFFIC_CALMING_DEVICE",
+        "TRUSS",
+        "TURNOUTPANEL",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcElementAssembly"
+    },
+    "IfcEngineType": {
+      "predefined_types": [
+        "EXTERNALCOMBUSTION",
+        "INTERNALCOMBUSTION",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcEngine"
+    },
+    "IfcEvaporativeCoolerType": {
+      "predefined_types": [
+        "DIRECTEVAPORATIVEAIRWASHER",
+        "DIRECTEVAPORATIVEPACKAGEDROTARYAIRCOOLER",
+        "DIRECTEVAPORATIVERANDOMMEDIAAIRCOOLER",
+        "DIRECTEVAPORATIVERIGIDMEDIAAIRCOOLER",
+        "DIRECTEVAPORATIVESLINGERSPACKAGEDAIRCOOLER",
+        "INDIRECTDIRECTCOMBINATION",
+        "INDIRECTEVAPORATIVECOOLINGTOWERORCOILCOOLER",
+        "INDIRECTEVAPORATIVEPACKAGEAIRCOOLER",
+        "INDIRECTEVAPORATIVEWETCOIL",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcEvaporativeCooler"
+    },
+    "IfcEvaporatorType": {
+      "predefined_types": [
+        "DIRECTEXPANSION",
+        "DIRECTEXPANSIONBRAZEDPLATE",
+        "DIRECTEXPANSIONSHELLANDTUBE",
+        "DIRECTEXPANSIONTUBEINTUBE",
+        "FLOODEDSHELLANDTUBE",
+        "SHELLANDCOIL",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcEvaporator"
+    },
+    "IfcFanType": {
+      "predefined_types": [
+        "CENTRIFUGALAIRFOIL",
+        "CENTRIFUGALBACKWARDINCLINEDCURVED",
+        "CENTRIFUGALFORWARDCURVED",
+        "CENTRIFUGALRADIAL",
+        "PROPELLORAXIAL",
+        "TUBEAXIAL",
+        "VANEAXIAL",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcFan"
+    },
+    "IfcFastenerType": {
+      "predefined_types": [
+        "GLUE",
+        "MORTAR",
+        "WELD",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcFastener"
+    },
+    "IfcFilterType": {
+      "predefined_types": [
+        "AIRPARTICLEFILTER",
+        "COMPRESSEDAIRFILTER",
+        "ODORFILTER",
+        "OILFILTER",
+        "STRAINER",
+        "WATERFILTER",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcFilter"
+    },
+    "IfcFireSuppressionTerminalType": {
+      "predefined_types": [
+        "BREECHINGINLET",
+        "FIREHYDRANT",
+        "FIREMONITOR",
+        "HOSEREEL",
+        "SPRINKLER",
+        "SPRINKLERDEFLECTOR",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcFireSuppressionTerminal"
+    },
+    "IfcFlowInstrumentType": {
+      "predefined_types": [
+        "AMMETER",
+        "COMBINED",
+        "FREQUENCYMETER",
+        "PHASEANGLEMETER",
+        "POWERFACTORMETER",
+        "PRESSUREGAUGE",
+        "THERMOMETER",
+        "VOLTMETER",
+        "VOLTMETER_PEAK",
+        "VOLTMETER_RMS",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcFlowInstrument"
+    },
+    "IfcFlowMeterType": {
+      "predefined_types": [
+        "ENERGYMETER",
+        "GASMETER",
+        "OILMETER",
+        "WATERMETER",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcFlowMeter"
+    },
+    "IfcFootingType": {
+      "predefined_types": [
+        "CAISSON_FOUNDATION",
+        "FOOTING_BEAM",
+        "PAD_FOOTING",
+        "PILE_CAP",
+        "STRIP_FOOTING",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcFooting"
+    },
+    "IfcFurnishingElementType": {
+      "predefined_types": [],
+      "occurrence": "IfcFurnishingElement"
+    },
+    "IfcFurnitureType": {
+      "predefined_types": [],
+      "occurrence": "IfcFurniture"
+    },
+    "IfcGeographicElementType": {
+      "predefined_types": [
+        "SOIL_BORING_POINT",
+        "TERRAIN",
+        "VEGETATION",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcGeographicElement"
+    },
+    "IfcHeatExchangerType": {
+      "predefined_types": [
+        "PLATE",
+        "SHELLANDTUBE",
+        "TURNOUTHEATING",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcHeatExchanger"
+    },
+    "IfcHumidifierType": {
+      "predefined_types": [
+        "ADIABATICAIRWASHER",
+        "ADIABATICATOMIZING",
+        "ADIABATICCOMPRESSEDAIRNOZZLE",
+        "ADIABATICPAN",
+        "ADIABATICRIGIDMEDIA",
+        "ADIABATICULTRASONIC",
+        "ADIABATICWETTEDELEMENT",
+        "ASSISTEDBUTANE",
+        "ASSISTEDELECTRIC",
+        "ASSISTEDNATURALGAS",
+        "ASSISTEDPROPANE",
+        "ASSISTEDSTEAM",
+        "STEAMINJECTION",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcHumidifier"
+    },
+    "IfcImpactProtectionDeviceType": {
+      "predefined_types": [
+        "BUMPER",
+        "CRASHCUSHION",
+        "DAMPINGSYSTEM",
+        "FENDER",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcImpactProtectionDevice"
+    },
+    "IfcInterceptorType": {
+      "predefined_types": [
+        "CYCLONIC",
+        "GREASE",
+        "OIL",
+        "PETROL",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcInterceptor"
+    },
+    "IfcJunctionBoxType": {
+      "predefined_types": [
+        "DATA",
+        "POWER",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcJunctionBox"
+    },
+    "IfcKerbType": {
+      "predefined_types": [
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcKerb"
+    },
+    "IfcLampType": {
+      "predefined_types": [
+        "COMPACTFLUORESCENT",
+        "FLUORESCENT",
+        "HALOGEN",
+        "HIGHPRESSUREMERCURY",
+        "HIGHPRESSURESODIUM",
+        "LED",
+        "METALHALIDE",
+        "OLED",
+        "TUNGSTENFILAMENT",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcLamp"
+    },
+    "IfcLightFixtureType": {
+      "predefined_types": [
+        "DIRECTIONSOURCE",
+        "POINTSOURCE",
+        "SECURITYLIGHTING",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcLightFixture"
+    },
+    "IfcLiquidTerminalType": {
+      "predefined_types": [
+        "HOSEREEL",
+        "LOADINGARM",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcLiquidTerminal"
+    },
+    "IfcMechanicalFastenerType": {
+      "predefined_types": [
+        "ANCHORBOLT",
+        "BOLT",
+        "CHAIN",
+        "COUPLER",
+        "DOWEL",
+        "NAIL",
+        "NAILPLATE",
+        "RAILFASTENING",
+        "RAILJOINT",
+        "RIVET",
+        "ROPE",
+        "SCREW",
+        "SHEARCONNECTOR",
+        "STAPLE",
+        "STUDSHEARCONNECTOR",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcMechanicalFastener"
+    },
+    "IfcMedicalDeviceType": {
+      "predefined_types": [
+        "AIRSTATION",
+        "FEEDAIRUNIT",
+        "OXYGENGENERATOR",
+        "OXYGENPLANT",
+        "VACUUMSTATION",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcMedicalDevice"
+    },
+    "IfcMemberType": {
+      "predefined_types": [
+        "ARCH_SEGMENT",
+        "BRACE",
+        "CHORD",
+        "COLLAR",
+        "MEMBER",
+        "MULLION",
+        "PLATE",
+        "POST",
+        "PURLIN",
+        "RAFTER",
+        "STAY_CABLE",
+        "STIFFENING_RIB",
+        "STRINGER",
+        "STRUCTURALCABLE",
+        "STRUT",
+        "STUD",
+        "SUSPENDER",
+        "SUSPENSION_CABLE",
+        "TIEBAR",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcMember"
+    },
+    "IfcMobileTelecommunicationsApplianceType": {
+      "predefined_types": [
+        "ACCESSPOINT",
+        "BASEBANDUNIT",
+        "BASETRANSCEIVERSTATION",
+        "E_UTRAN_NODE_B",
+        "GATEWAY_GPRS_SUPPORT_NODE",
+        "MASTERUNIT",
+        "MOBILESWITCHINGCENTER",
+        "MSCSERVER",
+        "PACKETCONTROLUNIT",
+        "REMOTERADIOUNIT",
+        "REMOTEUNIT",
+        "SERVICE_GPRS_SUPPORT_NODE",
+        "SUBSCRIBERSERVER",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcMobileTelecommunicationsAppliance"
+    },
+    "IfcMooringDeviceType": {
+      "predefined_types": [
+        "BOLLARD",
+        "LINETENSIONER",
+        "MAGNETICDEVICE",
+        "MOORINGHOOKS",
+        "VACUUMDEVICE",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcMooringDevice"
+    },
+    "IfcMotorConnectionType": {
+      "predefined_types": [
+        "BELTDRIVE",
+        "COUPLING",
+        "DIRECTDRIVE",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcMotorConnection"
+    },
+    "IfcNavigationElementType": {
+      "predefined_types": [
+        "BEACON",
+        "BUOY",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcNavigationElement"
+    },
+    "IfcOutletType": {
+      "predefined_types": [
+        "AUDIOVISUALOUTLET",
+        "COMMUNICATIONSOUTLET",
+        "DATAOUTLET",
+        "POWEROUTLET",
+        "TELEPHONEOUTLET",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcOutlet"
+    },
+    "IfcPavementType": {
+      "predefined_types": [
+        "FLEXIBLE",
+        "RIGID",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcPavement"
+    },
+    "IfcPileType": {
+      "predefined_types": [
+        "BORED",
+        "COHESION",
+        "DRIVEN",
+        "FRICTION",
+        "JETGROUTING",
+        "SUPPORT",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcPile"
+    },
+    "IfcPipeFittingType": {
+      "predefined_types": [
+        "BEND",
+        "CONNECTOR",
+        "ENTRY",
+        "EXIT",
+        "JUNCTION",
+        "OBSTRUCTION",
+        "TRANSITION",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcPipeFitting"
+    },
+    "IfcPipeSegmentType": {
+      "predefined_types": [
+        "CULVERT",
+        "FLEXIBLESEGMENT",
+        "GUTTER",
+        "RIGIDSEGMENT",
+        "SPOOL",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcPipeSegment"
+    },
+    "IfcPlateType": {
+      "predefined_types": [
+        "BASE_PLATE",
+        "COVER_PLATE",
+        "CURTAIN_PANEL",
+        "FLANGE_PLATE",
+        "GUSSET_PLATE",
+        "SHEET",
+        "SPLICE_PLATE",
+        "STIFFENER_PLATE",
+        "WEB_PLATE",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcPlate"
+    },
+    "IfcProtectiveDeviceTrippingUnitType": {
+      "predefined_types": [
+        "ELECTROMAGNETIC",
+        "ELECTRONIC",
+        "RESIDUALCURRENT",
+        "THERMAL",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcProtectiveDeviceTrippingUnit"
+    },
+    "IfcProtectiveDeviceType": {
+      "predefined_types": [
+        "ANTI_ARCING_DEVICE",
+        "CIRCUITBREAKER",
+        "EARTHINGSWITCH",
+        "EARTHLEAKAGECIRCUITBREAKER",
+        "FUSEDISCONNECTOR",
+        "RESIDUALCURRENTCIRCUITBREAKER",
+        "RESIDUALCURRENTSWITCH",
+        "SPARKGAP",
+        "VARISTOR",
+        "VOLTAGELIMITER",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcProtectiveDevice"
+    },
+    "IfcPumpType": {
+      "predefined_types": [
+        "CIRCULATOR",
+        "ENDSUCTION",
+        "SPLITCASE",
+        "SUBMERSIBLEPUMP",
+        "SUMPPUMP",
+        "VERTICALINLINE",
+        "VERTICALTURBINE",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcPump"
+    },
+    "IfcRailType": {
+      "predefined_types": [
+        "BLADE",
+        "CHECKRAIL",
+        "GUARDRAIL",
+        "RACKRAIL",
+        "RAIL",
+        "STOCKRAIL",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcRail"
+    },
+    "IfcRailingType": {
+      "predefined_types": [
+        "BALUSTRADE",
+        "FENCE",
+        "GUARDRAIL",
+        "HANDRAIL",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcRailing"
+    },
+    "IfcRampFlightType": {
+      "predefined_types": [
+        "SPIRAL",
+        "STRAIGHT",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcRampFlight"
+    },
+    "IfcRampType": {
+      "predefined_types": [
+        "HALF_TURN_RAMP",
+        "QUARTER_TURN_RAMP",
+        "SPIRAL_RAMP",
+        "STRAIGHT_RUN_RAMP",
+        "TWO_QUARTER_TURN_RAMP",
+        "TWO_STRAIGHT_RUN_RAMP",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcRamp"
+    },
+    "IfcReinforcingBarType": {
+      "predefined_types": [
+        "ANCHORING",
+        "EDGE",
+        "LIGATURE",
+        "MAIN",
+        "PUNCHING",
+        "RING",
+        "SHEAR",
+        "SPACEBAR",
+        "STUD",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcReinforcingBar"
+    },
+    "IfcReinforcingMeshType": {
+      "predefined_types": [
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcReinforcingMesh"
+    },
+    "IfcRoofType": {
+      "predefined_types": [
+        "BARREL_ROOF",
+        "BUTTERFLY_ROOF",
+        "DOME_ROOF",
+        "FLAT_ROOF",
+        "FREEFORM",
+        "GABLE_ROOF",
+        "GAMBREL_ROOF",
+        "HIPPED_GABLE_ROOF",
+        "HIP_ROOF",
+        "MANSARD_ROOF",
+        "PAVILION_ROOF",
+        "RAINBOW_ROOF",
+        "SHED_ROOF",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcRoof"
+    },
+    "IfcSanitaryTerminalType": {
+      "predefined_types": [
+        "BATH",
+        "BIDET",
+        "CISTERN",
+        "SANITARYFOUNTAIN",
+        "SHOWER",
+        "SINK",
+        "TOILETPAN",
+        "URINAL",
+        "WASHHANDBASIN",
+        "WCSEAT",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcSanitaryTerminal"
+    },
+    "IfcSensorType": {
+      "predefined_types": [
+        "CO2SENSOR",
+        "CONDUCTANCESENSOR",
+        "CONTACTSENSOR",
+        "COSENSOR",
+        "EARTHQUAKESENSOR",
+        "FIRESENSOR",
+        "FLOWSENSOR",
+        "FOREIGNOBJECTDETECTIONSENSOR",
+        "FROSTSENSOR",
+        "GASSENSOR",
+        "HEATSENSOR",
+        "HUMIDITYSENSOR",
+        "IDENTIFIERSENSOR",
+        "IONCONCENTRATIONSENSOR",
+        "LEVELSENSOR",
+        "LIGHTSENSOR",
+        "MOISTURESENSOR",
+        "MOVEMENTSENSOR",
+        "OBSTACLESENSOR",
+        "PHSENSOR",
+        "PRESSURESENSOR",
+        "RADIATIONSENSOR",
+        "RADIOACTIVITYSENSOR",
+        "RAINSENSOR",
+        "SMOKESENSOR",
+        "SNOWDEPTHSENSOR",
+        "SOUNDSENSOR",
+        "TEMPERATURESENSOR",
+        "TRAINSENSOR",
+        "TURNOUTCLOSURESENSOR",
+        "WHEELSENSOR",
+        "WINDSENSOR",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcSensor"
+    },
+    "IfcShadingDeviceType": {
+      "predefined_types": [
+        "AWNING",
+        "JALOUSIE",
+        "SHUTTER",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcShadingDevice"
+    },
+    "IfcSignType": {
+      "predefined_types": [
+        "MARKER",
+        "MIRROR",
+        "PICTORAL",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcSign"
+    },
+    "IfcSignalType": {
+      "predefined_types": [
+        "AUDIO",
+        "MIXED",
+        "VISUAL",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcSignal"
+    },
+    "IfcSlabType": {
+      "predefined_types": [
+        "APPROACH_SLAB",
+        "BASESLAB",
+        "FLOOR",
+        "LANDING",
+        "PAVING",
+        "ROOF",
+        "SIDEWALK",
+        "TRACKSLAB",
+        "WEARING",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcSlab"
+    },
+    "IfcSolarDeviceType": {
+      "predefined_types": [
+        "SOLARCOLLECTOR",
+        "SOLARPANEL",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcSolarDevice"
+    },
+    "IfcSpaceHeaterType": {
+      "predefined_types": [
+        "CONVECTOR",
+        "RADIATOR",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcSpaceHeater"
+    },
+    "IfcSpaceType": {
+      "predefined_types": [
+        "BERTH",
+        "EXTERNAL",
+        "GFA",
+        "INTERNAL",
+        "PARKING",
+        "SPACE",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcSpace"
+    },
+    "IfcSpatialZoneType": {
+      "predefined_types": [
+        "CONSTRUCTION",
+        "FIRESAFETY",
+        "INTERFERENCE",
+        "LIGHTING",
+        "OCCUPANCY",
+        "RESERVATION",
+        "SECURITY",
+        "THERMAL",
+        "TRANSPORT",
+        "VENTILATION",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcSpatialZone"
+    },
+    "IfcStackTerminalType": {
+      "predefined_types": [
+        "BIRDCAGE",
+        "COWL",
+        "RAINWATERHOPPER",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcStackTerminal"
+    },
+    "IfcStairFlightType": {
+      "predefined_types": [
+        "CURVED",
+        "FREEFORM",
+        "SPIRAL",
+        "STRAIGHT",
+        "WINDER",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcStairFlight"
+    },
+    "IfcStairType": {
+      "predefined_types": [
+        "CURVED_RUN_STAIR",
+        "DOUBLE_RETURN_STAIR",
+        "HALF_TURN_STAIR",
+        "HALF_WINDING_STAIR",
+        "LADDER",
+        "QUARTER_TURN_STAIR",
+        "QUARTER_WINDING_STAIR",
+        "SPIRAL_STAIR",
+        "STRAIGHT_RUN_STAIR",
+        "THREE_QUARTER_TURN_STAIR",
+        "THREE_QUARTER_WINDING_STAIR",
+        "TWO_CURVED_RUN_STAIR",
+        "TWO_QUARTER_TURN_STAIR",
+        "TWO_QUARTER_WINDING_STAIR",
+        "TWO_STRAIGHT_RUN_STAIR",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcStair"
+    },
+    "IfcSwitchingDeviceType": {
+      "predefined_types": [
+        "CONTACTOR",
+        "DIMMERSWITCH",
+        "EMERGENCYSTOP",
+        "KEYPAD",
+        "MOMENTARYSWITCH",
+        "RELAY",
+        "SELECTORSWITCH",
+        "STARTER",
+        "START_AND_STOP_EQUIPMENT",
+        "SWITCHDISCONNECTOR",
+        "TOGGLESWITCH",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcSwitchingDevice"
+    },
+    "IfcSystemFurnitureElementType": {
+      "predefined_types": [],
+      "occurrence": "IfcSystemFurnitureElement"
+    },
+    "IfcTankType": {
+      "predefined_types": [
+        "BASIN",
+        "BREAKPRESSURE",
+        "EXPANSION",
+        "FEEDANDEXPANSION",
+        "OILRETENTIONTRAY",
+        "PRESSUREVESSEL",
+        "STORAGE",
+        "VESSEL",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcTank"
+    },
+    "IfcTendonAnchorType": {
+      "predefined_types": [
+        "COUPLER",
+        "FIXED_END",
+        "TENSIONING_END",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcTendonAnchor"
+    },
+    "IfcTendonConduitType": {
+      "predefined_types": [
+        "COUPLER",
+        "DIABOLO",
+        "DUCT",
+        "GROUTING_DUCT",
+        "TRUMPET",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcTendonConduit"
+    },
+    "IfcTendonType": {
+      "predefined_types": [
+        "BAR",
+        "COATED",
+        "STRAND",
+        "WIRE",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcTendon"
+    },
+    "IfcTrackElementType": {
+      "predefined_types": [
+        "BLOCKINGDEVICE",
+        "DERAILER",
+        "FROG",
+        "HALF_SET_OF_BLADES",
+        "SLEEPER",
+        "SPEEDREGULATOR",
+        "TRACKENDOFALIGNMENT",
+        "VEHICLESTOP",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcTrackElement"
+    },
+    "IfcTransformerType": {
+      "predefined_types": [
+        "CHOPPER",
+        "COMBINED",
+        "CURRENT",
+        "FREQUENCY",
+        "INVERTER",
+        "RECTIFIER",
+        "VOLTAGE",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcTransformer"
+    },
+    "IfcTransportElementType": {
+      "predefined_types": [
+        "CRANEWAY",
+        "ELEVATOR",
+        "ESCALATOR",
+        "HAULINGGEAR",
+        "LIFTINGGEAR",
+        "MOVINGWALKWAY",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcTransportElement"
+    },
+    "IfcTubeBundleType": {
+      "predefined_types": [
+        "FINNED",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcTubeBundle"
+    },
+    "IfcUnitaryControlElementType": {
+      "predefined_types": [
+        "ALARMPANEL",
+        "BASESTATIONCONTROLLER",
+        "COMBINED",
+        "CONTROLPANEL",
+        "GASDETECTIONPANEL",
+        "HUMIDISTAT",
+        "INDICATORPANEL",
+        "MIMICPANEL",
+        "THERMOSTAT",
+        "WEATHERSTATION",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcUnitaryControlElement"
+    },
+    "IfcUnitaryEquipmentType": {
+      "predefined_types": [
+        "AIRCONDITIONINGUNIT",
+        "AIRHANDLER",
+        "DEHUMIDIFIER",
+        "ROOFTOPUNIT",
+        "SPLITSYSTEM",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcUnitaryEquipment"
+    },
+    "IfcValveType": {
+      "predefined_types": [
+        "AIRRELEASE",
+        "ANTIVACUUM",
+        "CHANGEOVER",
+        "CHECK",
+        "COMMISSIONING",
+        "DIVERTING",
+        "DOUBLECHECK",
+        "DOUBLEREGULATING",
+        "DRAWOFFCOCK",
+        "FAUCET",
+        "FLUSHING",
+        "GASCOCK",
+        "GASTAP",
+        "ISOLATING",
+        "MIXING",
+        "PRESSUREREDUCING",
+        "PRESSURERELIEF",
+        "REGULATING",
+        "SAFETYCUTOFF",
+        "STEAMTRAP",
+        "STOPCOCK",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcValve"
+    },
+    "IfcVehicleType": {
+      "predefined_types": [
+        "CARGO",
+        "ROLLINGSTOCK",
+        "VEHICLE",
+        "VEHICLEAIR",
+        "VEHICLEMARINE",
+        "VEHICLETRACKED",
+        "VEHICLEWHEELED",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcVehicle"
+    },
+    "IfcVibrationDamperType": {
+      "predefined_types": [
+        "AXIAL_YIELD",
+        "BENDING_YIELD",
+        "FRICTION",
+        "RUBBER",
+        "SHEAR_YIELD",
+        "VISCOUS",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcVibrationDamper"
+    },
+    "IfcVibrationIsolatorType": {
+      "predefined_types": [
+        "BASE",
+        "COMPRESSION",
+        "SPRING",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcVibrationIsolator"
+    },
+    "IfcWallType": {
+      "predefined_types": [
+        "ELEMENTEDWALL",
+        "MOVABLE",
+        "PARAPET",
+        "PARTITIONING",
+        "PLUMBINGWALL",
+        "POLYGONAL",
+        "RETAININGWALL",
+        "SHEAR",
+        "SOLIDWALL",
+        "STANDARD",
+        "WAVEWALL",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcWall"
+    },
+    "IfcWasteTerminalType": {
+      "predefined_types": [
+        "FLOORTRAP",
+        "FLOORWASTE",
+        "GULLYSUMP",
+        "GULLYTRAP",
+        "ROOFDRAIN",
+        "WASTEDISPOSALUNIT",
+        "WASTETRAP",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcWasteTerminal"
+    },
+    "IfcWindowType": {
+      "predefined_types": [
+        "LIGHTDOME",
+        "SKYLIGHT",
+        "WINDOW",
+        "USERDEFINED",
+        "NOTDEFINED"
+      ],
+      "occurrence": "IfcWindow"
+    }
+  }
+}

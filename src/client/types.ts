@@ -132,13 +132,16 @@ export interface Choice { value: string; label: string }
 /** Where a ``link`` row leads: select an element (or a drawing entity), open a view or sheet, or open a dialog. */
 export interface LinkTarget { select?: { model?: string; drawing?: string; entity?: string }; open?: OpenRef; dialog?: string }
 export interface PropRow {
-  key?: string; label: string; type: "text" | "number" | "choice" | "readonly" | "link" | "sfb"; value: string | number; unit?: string; choices?: Choice[];
+  key?: string; label: string; type: "text" | "number" | "choice" | "readonly" | "link" | "sfb" | "catalog"; value: string | number; unit?: string; choices?: Choice[];
   /** A custom property or a note can be taken away. */
   removable?: boolean; target?: LinkTarget;
   /** An NL-SfB code: the table the picker searches, the name of the code that is set, and the codes usually given to this kind of element. */
   table?: number; text?: string; suggest?: SfbEntry[];
+  /** A schema-backed IFC, OmniClass or UniFormat/Assembly Code picker. */
+  catalog?: "ifc" | "omniclass" | "assembly"; catalog_suggest?: CatalogEntry[];
 }
 export interface SfbEntry { table: number; code: string; nl: string; en: string }
+export interface CatalogEntry { code: string; title: string; table?: number; mapped?: string[]; predefined_types?: string[]; occurrence?: string }
 export interface PropGroup {
   title: string; rows: PropRow[];
   /** A button under the rows that opens a dialog (``issue``: issue a revision of the sheet). */
