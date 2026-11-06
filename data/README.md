@@ -3,7 +3,7 @@
 SPADRA supports three distinct classifications:
 
 - NL-SfB: existing official 0–4 tables in nl_sfb.json (unchanged).
-- OmniClass: Table 21 Elements and Table 23 Products (licensed CSI Crosswalk API or private authorized data).
+- OmniClass: **all 15 CSI table facets** (Tables 11–14, 21–23, 31–36, 41 and 49) through licensed CSI Crosswalk or private authorized data. Table 21 and Table 23 are shown as primary model properties, with the other 13 under a collapsed "OmniClass (Other tables)" section.
 - IFC 4.3 ADD2: 128 concrete IfcTypeProduct classes and EXPRESS predefined-type enumerations in ifc_type_products.json.
 
 ## IFC type products
@@ -26,7 +26,7 @@ SPADRA now supports **two complete-data sources**, using the same existing class
 
 ### Option A — Official CSI Crosswalk API (recommended)
 
-CSI publishes the Crosswalk v3 GraphQL API and supplies API keys to licensed users. This API provides searchable, official OmniClass tables (including T21 and T23), UniFormat and authoritative UniFormat→OmniClass crosswalks. Request appropriate access and software rights from CSI, then set the server-side environment variable:
+CSI publishes the Crosswalk v3 GraphQL API and supplies API keys to licensed users. This API provides searchable official OmniClass classifications across **all 15 tables**, UniFormat and authoritative UniFormat→OmniClass crosswalks. Request appropriate access and software rights from CSI, then set the server-side environment variable:
 
     SPADRA_CSI_CROSSWALK_KEY=<your licensed key>
 
@@ -44,7 +44,7 @@ From the SLAI root, with SPADRA installed under applications/SPADRA/:
 
     python -m applications.SPADRA.classifications --authorized --edition "YOUR LICENSED EDITION" --table21 "C:/private/Table21.xlsx" --table23 "C:/private/Table23.xlsx" --assembly "C:/private/UniFormat.csv" --mapping "C:/private/VerifiedCrosswalk.csv"
 
-The --assembly and --mapping options are **optional**. Importing Table 21 and 23 alone supports searching and manual assignment; automatic Assembly Code → Table 21 requires either a verified local mapping CSV or the licensed API. CSV/Excel table columns accepted: "OmniClass Number" or "Code", and "Title"/"Description" (alternatively "Level N Title", deepest nonempty level). Mapping CSV columns: assembly_code, omniclass_code, table, verified, source. Each mapping must explicitly have verified=true and table=21. UniFormat CSV uses "Assembly Code" and "Assembly Description".
+To import any of the other 13 tables, repeat --extra-table NUMBER=PATH, for example --extra-table "13=C:/private/Table13.xlsx" --extra-table "41=C:/private/Table41.xlsx". The --assembly, --mapping, and --extra-table options are **optional**. Importing Table 21 and 23 alone supports searching and manual assignment; automatic Assembly Code → Table 21 requires either a verified local mapping CSV or the licensed API. CSV/Excel table columns accepted: "OmniClass Number" or "Code", and "Title"/"Description" (alternatively "Level N Title", deepest nonempty level). Mapping CSV columns: assembly_code, omniclass_code, table, verified, source. Each mapping must explicitly have verified=true and table=21. UniFormat CSV uses "Assembly Code" and "Assembly Description".
 
 The importer validates table prefixes, unique codes, editions and mapping targets, writes the new catalog atomically, and stores it at data/omniclass.local.json (gitignored) by default. It never uploads the licensed content.
 
@@ -59,7 +59,8 @@ Local catalog format (placeholders are not actual classification codes):
       "edition": "YOUR LICENSED EDITION",
       "tables": {
         "21": [{"code": "<licensed-code>", "title": "<licensed-title>"}],
-        "23": [{"code": "<licensed-code>", "title": "<licensed-title>"}]
+        "23": [{"code": "<licensed-code>", "title": "<licensed-title>"}],
+        "13": [{"code": "<authorized-space-code>", "title": "<authorized-space-title>"}]
       },
       "assemblies": [{"code": "<your UniFormat code>", "title": "<licensed or authorized UniFormat description>"}],
       "assembly_mappings": [{
@@ -79,6 +80,7 @@ Mapping rules: A selected Assembly Code autofills OmniClass **Table 21** only wh
 - GET /api/classifications/search?kind=ifc&q=Wall
 - GET /api/classifications/search?kind=assembly&q=A
 - GET /api/classifications/search?kind=omniclass&table=21&q=wall
+- GET /api/classifications/search?kind=omniclass&table=13&q=space (or any other supported table)
 
 Properties live in SGEO spadra: metadata and travel with supported SPADRA native save, undo/redo, and native SGEO exchange. IFC metadata fields are not a claim of complete IFC exchange support.
 
