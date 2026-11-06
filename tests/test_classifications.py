@@ -171,6 +171,139 @@ class OmniClassWithPrivateCatalog(unittest.TestCase):
             self.assertEqual(CL.read(meta, "ifc_predefined_type"), "SHEAR")
 
 
+
+class AuthorizedCsvImport(unittest.TestCase):
+    def test_imports_both_tables_and_uni_format_without_committing_licensed_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp)
+            t21 = p / "table21.csv"
+            t23 = p / "table23.csv"
+            ass = p / "assemblies.csv"
+            t13 = p / "table13.csv"
+            mapping = p / "crosswalk.csv"
+            target = p / "private-catalog.json"
+            t21.write_text("OmniClass Number,Level 1 Title,Level 2 Title\n21-FAKE-01,Synthetic Element,\n21-FAKE-02,Synthetic Element,Synthetic Part\n", encoding="utf-8")
+            t23.write_text("Code,Title\n23-FAKE-01,Synthetic Product\n", encoding="utf-8")
+            t13.write_text("Code,Title\n13-FAKE-01,Synthetic Space\n", encoding="utf-8")
+            ass.write_text("Assembly Code,Assembly Description\nTEST-A,Test Shell System\nTEST-B,Unmapped System\n", encoding="utf-8")
+            mapping.write_text("assembly_code,omniclass_code,table,verified,source\nTEST-A,21-FAKE-01,21,true,Synthetic crosswalk\n", encoding="utf-8")
+            counts = CL.import_authorized_catalog(table21=t21, table23=t23,
+                edition="SYNTHETIC", output=target, assembly=ass, mapping=mapping,
+                other_tables={13: t13})
+            self.assertEqual(counts, {"table21": 2, "table23": 1,
+                                      "assembly_codes": 2, "verified_mappings": 1})
+            with patch.dict(os.environ, {"SPADRA_OMNICLASS_CATALOG": str(target),
+                                          "SPADRA_CSI_CROSSWALK_KEY": ""}):
+                self.assertEqual(CL.search("assembly", "Unmapped")[0]["code"], "TEST-B")
+                self.assertEqual(len(CL.info()["omniclass"]["supported_tables"]), 15)
+                self.assertEqual(CL.search("omniclass", "Synthetic Space", table=13)[0]["code"],
+                                 "13-FAKE-01")
+                self.assertEqual(CL.search("omniclass", "Synthetic Part", table=21)[0]["code"],
+                                 "21-FAKE-02")
+                self.assertEqual(CL.search("omniclass", "Synthetic Product", table=23)[0]["code"],
+                                 "23-FAKE-01")
+            before = target.read_bytes()
+            mapping.write_text("assembly_code,omniclass_code,table,verified,source\nTEST-A,23-FAKE-01,23,true,Incorrect\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                CL.import_authorized_catalog(table21=t21, table23=t23,
+                    edition="SYNTHETIC", output=target, mapping=mapping)
+            self.assertEqual(target.read_bytes(), before)
+
+    def test_does_not_silently_import_unverified_mapping(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "crosswalk.csv"
+            path.write_text("assembly_code,omniclass_code,verified,source\nA,21-FAKE-01,false,Synthetic\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                CL._mapping_entries(path)
+
+
+class CsiCrosswalkLiveAdapter(unittest.TestCase):
+    """Contract tests against the CSI v3 documented GraphQL shape; no live key or dataset."""
+    def setUp(self):
+        self.patcher = patch.dict(os.environ, {
+            "SPADRA_CSI_CROSSWALK_KEY": "FAKE-MOCKED-KEY",
+            "SPADRA_OMNICLASS_CATALOG": "",
+        })
+        self.patcher.start()
+        self.addCleanup(self.patcher.stop)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        local_missing = Path(tmp.name) / "missing.json"
+        p = patch.object(CL, "_catalog_path", return_value=local_missing)
+        p.start()
+        self.addCleanup(p.stop)
+        self.project = Project.create("CSI Contract")
+        self.wall = self.project.execute("model.add_wall", {
+            "start": [0, 0], "end": [4000, 0], "thickness": 200, "height": 3,
+            "level": self.project.manifest["levels"][0]["id"],
+        })["result"]["id"]
+
+    def _mock_response(self, *, ambiguous=False):
+        def request_handler(request, timeout):
+            self.assertEqual(request.full_url, CL.CSI_API_URL)
+            self.assertEqual(request.get_header("Authorization"), "FAKE-MOCKED-KEY")
+            query = json.loads(request.data)["query"]
+            if 'id: "uniformat"' in query:
+                if "crosswalks" in query:
+                    matches = [{"number": "21-FAKE-01", "title": "Synthetic wall",
+                                "standards": [{"name": "OmniClass", "version": "2012"}]}]
+                    if ambiguous:
+                        matches.append({"number": "21-FAKE-02", "title": "Another",
+                                        "standards": [{"name": "OmniClass", "version": "2012"}]})
+                    classes = [{"number": "TEST-A", "title": "Test Assembly",
+                                "crosswalks": matches}]
+                else:
+                    classes = [{"number": "TEST-A", "title": "Test Assembly"}]
+            elif 'id: "omniclass"' in query:
+                if 'table: "23"' in query:
+                    classes = [{"number": "23-FAKE-01", "title": "Synthetic product"}]
+                else:
+                    classes = [{"number": "21-FAKE-01", "title": "Synthetic wall"}]
+            else:
+                raise AssertionError("Unexpected mocked GraphQL query")
+            payload = json.dumps({"data": {"standards": [
+                {"name": "OmniClass", "version": "2012", "classifications": classes}
+            ]}}).encode("utf-8")
+            class Response:
+                def __enter__(self): return self
+                def __exit__(self, *args): return None
+                def read(self, _): return payload
+            return Response()
+        return request_handler
+
+    def test_licensed_crosswalk_search_and_exact_validation(self):
+        with patch.object(CL.urlrequest, "urlopen", side_effect=self._mock_response()):
+            self.assertEqual(CL.info()["omniclass"]["provider"], "csi_crosswalk")
+            self.assertEqual(CL.search("assembly", "TEST")[0]["code"], "TEST-A")
+            self.assertEqual(CL.search("omniclass", "wall", table=21)[0]["code"], "21-FAKE-01")
+            self.assertEqual(len(CL.info()["omniclass"]["supported_tables"]), 15)
+            self.assertEqual(CL._manual_omni("21-FAKE-01", 21), "21-FAKE-01")
+            with self.assertRaises(BadRequest):
+                CL._manual_omni("INVALID", 21)
+            self.project.execute("model.set_property", {"id": self.wall, "key": "assembly_code",
+                                                         "value": "TEST-A"})
+        meta = self.project.model.get(self.wall)["metadata"]
+        self.assertEqual(CL.read(meta, "omniclass_21"), "21-FAKE-01")
+        self.assertEqual(CL.read(meta, "omniclass_21_origin"), "auto")
+        self.assertIn("CSI Crosswalk", CL.read(meta, "omniclass_21_source"))
+        self.assertEqual(CL.read(meta, "omniclass_23"), "")
+
+    def test_many_to_many_crosswalk_does_not_guess(self):
+        with patch.object(CL.urlrequest, "urlopen", side_effect=self._mock_response(ambiguous=True)):
+            self.project.execute("model.set_property", {"id": self.wall, "key": "assembly_code",
+                                                         "value": "TEST-A"})
+        self.assertEqual(CL.read(self.project.model.get(self.wall)["metadata"], "omniclass_21"), "")
+
+    def test_bad_credentials_do_not_echo_api_key(self):
+        from urllib.error import HTTPError
+        from ...tools.errors import DependencyMissing
+        with patch.object(CL.urlrequest, "urlopen",
+                          side_effect=HTTPError(CL.CSI_API_URL, 401, "Unauthorized", {}, None)):
+            with self.assertRaises(DependencyMissing) as error:
+                CL.search("omniclass", "wall")
+        self.assertNotIn("FAKE-MOCKED-KEY", str(error.exception))
+
+
 class Http(ServerCase):
     def test_ifc_search_endpoint_uses_real_schema(self):
         data = self.api.get("/api/classifications")

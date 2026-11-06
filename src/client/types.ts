@@ -144,6 +144,8 @@ export interface SfbEntry { table: number; code: string; nl: string; en: string 
 export interface CatalogEntry { code: string; title: string; table?: number; mapped?: string[]; predefined_types?: string[]; occurrence?: string }
 export interface PropGroup {
   title: string; rows: PropRow[];
+  /** Advanced classification groups start collapsed without hiding their data. */
+  collapsed?: boolean;
   /** A button under the rows that opens a dialog (``issue``: issue a revision of the sheet). */
   action?: { label: string; dialog: string };
   /** A form to add a row: ``custom`` (a custom property) or ``note`` (a sheet note). */
