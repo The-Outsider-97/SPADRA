@@ -212,8 +212,10 @@ def augment(project: Any, oid: str, out: dict[str, Any], relations: bool = False
         out["groups"].append({"title": "Array", "rows": item})
     out["groups"].append(SF.rows_for(meta, cat))
     out["groups"].extend(CL.groups_for(meta, cat))
+    from . import bimdata as BD
+    out["groups"].extend(BD.groups_for(project, oid))
     custom = custom_of(meta)
-    out["groups"].append({"title": "Custom properties", "rows": [
+    out["groups"].append({"title": "Custom properties (not buildingSMART)", "rows": [
         {"key": f"custom:{n}", "label": n, "type": "choice" if isinstance(v, bool) else "number" if isinstance(v, (int, float)) else "text",
          "value": ("true" if v else "false") if isinstance(v, bool) else v, "removable": True,
          **({"choices": [{"value": "true", "label": "Yes"}, {"value": "false", "label": "No"}]} if isinstance(v, bool) else {})} for n, v in sorted(custom.items())],

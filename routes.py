@@ -358,6 +358,13 @@ def classification_search(app: SpadraApp, req: Request) -> Any:
     return {"results": CL.search(kind, q, table=table, limit=limit)}
 
 
+@router.route("GET", "/api/classifications/browse")
+def classification_browse(app: SpadraApp, req: Request) -> Any:
+    """One level of the imported UniFormat / assembly-code tree under ``parent`` (top level when absent)."""
+    from . import classifications as CL
+    return CL.browse(choice(req.query.get("kind", "assembly"), ("assembly",), "kind"), text(req.query.get("parent") or "", "parent", 100, empty=True))
+
+
 # ---------------------------------------------------------------------------------------------------------------- NL-SfB
 @router.route("GET", "/api/sfb")
 def sfb_info(app: SpadraApp, req: Request) -> Any:
@@ -503,6 +510,33 @@ def export_report(app: SpadraApp, req: Request) -> Any:
         return file_response(data, f"{slug(entry['name'])}.sldc", "application/x-slai-sldc+zip")
 
 
+@router.route("GET", "/api/export/sheet/{sheet}")
+def export_sheet(app: SpadraApp, req: Request) -> Any:
+    """The sheet as a .sldc file: the sheet as a person reads it plus, in an extension, everything the sheet draws (see sheets.to_sldc)."""
+    from . import sheets as SH
+    with app.lock:
+        data, name = SH.to_sldc(app.require(), req.params["sheet"])
+        return file_response(data, name, "application/x-slai-sldc+zip")
+
+
+@router.route("GET", "/api/export/sheet/{sheet}/verify")
+def verify_sheet_export(app: SpadraApp, req: Request) -> Any:
+    """Export the sheet, read the file back and list every difference from the sheet as it is now (none means the file preserves it)."""
+    from . import sheets as SH
+    with app.lock:
+        project = app.require()
+        data, _ = SH.to_sldc(project, req.params["sheet"])
+        return SH.verify_sldc(project, data, req.params["sheet"])
+
+
+@router.route("GET", "/api/model/{id}/layers/{layer}/preview")
+def layer_preview(app: SpadraApp, req: Request) -> Any:
+    """What a layer would be cut by if its openings were set like this (``?openings=all|none|selected&ids=a,b``): read-only, nothing is changed."""
+    with app.lock:
+        ids = [i for i in str(req.query.get("ids", "")).split(",") if i]
+        return app.require().layer_preview(req.params["id"], req.params["layer"], str(req.query.get("openings", "all")), ids)
+
+
 @router.route("GET", "/api/export/schedule/{view}")
 def export_schedule(app: SpadraApp, req: Request) -> Any:
     from .documentation import schedule_csv
@@ -573,3 +607,86 @@ def diagnostics(app: SpadraApp, req: Request) -> Any:
     except (TypeError, ValueError):
         raise BadRequest("limit must be a whole number from 1 to 500") from None
     return {"entries": app.diagnostics.recent(integer(limit, "limit", 1, 500))}
+
+
+# ----------------------------------------------------------------------------------------------------------------------- BIM data
+@router.route("GET", "/api/bim")
+def bim_info(app: SpadraApp, req: Request) -> Any:
+    from . import bimdata as BD
+    return BD.info()
+
+
+@router.route("GET", "/api/bim/properties/search")
+def bim_search(app: SpadraApp, req: Request) -> Any:
+    from . import bimdata as BD
+    return {"results": BD.search(text(req.query.get("q") or "", "q", 80, empty=True), entity=text(req.query.get("entity") or "", "entity", 40, empty=True) or None,
+                                 limit=integer(int(req.query.get("limit") or 40) if str(req.query.get("limit") or "40").isdigit() else 40, "limit", 1, 200))}
+
+
+@router.route("POST", "/api/bim/quantities")
+def bim_quantities(app: SpadraApp, req: Request) -> Any:
+    from . import bimdata as BD
+    body = req.json()
+    with app.lock:
+        return BD.schedule(app.require(), body.get("ids"), body.get("set"))
+
+
+@router.route("POST", "/api/bim/exchange")
+def bim_exchange(app: SpadraApp, req: Request) -> Any:
+    from . import bimdata as BD
+    body = req.json()
+    with app.lock:
+        return BD.exchange(app.require(), body.get("ids"))
+
+
+@router.route("GET", "/api/bsdd/dictionaries")
+def bsdd_dictionaries(app: SpadraApp, req: Request) -> Any:
+    from . import bimdata as BD
+    return BD.CLIENT.dictionaries(offline=req.query.get("offline") == "1")
+
+
+@router.route("GET", "/api/bsdd/search")
+def bsdd_search(app: SpadraApp, req: Request) -> Any:
+    from . import bimdata as BD
+    return BD.CLIENT.search(text(req.query.get("q") or "", "q", 100), dictionary=text(req.query.get("dictionary") or "", "dictionary", 300, empty=True),
+                            offline=req.query.get("offline") == "1")
+
+
+@router.route("GET", "/api/bsdd/class")
+def bsdd_class(app: SpadraApp, req: Request) -> Any:
+    from . import bimdata as BD
+    return BD.CLIENT.class_detail(text(req.query.get("uri") or "", "uri", 400), offline=req.query.get("offline") == "1")
+
+
+@router.route("POST", "/api/bsdd/suggest")
+def bsdd_suggest(app: SpadraApp, req: Request) -> Any:
+    from . import bimdata as BD
+    body = req.json()
+    with app.lock:
+        project = app.require()
+        oid = text(body.get("id"), "id", 80)
+        if not BD.E.alive(project, oid):
+            raise NotFound(f"Element {oid} does not exist")
+        return BD.suggest(project, oid, dictionary=str(body.get("dictionary") or ""), offline=bool(body.get("offline", False)))
+
+
+@router.route("GET", "/api/ids")
+def ids_list(app: SpadraApp, req: Request) -> Any:
+    from . import requirements as RQ
+    with app.lock:
+        return {"files": RQ.listing(app.require())}
+
+
+@router.route("GET", "/api/ids/report")
+def ids_report(app: SpadraApp, req: Request) -> Any:
+    from . import requirements as RQ
+    with app.lock:
+        return RQ.ids_report(app.require(), text(req.query.get("id") or "", "id", 40))
+
+
+@router.route("GET", "/api/ils")
+def ils(app: SpadraApp, req: Request) -> Any:
+    from . import requirements as RQ
+    with app.lock:
+        project = app.require()
+        return {"config": RQ.ils_config(project), "report": RQ.ils_report(project)}

@@ -203,6 +203,86 @@ def related(project: Any, oid: str) -> dict[str, list[dict[str, Any]]]:
     return {"walls": walls, "doors": doors, "windows": windows, "columns": columns}
 
 
+def _region_integral(outer: Sequence[Pt], holes: Sequence[Sequence[Pt]], plane: tuple[float, float, float]) -> tuple[float, float]:
+    """(area, ∫ z dA) of a plan region over a plane z = a·x + b·y + c. Exact: z is linear, so the integral is the area times z at the centroid."""
+    area = cx = cy = 0.0
+    for ring, sign in [(outer, 1.0)] + [(h, -1.0) for h in holes]:
+        m = metrics(ring)
+        area += sign * m["area"]
+        cx += sign * m["area"] * m["centre"][0]
+        cy += sign * m["area"] * m["centre"][1]
+    if area < 1e-12:
+        return 0.0, 0.0
+    cx, cy = cx / area, cy / area
+    return area, area * (plane[0] * cx + plane[1] * cy + plane[2])
+
+
+def enclosure(project: Any, oid: str) -> dict[str, Any]:
+    """The volume a room encloses, from the model around it rather than from a typed height: from the top of the floor under it to the underside of
+    the lowest floor or roof above it, the roof's slopes included, integrated exactly over the room's outline. The ceiling is the element that is lowest
+    above the room's centre; where it does not cover the whole outline the rest uses the room's height parameter, and ``basis`` says so. A room
+    with no floor or roof above it has its height parameter all through."""
+    from . import planar as P
+    meta = E.meta_of(project, oid)
+    poly = boundary_of(meta)
+    level = str(E.m(meta, "level"))
+    level_z = E.level_elevation(project, level)
+    area = metrics(poly)["area"]
+    centre = metrics(poly)["centre"]
+    parameter = float(E.m(meta, "height", DEFAULT_HEIGHT))
+    floor_z, floor_id = level_z, None
+    for fid in E.element_ids(project):
+        fm = E.meta_of(project, fid)
+        if E.m(fm, "category") == "floor" and E.m(fm, "level") == level and contains([(float(q[0]), float(q[1])) for q in E.m(fm, "boundary")], centre):
+            top = level_z + float(E.m(fm, "offset", 0.0))
+            if floor_id is None or top > floor_z:
+                floor_z, floor_id = top, fid
+    candidates: list[tuple[float, str, list[Any]]] = []                               # (underside at the centre, element id, facets)
+    for eid in E.element_ids(project):
+        em = E.meta_of(project, eid)
+        cat = E.m(em, "category")
+        if cat == "floor" and E.m(em, "level") != level:
+            top = E.level_elevation(project, str(E.m(em, "level"))) + float(E.m(em, "offset", 0.0))
+            facets: list[Any] = [([(float(q[0]), float(q[1])) for q in E.m(em, "boundary")], (0.0, 0.0, top - float(E.m(em, "thickness"))))]
+        elif cat == "roof":
+            facets = E.roof_facets(project, em)
+        else:
+            continue
+        for ring, plane in facets:
+            if contains(ring, centre):
+                z = plane[0] * centre[0] + plane[1] * centre[1] + plane[2]
+                if z > floor_z + 0.05:
+                    candidates.append((z, eid, facets))
+                break
+    if not candidates:
+        return {"volume": area * parameter, "height": parameter, "basis": "height", "floor": floor_id, "ceiling": None, "covered": 0.0, "floor_z": floor_z}
+    _, ceiling, facets = min(candidates, key=lambda c: c[0])
+    covered = integral = 0.0
+    for ring, plane in facets:
+        try:
+            regions = P.intersection(poly, ring)
+        except P.PlanarError:
+            continue
+        for outer, holes in regions:
+            a, i = _region_integral(outer, holes, plane)
+            covered += a
+            integral += i
+    covered = min(covered, area)
+    volume = (integral - covered * floor_z) + max(0.0, area - covered) * parameter
+    full = area - covered < 1e-6 * max(area, 1.0)
+    return {"volume": volume, "height": volume / area if area > 1e-12 else 0.0, "basis": "enclosure" if full else "enclosure+height", "floor": floor_id,
+            "ceiling": ceiling, "covered": covered / area if area > 1e-12 else 0.0, "floor_z": floor_z}
+
+
+def basis_text(d: Mapping[str, Any]) -> str:
+    """Where a room's volume comes from, in words for the Properties panel and the calculator."""
+    if d["volume_basis"] == "enclosure":
+        return "from the floor below to the floor or roof above"
+    if d["volume_basis"] == "enclosure+height":
+        return f"floor to the floor or roof above over {d['covered'] * 100:.1f} % of the room, the height parameter over the rest"
+    return "area × height"                                                           # nothing above the room: the height parameter alone
+
+
 def data(project: Any, oid: str) -> dict[str, Any]:
     """Everything a room schedule row or the Properties panel needs, from the outline and the model."""
     meta = E.meta_of(project, oid)
@@ -210,5 +290,7 @@ def data(project: Any, oid: str) -> dict[str, Any]:
     met = metrics(poly)
     height = float(E.m(meta, "height", DEFAULT_HEIGHT))
     rel = related(project, oid)
-    return {"area": met["area"], "perimeter": met["perimeter"], "centre": met["centre"], "height": height, "volume": met["area"] * height,
+    box = enclosure(project, oid)
+    return {"area": met["area"], "perimeter": met["perimeter"], "centre": met["centre"], "height": box["height"], "volume": box["volume"],
+            "volume_basis": box["basis"], "ceiling": box["ceiling"], "floor_surface": box["floor"], "covered": box["covered"], "parameter_height": height,
             "number": str(E.m(meta, "number", "")), "level": E.m(meta, "level"), **rel}

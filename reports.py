@@ -23,7 +23,7 @@ from . import elements as E
 from . import sheets as SH
 
 SECTIONS = {"summary": "Project and model summary", "levels": "Levels", "schedules": "Schedules", "materials": "Material quantities", "sheets": "Sheets and revisions",
-            "checks": "Model check"}
+            "checks": "Model check", "requirements": "Information requirements (ILS and IDS)"}
 MAX_REPORTS = 50
 MAX_REPORT_BYTES = 24 * 1024 * 1024
 MAX_ISSUES_LISTED = 200
@@ -106,6 +106,26 @@ def _blocks(project: Any, sections: list[str]) -> list[dict[str, Any]]:
             if len(result["issues"]) > len(shown):
                 out.append(_para(f"{len(result['issues']) - len(shown)} further finding(s) are not listed."))
         out += [_heading("What this check does not do", 3)] + [S.make_block("list_item", t) for t in result["limitations"]]
+    if "requirements" in sections:
+        from . import requirements as RQ
+        ils = RQ.ils_report(project)
+        out.append(_heading(SECTIONS["requirements"]))
+        if not ils["enabled"] and not RQ.listing(project):
+            out.append(_para("No information requirements are active: the BIM basis ILS is off and the project holds no IDS file."))
+        if ils["enabled"]:
+            out += [_heading(f"BIM basis ILS - {ils['edition']}", 3),
+                    _table(["Requirement", "Source", "Grade", "Applies to", "Met", "Not met"],
+                           [[f"{r['id']} {r['title']}", r["source"], r["severity"] if r["enabled"] else "off", r["applicable"], r["passed"], r["failed"]] for r in ils["rules"]]),
+                    _para(ils["note"])]
+        for entry in RQ.listing(project):
+            res = RQ.ids_report(project, entry["id"])
+            out.append(_heading(f"IDS - {entry['title']} ({entry['filename']})", 3))
+            if not res["result"]:
+                out.append(_para("This IDS file has not been validated yet."))
+                continue
+            out.append(_table(["Specification", "Result", "Applicable", "Passed", "Failed", "Not evaluable"],
+                              [[x["name"], x["status"], x["applicable"], x["passed"], x["failed"], x["not_evaluable"]] for x in res["result"]["specs"]]))
+            out.append(_para(("This result is out of date: the model changed after it was validated. " if res["stale"] else "") + res["result"]["limits"]))
     return out
 
 

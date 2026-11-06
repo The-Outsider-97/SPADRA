@@ -586,7 +586,38 @@ def _put(project: Any, oid: str, changes: Mapping[str, Any]) -> None:
             meta.pop(full, None)
         else:
             meta[full] = value
+    used = any(meta.get("spadra:" + k) for k in ("assembly_code", *("omniclass_" + str(t) for t in OMNICLASS_TABLES)))
+    cs = catalog()
+    edition = (cs["edition"] if cs is not None else "CSI Crosswalk v3 (live service)" if _csi_key() else "") if used else ""
+    if edition:                                                                  # which edition the codes were taken from travels with the codes
+        meta["spadra:classification_edition"] = edition
+    else:
+        meta.pop("spadra:classification_edition", None)
     project.model.attach_semantics(oid, meta, replace=True)
+
+def browse(kind: str, parent: str = "", limit: int = 200) -> dict[str, Any]:
+    """The classification tree of a locally imported catalogue, one level at a time. A code's children are the codes that extend it and have no other
+    code between: the hierarchy is read from the codes themselves, nothing is added. A live CSI connection is searched, not browsed."""
+    if kind != "assembly":
+        raise BadRequest("Only the assembly (UniFormat) classification is browsed; OmniClass is searched")
+    cs = catalog()
+    if cs is None:
+        return {"parent": parent, "children": [], "available": False,
+                "reason": "browsing needs an imported catalogue; with the CSI service connected, search instead" if _csi_key() else "no assembly catalogue is configured (licensed data)"}
+    rows = {}
+    for key, row in cs["assemblies"].items():
+        rows[row["code"]] = row["title"]
+    for mappings in cs["mappings"].values():
+        rows.setdefault(mappings[0]["assembly_code"], "UniFormat assembly")
+    codes = sorted(rows, key=lambda c: (len(c), c))
+    base = parent.strip()
+    if base and base not in rows:
+        raise BadRequest("That code is not in the assembly catalogue")
+    kids = [c for c in codes if c != base and c.startswith(base)]
+    direct = [c for c in kids if not any(o != c and o != base and c.startswith(o) and o in kids for o in kids)]
+    out = [{"code": c, "title": rows[c], "children": sum(1 for o in kids if o != c and o.startswith(c)),
+            "mapped": [x["omniclass_code"] for x in cs["mappings"].get(c.casefold(), [])]} for c in direct]
+    return {"parent": base, "children": out[:limit], "available": True, "edition": cs["edition"], "truncated": len(out) > limit}
 
 def _manual_omni(value: Any, table: int) -> str | None:
     if value is None or (isinstance(value, str) and not value.strip()):

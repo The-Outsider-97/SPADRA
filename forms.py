@@ -34,6 +34,7 @@ from ..tools.errors import BadRequest
 from ..tools.validation import boolean, number, text
 from . import cutting as CU
 from . import elements as E
+from . import layers as LY
 from . import geometry as G
 from . import planar as P
 
@@ -41,6 +42,7 @@ Pt = tuple[float, float]
 CATEGORIES = ("extrusion", "void", "sweep")
 SHAPES = ("rectangle", "round")
 ROUND_SEGMENTS = 24
+ARC_SEGMENTS = 6                       # segments in a quarter-circle when a corner is rounded
 MITER_LIMIT = 4.0
 TOL = 1e-6
 VOID_BASE = -0.5                       # a void made without numbers starts half a metre below its level and stands 4 m: through a slab and a storey wall
@@ -259,6 +261,17 @@ def _cuts(project: Any, oid: str, vs: Sequence[Mapping[str, Any]], policy: bool 
     if cat == "floor":
         top = E.level_elevation(project, E.m(meta, "level")) + float(E.m(meta, "offset", 0.0))
         z0, z1 = top - float(E.m(meta, "thickness")), top
+        from . import layers as LY
+        if LY.is_layered(meta):                                              # each layer is cut by the voids it inherits, over its own height range
+            outline = [(float(q[0]), float(q[1])) for q in E.m(meta, "boundary")]
+            cuts_, sig, notes = [], [], []
+            for lay in LY.stack(project, oid):
+                mine = LY.inherited(lay, [v["id"] for v in vs])
+                c, n = holes_for([v for v in vs if v["id"] in mine], outline, top - lay["offset"] - lay["thickness"], top - lay["offset"], f"{label} ({lay['name']})")
+                cuts_.append(c)
+                sig.append([[_round(h) for h in c.holes], _round(c.outline) if c.outline else []])
+                notes.extend(n)
+            return sig, notes, cuts_
     else:
         z0, z1 = z_range(project, meta)
     outline = [(float(q[0]), float(q[1])) for q in E.m(meta, "boundary" if cat == "floor" else "profile")]
@@ -270,6 +283,8 @@ def _stored(meta: Mapping[str, Any]) -> Any:
     """What an element's metadata says its cuts were when it was last built, in the shape ``_cuts`` returns them."""
     if E.m(meta, "category") == "wall":
         return E.m(meta, "cut") or []
+    if E.m(meta, "category") == "floor" and LY.is_layered(meta):
+        return E.m(meta, "cut_layers") or []
     return [E.m(meta, "cut") or [], E.m(meta, "cut_outline") or []]
 
 
@@ -282,6 +297,8 @@ def remember_cuts(project: Any, oid: str, vs: Sequence[Mapping[str, Any]] | None
     if sig != _stored(meta):
         if E.m(meta, "category") == "wall":
             E._attach(project, oid, {"cut": sig, "cutflag": bool(sig)})
+        elif E.m(meta, "category") == "floor" and LY.is_layered(meta):
+            E._attach(project, oid, {"cut_layers": sig, "cut": sig[0][0], "cut_outline": sig[0][1], "cutflag": any(h or o for h, o in sig)})
         else:
             E._attach(project, oid, {"cut": sig[0], "cut_outline": sig[1], "cutflag": bool(sig[0] or sig[1])})
     return cuts
@@ -290,11 +307,11 @@ def remember_cuts(project: Any, oid: str, vs: Sequence[Mapping[str, Any]] | None
 def reconcile(project: Any) -> int:
     """Rebuild whatever a void now cuts differently (a void made, moved, resized, converted or deleted; a wall or floor moved under one).
     Runs inside every model command; an element left with nothing to cut is rebuilt whole. Returns how many elements were rebuilt."""
+    rebuilt = follow_fixed(project)                                            # sweeps fixed to an element move with it
     vs = voids(project)
     flagged = set(project.model.query_ids(metadata={f"{E.NS}:cutflag": True}, limit=10_000))
     if not vs and not flagged:
-        return 0
-    rebuilt = 0
+        return rebuilt
     for oid in (_targets(project) if vs else sorted(flagged)):
         sig = _cuts(project, oid, vs)[0]
         if sig != _stored(E.meta_of(project, oid)):
@@ -396,6 +413,91 @@ def section_polygon(shape: str, width: float, height: float) -> list[list[float]
     raise BadRequest(f"shape must be one of {', '.join(SHAPES)}")
 
 
+PIVOTS = ("top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right")
+PIVOT_LABELS = {"top-left": "Top left", "top": "Top", "top-right": "Top right", "left": "Left", "center": "Centre", "right": "Right",
+                "bottom-left": "Bottom left", "bottom": "Bottom", "bottom-right": "Bottom right"}
+USER_KEYS = ("pivot", "angle", "mirror", "radius", "offset_x", "offset_y", "offset_z")
+
+
+def pivot_point(polygon: Sequence[Sequence[float]], pivot: str) -> tuple[float, float]:
+    """Where the pivot sits on the bounding box of the drawn polygon: one of nine positions, the centre by default."""
+    if pivot not in PIVOTS:
+        raise BadRequest(f"pivot alignment must be one of {', '.join(PIVOTS)}")
+    us, vs = [q[0] for q in polygon], [q[1] for q in polygon]
+    lo_u, hi_u, lo_v, hi_v = min(us), max(us), min(vs), max(vs)
+    col = "left" if pivot.endswith("left") or pivot == "left" else "right" if pivot.endswith("right") or pivot == "right" else "mid"
+    row = "top" if pivot.startswith("top") else "bottom" if pivot.startswith("bottom") else "mid"
+    return ({"left": lo_u, "right": hi_u, "mid": (lo_u + hi_u) / 2}[col], {"top": hi_v, "bottom": lo_v, "mid": (lo_v + hi_v) / 2}[row])
+
+
+def round_corners(polygon: Sequence[Sequence[float]], radius: float) -> list[list[float]]:
+    """Every corner of a polygon replaced by a circular arc of ``radius`` (m). A corner whose tangent length would be more than half of either
+    neighbouring edge gets the largest radius that fits, so neighbouring arcs never overlap and no edge disappears."""
+    n = len(polygon)
+    if radius <= 1e-9 or n < 3:
+        return [list(map(float, q)) for q in polygon]
+    pts = [tuple(map(float, q)) for q in polygon]
+    out: list[list[float]] = []
+    for i in range(n):
+        p0, p1, p2 = pts[i - 1], pts[i], pts[(i + 1) % n]
+        a, b = G.unit(G.sub(p0, p1)), G.unit(G.sub(p2, p1))
+        cosang = max(-1.0, min(1.0, G.dot(a, b)))
+        angle = math.acos(cosang)                                              # the angle between the two edges at this corner
+        if angle < 1e-6 or abs(angle - math.pi) < 1e-6:                        # a spike or a straight run: nothing to round
+            out.append(list(p1))
+            continue
+        tangent = radius / math.tan(angle / 2)
+        room = min(math.dist(p0, p1), math.dist(p1, p2)) / 2
+        if tangent > room:
+            tangent = room
+        r = tangent * math.tan(angle / 2)
+        start, end = G.add(p1, G.mul(a, tangent)), G.add(p1, G.mul(b, tangent))
+        bis = G.unit(G.add(a, b))
+        centre = G.add(p1, G.mul(bis, r / math.sin(angle / 2)))
+        a0, a1 = math.atan2(start[1] - centre[1], start[0] - centre[0]), math.atan2(end[1] - centre[1], end[0] - centre[0])
+        sweep = (a1 - a0 + math.pi) % (2 * math.pi) - math.pi                  # the short way round
+        steps = max(2, int(math.ceil(abs(sweep) / (math.pi / 2) * ARC_SEGMENTS)))
+        for k in range(steps + 1):
+            t = a0 + sweep * k / steps
+            q = [centre[0] + r * math.cos(t), centre[1] + r * math.sin(t)]
+            if not out or math.dist(out[-1], q) > 1e-9:                         # arcs that meet at an edge's middle share that point
+                out.append(q)
+    if len(out) > 1 and math.dist(out[0], out[-1]) <= 1e-9:
+        out.pop()
+    return out
+
+
+def user_section(source: Mapping[str, Any]) -> list[list[float]]:
+    """The cross-section of a user-defined sweep from the polygon the person drew (``polygon``, (u, v) in metres: u across the path, v up) and its
+    settings: corners rounded, then the pivot moved to the path (``pivot``: nine positions on the polygon's bounding box), mirrored across the
+    path (``mirror``), then turned about the pivot (``angle``, degrees, counter-clockwise)."""
+    poly = [[float(q[0]), float(q[1])] for q in source["polygon"]]
+    px, py = pivot_point(poly, str(source.get("pivot", "center")))
+    pts = round_corners(poly, float(source.get("radius", 0.0)))
+    pts = [[q[0] - px, q[1] - py] for q in pts]
+    if source.get("mirror"):
+        pts = [[-q[0], q[1]] for q in pts][::-1]
+    angle = math.radians(float(source.get("angle", 0.0)))
+    c, s = math.cos(angle), math.sin(angle)
+    return [[q[0] * c - q[1] * s, q[0] * s + q[1] * c] for q in pts]
+
+
+def _user_source(raw: Mapping[str, Any], to_m: float) -> dict[str, Any]:
+    """Validate the settings of a user-defined profile. ``polygon`` is in drawing units."""
+    poly_raw = raw.get("polygon")
+    if not isinstance(poly_raw, (list, tuple)) or not 3 <= len(poly_raw) <= 200:
+        raise BadRequest("A user-defined profile needs a closed polygon of 3 to 200 points")
+    polygon = []
+    for q in poly_raw:
+        if not isinstance(q, (list, tuple)) or len(q) != 2:
+            raise BadRequest("Every point of the polygon must be [x, y]")
+        polygon.append([float(number(q[0], "x", -1e9, 1e9)) * to_m, float(number(q[1], "y", -1e9, 1e9)) * to_m])
+    if len(polygon) > 3 and math.dist(polygon[0], polygon[-1]) < 1e-9:
+        polygon.pop()
+    return {"polygon": polygon, "pivot": E._choice(raw.get("pivot", "center"), PIVOTS, "pivot"), "angle": number(raw.get("angle", 0.0), "angle", -360, 360),
+            "mirror": boolean(raw.get("mirror", False), "mirror"), "radius": number(raw.get("radius", 0.0), "radius", 0, 100000) / 1000.0}
+
+
 def _clean_section(raw: Any) -> list[list[float]]:
     if not isinstance(raw, (list, tuple)) or not 3 <= len(raw) <= 200:
         raise BadRequest("A section needs 3 to 200 points")
@@ -489,13 +591,83 @@ def sweep_mesh(path: Sequence[Sequence[float]], closed: bool, section: Sequence[
     return E._positive_volume((verts, faces))
 
 
+def anchor_of(project: Any, oid: str) -> list[float]:
+    """The reference point of an element a sweep is fixed to: the centre of its footprint and the foot of it, in metres."""
+    lo, hi = project.model.world_bounds(oid)
+    return [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]]
+
+
+def _follow(project: Any, meta: Mapping[str, Any]) -> list[float]:
+    """How far the element a sweep is fixed to has moved since the sweep was fixed to it: (dx, dy, dz)."""
+    host = E.m(meta, "fixed_to")
+    if not host or not E.alive(project, str(host)):
+        return [0.0, 0.0, 0.0]
+    now, then = anchor_of(project, str(host)), E.m(meta, "fixed_ref")
+    return [now[i] - float(then[i]) for i in range(3)]
+
+
+def placed(project: Any, meta: Mapping[str, Any]) -> tuple[list[list[float]], float]:
+    """The path (m) and the height of the section's origin as the sweep stands: the stored path and base, moved by the offsets X, Y, Z and by the
+    element it is fixed to."""
+    dx, dy, dz = _follow(project, meta)
+    ox, oy, oz = (float(E.m(meta, k, 0.0)) for k in ("offset_x", "offset_y", "offset_z"))
+    path = [[q[0] + ox + dx, q[1] + oy + dy] for q in E.m(meta, "path")]
+    return path, E.level_elevation(project, E.m(meta, "level")) + float(E.m(meta, "base", 0.0)) + oz + dz
+
+
 def regenerate_sweep(project: Any, oid: str) -> None:
     meta = E.meta_of(project, oid)
-    path, closed = E.m(meta, "path"), bool(E.m(meta, "closed", False))
+    closed = bool(E.m(meta, "closed", False))
+    source = E.m(meta, "profile_source")
+    if source:                                                                  # a user-defined profile: the section is derived from the polygon and its settings
+        E._attach(project, oid, {"section": _clean_section(user_section(source))})
+        meta = E.meta_of(project, oid)
     section = _clean_section(E.m(meta, "section"))
+    path, z0 = placed(project, meta)
     _check_path(path, closed)
-    z0 = E.level_elevation(project, E.m(meta, "level")) + float(E.m(meta, "base", 0.0))
     E._set_mesh(project, oid, sweep_mesh(path, closed, section, z0))
+    if E.m(meta, "fixed_to"):
+        E._attach(project, oid, {"fixed_seen": anchor_of(project, str(E.m(meta, "fixed_to")))})
+
+
+def fix_to(project: Any, oid: str, host: str | None) -> None:
+    """Fix a sweep to an element (it then moves with it), or release it (``None``): the sweep stays where it stands."""
+    meta = E.meta_of(project, oid)
+    if E.m(meta, "category") != "sweep":
+        raise BadRequest("Only a sweep can be fixed to an element")
+    if host:
+        if host == oid or not E.alive(project, host):
+            raise BadRequest("Choose another element that exists to fix the profile to")
+        E._attach(project, oid, {"fixed": True, "fixed_to": host, "fixed_ref": anchor_of(project, host), "fixed_seen": anchor_of(project, host)})
+    else:
+        dx, dy, dz = _follow(project, meta)                                     # released where it stands: what it followed becomes part of its offsets
+        E._attach(project, oid, {"fixed": False, "fixed_to": None, "fixed_ref": None, "fixed_seen": None, "offset_x": float(E.m(meta, "offset_x", 0.0)) + dx,
+                                 "offset_y": float(E.m(meta, "offset_y", 0.0)) + dy, "offset_z": float(E.m(meta, "offset_z", 0.0)) + dz})
+    regenerate_sweep(project, oid)
+
+
+def follow_fixed(project: Any) -> int:
+    """After a command: every sweep fixed to an element moves with it. A sweep whose element is gone is released where it stands."""
+    done = 0
+    for oid in project.model.query_ids(metadata={f"{E.NS}:fixed": True}, limit=10_000):
+        meta = E.meta_of(project, oid)
+        host = str(E.m(meta, "fixed_to") or "")
+        if not host or not E.alive(project, host):
+            fix_to_released(project, oid)
+            done += 1
+        elif any(abs(a - b) > 1e-9 for a, b in zip(anchor_of(project, host), E.m(meta, "fixed_seen") or [0, 0, 0])):
+            regenerate_sweep(project, oid)
+            done += 1
+    return done
+
+
+def fix_to_released(project: Any, oid: str) -> None:
+    meta = E.meta_of(project, oid)
+    seen, then = E.m(meta, "fixed_seen"), E.m(meta, "fixed_ref")
+    d = [float(seen[i]) - float(then[i]) for i in range(3)] if seen and then else [0.0, 0.0, 0.0]        # where it last stood
+    E._attach(project, oid, {"fixed": False, "fixed_to": None, "fixed_ref": None, "fixed_seen": None, "offset_x": float(E.m(meta, "offset_x", 0.0)) + d[0],
+                             "offset_y": float(E.m(meta, "offset_y", 0.0)) + d[1], "offset_z": float(E.m(meta, "offset_z", 0.0)) + d[2]})
+    regenerate_sweep(project, oid)
 
 
 def add_sweep(project: Any, p: Mapping[str, Any], to_m: float) -> str:
@@ -505,7 +677,12 @@ def add_sweep(project: Any, p: Mapping[str, Any], to_m: float) -> str:
     path = _path(p.get("points"), to_m, closed)
     values: dict[str, Any] = {"category": "sweep", "type": "Sweep", "level": level["id"], "path": path, "closed": closed,
                               "base": number(p.get("base", 0.0), "base", -500, 500), "material": E._choice(p.get("material", "Concrete"), E.MATERIALS, "material")}
-    if p.get("section") is not None:
+    if p.get("profile") == "user":
+        values["profile_source"] = _user_source(p, to_m)
+        values["section"] = _clean_section(user_section(values["profile_source"]))
+        for k in ("offset_x", "offset_y", "offset_z"):
+            values[k] = number(p.get(k, 0.0), k, -1e6, 1e6) / 1000.0
+    elif p.get("section") is not None:
         values["section"] = _clean_section(p["section"])
     else:
         shape = E._choice(p.get("shape", "rectangle"), SHAPES, "shape")
@@ -514,6 +691,8 @@ def add_sweep(project: Any, p: Mapping[str, Any], to_m: float) -> str:
     oid = project.model.add_box(width=1.0, depth=1.0, height=1.0, name=text(p.get("name") or "Sweep", "name", 80))
     E._attach(project, oid, values)
     regenerate_sweep(project, oid)
+    if p.get("fixed_to"):
+        fix_to(project, oid, text(p["fixed_to"], "fixed_to", 80))
     return oid
 
 
@@ -559,6 +738,24 @@ def set_property(project: Any, oid: str, meta: Mapping[str, Any], key: str, valu
     if cat == "sweep":
         if key == "material":
             return {"material": E._choice(value, E.MATERIALS, "material")}
+        if key in ("offset_x", "offset_y", "offset_z"):
+            return {key: number(value, key, -1e6, 1e6) / 1000.0}
+        if key == "fixed_to":
+            host = str(value or "").strip() or None
+            fix_to(project, oid, host)
+            return None
+        source = E.m(meta, "profile_source")
+        if source and key in USER_KEYS[:4]:
+            new = dict(source)
+            if key == "pivot":
+                new["pivot"] = E._choice(value, PIVOTS, "pivot")
+            elif key == "angle":
+                new["angle"] = number(value, "angle", -360, 360)
+            elif key == "mirror":
+                new["mirror"] = value in (True, "true", "True", "Yes", "yes", 1, "1")
+            else:
+                new["radius"] = number(value, "radius", 0, 100000) / 1000.0
+            return {"profile_source": new}
         if key in ("width", "height") and E.m(meta, "shape"):
             width = number(value, key, 1, 50000) / 1000.0 if key == "width" else float(E.m(meta, "width"))
             height = number(value, key, 1, 50000) / 1000.0 if key == "height" else float(E.m(meta, "height"))
@@ -575,7 +772,8 @@ def plan_item(project: Any, oid: str, f: float) -> dict[str, Any]:
     meta = obj["metadata"]
     cat = str(E.m(meta, "category"))
     if cat == "sweep":
-        path, closed = [tuple(q) for q in E.m(meta, "path")], bool(E.m(meta, "closed", False))
+        closed = bool(E.m(meta, "closed", False))
+        path = [tuple(q) for q in placed(project, meta)[0]]
         section = _clean_section(E.m(meta, "section"))
         frames = _frames(path, closed, section)
         lo, hi = min(u for u, _ in section), max(u for u, _ in section)
@@ -666,9 +864,23 @@ def properties(project: Any, oid: str, out: dict[str, Any], volume: Mapping[str,
         rows[:0] = [{"key": "shape", "label": "Profile", "type": "choice", "value": E.m(meta, "shape"), "choices": [{"value": s, "label": s.title()} for s in SHAPES]},
                     {"key": "width", "label": "Profile width", "type": "number", "unit": "mm", "value": round(float(E.m(meta, "width")) * 1000, 6)},
                     {"key": "height", "label": "Profile height", "type": "number", "unit": "mm", "value": round(float(E.m(meta, "height")) * 1000, 6)}]
+    source = E.m(meta, "profile_source")
+    if source:
+        rows[:0] = [{"label": "Profile", "type": "readonly", "value": f"User defined ({len(source['polygon'])} points)"},
+                    {"key": "pivot", "label": "Pivot alignment", "type": "choice", "value": source.get("pivot", "center"),
+                     "choices": [{"value": k, "label": PIVOT_LABELS[k]} for k in PIVOTS], "layout": "pivot"},
+                    {"key": "angle", "label": "Angle", "type": "number", "unit": "°", "value": float(source.get("angle", 0.0))},
+                    {"key": "mirror", "label": "Mirror", "type": "choice", "value": "Yes" if source.get("mirror") else "No", "choices": [{"value": "No", "label": "No"}, {"value": "Yes", "label": "Yes"}]},
+                    {"key": "radius", "label": "Corner radius", "type": "number", "unit": "mm", "value": round(float(source.get("radius", 0.0)) * 1000, 6)}]
     rows.append(volume)
-    out["groups"] = [{"title": "Geometry", "rows": rows},
-                     {"title": "Constraints", "rows": [{"key": "base", "label": "Base above level", "type": "number", "unit": "m", "value": float(E.m(meta, "base", 0.0))}]}]
+    constraints = [{"key": "base", "label": "Base above level", "type": "number", "unit": "m", "value": float(E.m(meta, "base", 0.0))}]
+    if source:
+        constraints += [{"key": f"offset_{a}", "label": f"Offset {a.upper()}", "type": "number", "unit": "mm", "value": round(float(E.m(meta, f"offset_{a}", 0.0)) * 1000, 6)} for a in "xyz"]
+        host = E.m(meta, "fixed_to")
+        constraints.append({"key": "fixed_to", "label": "Fixed to", "type": "choice", "value": host or "",
+                            "choices": [{"value": "", "label": "Nothing"}] + [{"value": i, "label": project.model.get(i)["name"] or str(E.m(project.model.get(i)["metadata"], "category")).title()}
+                                                                                for i in E.element_ids(project) if i != oid and E.m(project.model.get(i)["metadata"], "category") not in ("door", "window")]})
+    out["groups"] = [{"title": "Geometry", "rows": rows}, {"title": "Constraints", "rows": constraints}]
 
 
 def check(project: Any, oid: str, label: str) -> list[dict[str, str]]:
@@ -678,8 +890,8 @@ def check(project: Any, oid: str, label: str) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     try:
         if cat == "sweep":
-            _check_path(E.m(meta, "path"), bool(E.m(meta, "closed", False)))
-            _frames(E.m(meta, "path"), bool(E.m(meta, "closed", False)), _clean_section(E.m(meta, "section")))
+            _check_path(placed(project, meta)[0], bool(E.m(meta, "closed", False)))
+            _frames(placed(project, meta)[0], bool(E.m(meta, "closed", False)), _clean_section(E.m(meta, "section")))
         elif not G.is_simple_polygon([tuple(q) for q in E.m(meta, "profile", [])]):
             raise BadRequest("The outline crosses itself")
     except BadRequest as exc:

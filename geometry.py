@@ -509,12 +509,24 @@ def butt_ends(d: Point, t: float, point: Point, axis_dir: Point, axis_point: Poi
     return out[0], out[1]
 
 
+def _top_at(top: Sequence[tuple[float, float]], x: float) -> float:
+    """The height of a wall's top edge at ``x``: the polyline through ``top`` (x, z), held level beyond its first and last point."""
+    if x <= top[0][0]:
+        return top[0][1]
+    for (xa, za), (xb, zb) in zip(top, top[1:]):
+        if x <= xb:
+            return za if xb - xa < 1e-12 else za + (zb - za) * (x - xa) / (xb - xa)
+    return top[-1][1]
+
+
 def wall_mesh(length: float, thickness: float, height: float, openings: Sequence[tuple[float, float, float, float]],
-              ends: WallEnds = SQUARE_ENDS) -> Mesh:
+              ends: WallEnds = SQUARE_ENDS, top: Sequence[tuple[float, float]] | None = None) -> Mesh:
     """A wall as a closed mesh, centred on the origin (x along the wall, y through it, z up), with rectangular openings cut through.
     Each opening is (x0, x1, z0, z1) in the same local frame. The result is the exact boundary of the box minus the openings.
     ``ends`` slants the two end faces for a joint: ((start +y face, start -y face), (end +y face, end -y face)), each the distance that
-    face reaches past the end of the wall (negative: is cut back). A planar end face stays planar; an opening may not run into one."""
+    face reaches past the end of the wall (negative: is cut back). A planar end face stays planar; an opening may not run into one.
+    ``top`` is the wall's top edge as a polyline of (x, z) in the same local frame (x along the wall, z up, both from the centre): the top face
+    then follows it, in planar pieces, instead of lying level at ``height``. No opening may reach above it."""
     hx, hy, hz = length / 2, thickness / 2, height / 2
     (sl, sr), (el, er) = ends
     start_inner, end_inner = -hx - min(sl, sr), hx + min(el, er)               # the most cut-back point of each end face
@@ -523,8 +535,19 @@ def wall_mesh(length: float, thickness: float, height: float, openings: Sequence
     margin_start, margin_end = (1e-6 if start_inner > -hx else -1e-9), (1e-6 if end_inner < hx else -1e-9)       # an opening may touch a square end
     if any(o[0] < start_inner + margin_start or o[1] > end_inner - margin_end for o in openings):
         raise GeometryError("An opening runs into the angled corner at the end of the wall")
-    xs = sorted({-hx, hx, *(min(hx, max(-hx, v)) for o in openings for v in (o[0], o[1]))})
+    kinks = [min(hx, max(-hx, q[0])) for q in top] if top else []
+    xs = sorted({-hx, hx, *(min(hx, max(-hx, v)) for o in openings for v in (o[0], o[1])), *kinks})
     zs = sorted({-hz, hz, *(min(hz, max(-hz, v)) for o in openings for v in (o[2], o[3]))})
+    if top:
+        floor_ = min(_top_at(top, x) for x in xs)
+        if floor_ < -hz + 1e-6:
+            raise GeometryError("The top of the wall comes down to or below its base")
+        for o in openings:
+            lowest = min(_top_at(top, x) for x in [o[0], o[1], *(q[0] for q in top if o[0] < q[0] < o[1])])
+            if o[3] > lowest - 1e-6:
+                raise GeometryError("An opening reaches the sloping top of the wall: lower it or raise the roof it follows")
+        if len(zs) > 2 and floor_ < zs[-2] + 1e-6:
+            raise GeometryError("Where the sloping top of the wall is lowest it comes down to the height of an opening elsewhere in the wall")
     occupied = {(i, k) for i in range(len(xs) - 1) for k in range(len(zs) - 1)
                 if not any(o[0] < (xs[i] + xs[i + 1]) / 2 < o[1] and o[2] < (zs[k] + zs[k + 1]) / 2 < o[3] for o in openings)}
     if not occupied:
@@ -557,6 +580,10 @@ def wall_mesh(length: float, thickness: float, height: float, openings: Sequence
             quad(v(x0, -hy, z0), v(x1, -hy, z0), v(x1, hy, z0), v(x0, hy, z0), True)          # face towards -z
         if (i, k + 1) not in occupied:
             quad(v(x0, -hy, z1), v(x1, -hy, z1), v(x1, hy, z1), v(x0, hy, z1), False)         # face towards +z
+    if top:
+        for p in verts:
+            if p[2] == zs[-1]:                                                 # the top face follows the top edge; nothing else sits above the lowest point of it
+                p[2] = _top_at(top, p[0])
     if ends != SQUARE_ENDS:
         for p in verts:                                                        # shear the end faces: x moves with y only, so they stay planar
             if p[0] == xs[0]:

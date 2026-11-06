@@ -41,6 +41,10 @@ from . import animation_authoring as AA
 from . import animation_bridge as AB
 from . import documentation as D
 from . import interop as IO
+from . import attachments as AT
+from . import bimdata as BD
+from . import requirements as RQ
+from . import layers as LY
 from . import reports as RP
 from . import sheetviews as SV
 from . import quantities as Q
@@ -435,10 +439,11 @@ class Project:
         self._touched = {}
         try:
             result = handler(self, params)
-            if key == "model" and op.split(".")[0] not in ("anim", "project", "report"):
+            if key == "model" and op.split(".")[0] not in ("anim", "project", "report", "bim"):
                 FD.reconcile(self)                                      # foundations follow the walls and columns they stand on, and strips re-cut their joints
                 AY.reconcile(self)                                      # linked arrays follow their sources; items a person edited or deleted are let go
                 FX.reconcile(self)                                      # solids follow the voids that cut them
+                AT.reconcile(self)                                      # walls attached to a roof or extended to a level follow it
                 AR.reconcile(self)                                      # rooms follow the walls that enclose them, inside the same command
                 AN.sync_tags(self)                                      # tags follow their elements inside the same command
         except Exception as exc:
@@ -614,7 +619,8 @@ class Project:
         view = self.view(view_id)
         if view["kind"] != "plan" or not view.get("level_id"):
             return []
-        return E.plan_items(self, view["level_id"], 1000.0 / MM_PER[self.manifest["unit"]])
+        return E.plan_items(self, view["level_id"], 1000.0 / MM_PER[self.manifest["unit"]], show_opening=bool(view.get("show_opening_direction", True)),
+                            show_hatching=bool(view.get("show_material_hatching", True)))
 
     def scene_data(self, max_vertices: int = 400_000, time: float | None = None) -> dict[str, Any]:
         """Every drawable object with world-space vertices. With ``time`` (seconds) the scene is the animation evaluated at that time
@@ -835,6 +841,12 @@ class Project:
             return _view_properties(self, str(ref["view"]))
         raise BadRequest("Select a model element, a drawing entity, a sheet or a view")
 
+    def layer_preview(self, oid: str, layer: str, mode: str, opening_ids: Any = ()) -> dict[str, Any]:
+        """What a layer would be cut by if its openings were set to ``mode`` (and these ids): nothing is changed. Read-only."""
+        if not E.alive(self, oid):
+            raise NotFound(f"Element {oid} does not exist")
+        return LY.preview(self, oid, layer, mode, [str(i) for i in (opening_ids or ())])
+
     def sheet_data(self, sheet_id: str) -> dict[str, Any]:
         """Everything needed to draw a sheet: its paper, title block fields and each viewport with the drawing it shows."""
         sheet = SH.find(self, sheet_id)
@@ -887,6 +899,8 @@ class Project:
         view_ids = {v["id"] for v in self.manifest["views"]}
         issues.extend(E.check(self))
         issues.extend(CK.coordination(self))
+        issues.extend(BD.issues(self))
+        issues.extend(RQ.issues(self))
         for view in self.manifest["views"]:
             if view["kind"] not in NO_DRAWING and view["id"] not in self.drawings:
                 issues.append(E.issue("error", view["id"], f"View '{view['name']}' has lost its drawing", "references"))
@@ -975,6 +989,9 @@ def _entity_properties(project: Project, view_id: str, eid: str) -> dict[str, An
             "groups": groups}
 
 
+VIEW_OPTIONS = {"opening_direction": "show_opening_direction", "material_hatching": "show_material_hatching"}
+
+
 def _editable_view(project: Project, vid: Any) -> dict[str, Any]:
     view = project.view(text(vid, "id", 80))
     if view["kind"] not in ("section", "elevation", "schedule"):
@@ -1022,6 +1039,15 @@ def _view_properties(project: Project, vid: str) -> dict[str, Any]:
     elif kind == "schedule":
         groups.append({"title": "Schedule", "rows": [{"label": "Lists", "type": "readonly", "value": view["category"] + "s"},
                                                       {"label": "Rows", "type": "readonly", "value": str(D.schedule_data(project, view["category"])["count"])}]})
+    if kind in ("plan", "section", "elevation"):
+        shown = [{"value": "shown", "label": "Shown"}, {"value": "hidden", "label": "Hidden"}]
+        groups.append({"title": "Annotation", "rows": [
+            {"key": "opening_direction", "label": "Opening direction", "type": "choice", "value": "shown" if view.get("show_opening_direction", True) else "hidden", "choices": shown},
+            {"key": "material_hatching", "label": "Material hatching", "type": "choice", "value": "shown" if view.get("show_material_hatching", True) else "hidden", "choices": shown}]})
+        patterns = [{"value": pid, "label": spec["label"]} for pid, spec in D.HATCH_PATTERNS.items()]
+        groups.append({"title": "Cut hatching (all views)", "rows": [
+            {"key": f"hatch:{material}", "label": material, "type": "choice", "value": (D.hatch_pattern(project, material) or {}).get("pattern", "none"), "choices": patterns}
+            for material in D.DEFAULT_HATCH] + [{"label": "Note", "type": "readonly", "value": D.HATCH_NOTE}]})
     return {"ref": {"view": vid}, "title": view["name"], "category": kind, "kind": "view", "top": top, "groups": groups}
 
 
@@ -1050,7 +1076,8 @@ def _sheet_properties(project: Project, sid: str) -> dict[str, Any]:
                  "action": {"label": "Issue revision…", "dialog": "issue"}},
                 {"title": "Status", "rows": [{"label": "Compared with the last issue", "type": "readonly", "value": status_text}]},
                 {"title": f"Viewports ({len(sheet.get('viewports', []))})", "rows": [
-                    row for v in sheet.get("viewports", []) for row in _viewport_rows(project, v)]},
+                    row for v in sheet.get("viewports", []) for row in _viewport_rows(project, v)],
+                 **({"action": {"label": "Arrange viewports", "dialog": "arrange"}} if sheet.get("viewports") else {})},
                 {"title": f"Notes ({len(sheet['notes'])})", "rows": [{"key": f"note:{n['id']}", "label": f"({n['x']:g}, {n['y']:g})", "type": "text", "value": n["text"], "removable": True}
                                                                     for n in sheet["notes"]], "add": "note"}]}
 
@@ -1353,6 +1380,147 @@ class _Commands:
         return {"id": oid}
 
     @staticmethod
+    @command(_model_target("Add layer"))
+    def model__add_layer(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Add a layer to a wall, floor or roof (``material``, ``thickness`` in mm, ``name``, ``position``: its place in the stack, default last)."""
+        oid = text(p.get("id"), "id", 80)
+        if not E.alive(project, oid):
+            raise NotFound(f"Element {oid} does not exist")
+        return {"id": oid, "layer": LY.add_layer(project, oid, p)}
+
+    @staticmethod
+    @command(_model_target("Remove layer"))
+    def model__remove_layer(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        oid = text(p.get("id"), "id", 80)
+        if not E.alive(project, oid):
+            raise NotFound(f"Element {oid} does not exist")
+        LY.remove_layer(project, oid, text(p.get("layer"), "layer", 40))
+        return {"id": oid}
+
+    @staticmethod
+    @command(_model_target("Add door panel"))
+    def model__add_panel(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Split the widest panel of a door in two, so the door can be edited panel by panel."""
+        oid = text(p.get("id"), "id", 80)
+        if not E.alive(project, oid):
+            raise NotFound(f"Element {oid} does not exist")
+        return {"id": oid, "panel": E.add_panel(project, oid)}
+
+    @staticmethod
+    @command(_model_target("Set IFC property"))
+    def model__set_pset(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Set (empty value: clear) one official property of an element (``level`` occurrence) or of its type (``level`` type)."""
+        oid = text(p.get("id"), "id", 80)
+        if not E.alive(project, oid):
+            raise NotFound(f"Element {oid} does not exist")
+        BD.set_value(project, oid, text(p.get("set"), "set", 80), text(p.get("property"), "property", 80), p.get("value"), str(p.get("level") or "occurrence"))
+        return {"id": oid}
+
+    @staticmethod
+    @command(_model_target("Set IFC quantity"))
+    def model__set_quantity(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Store an imported (with its source) or overridden quantity; ``mode`` null goes back to the calculated value."""
+        oid = text(p.get("id"), "id", 80)
+        if not E.alive(project, oid):
+            raise NotFound(f"Element {oid} does not exist")
+        BD.set_quantity(project, oid, text(p.get("set"), "set", 80), text(p.get("name"), "name", 80), p.get("value"), p.get("mode"), str(p.get("source") or ""))
+        return {"id": oid}
+
+    @staticmethod
+    @command(_model_target("Assign bSDD class"))
+    def model__assign_bsdd(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        oid = text(p.get("id"), "id", 80)
+        if not E.alive(project, oid):
+            raise NotFound(f"Element {oid} does not exist")
+        return {"id": oid, "reference": BD.assign(project, oid, text(p.get("uri"), "uri", 400), origin=str(p.get("origin") or "manual"),
+                                                    confirm=bool(p.get("confirm", False)), offline=bool(p.get("offline", False)))}
+
+    @staticmethod
+    @command(_model_target("Remove bSDD class"))
+    def model__remove_bsdd(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        oid = text(p.get("id"), "id", 80)
+        if not E.alive(project, oid):
+            raise NotFound(f"Element {oid} does not exist")
+        BD.unassign(project, oid, text(p.get("uri"), "uri", 400))
+        return {"id": oid}
+
+    @staticmethod
+    @command(_model_target("Add IDS file"))
+    def bim__add_ids(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Store an IDS (Information Delivery Specification) file, given as text, in the project."""
+        xml = p.get("xml")
+        if not isinstance(xml, str):
+            raise BadRequest("xml must be the text of the .ids file")
+        return RQ.add_ids(project, xml.encode("utf-8"), str(p.get("filename") or "requirements.ids"))
+
+    @staticmethod
+    @command(_model_target("Remove IDS file"))
+    def bim__remove_ids(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        RQ.remove_ids(project, text(p.get("id"), "id", 40))
+        return {}
+
+    @staticmethod
+    @command(_model_target("Validate IDS"))
+    def bim__validate_ids(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Evaluate an IDS file against the model and keep the result as evidence in the project."""
+        return RQ.validate_ids(project, text(p.get("id"), "id", 40))["summary"]
+
+    @staticmethod
+    @command(_model_target("Set ILS options"))
+    def bim__set_ils(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        return RQ.set_ils(project, p)
+
+    @staticmethod
+    @command(_model_target("Add project requirement"))
+    def bim__add_ils_rule(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        return RQ.add_project_rule(project, p)
+
+    @staticmethod
+    @command(_model_target("Remove project requirement"))
+    def bim__remove_ils_rule(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        RQ.remove_project_rule(project, text(p.get("id"), "id", 40))
+        return {}
+
+    @staticmethod
+    @command(_model_target("Remove door panel"))
+    def model__remove_panel(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        oid = text(p.get("id"), "id", 80)
+        if not E.alive(project, oid):
+            raise NotFound(f"Element {oid} does not exist")
+        E.remove_panel(project, oid, text(p.get("panel"), "panel", 40))
+        return {"id": oid}
+
+    @staticmethod
+    @command(_model_target("Attach walls to roof"))
+    def model__attach_wall(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Attach the top of walls to a roof (``to: "roof"``, ``ids`` with the roof among them or ``roof``, ``offset`` in mm) or extend them to a level
+        (``to: "level"``, ``level`` default the next one up). Their height is then derived and follows the roof or level."""
+        ids = [text(i, "id", 80) for i in (p.get("ids") or [])]
+        to = text(p.get("to") or "roof", "to", 10)
+        if to == "roof":
+            return AT.attach_to_roof(project, ids, p.get("roof"), p.get("offset", 0))
+        if to == "level":
+            return AT.extend_to_level(project, ids, p.get("level"), p.get("offset", 0))
+        raise BadRequest("'to' is 'roof' or 'level'")
+
+    @staticmethod
+    @command(_model_target("Detach walls"))
+    def model__detach_wall(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Free the top of walls attached to a roof (``from: "roof"``) or extended to a level (``from: "level"``); either if not given."""
+        ids = [text(i, "id", 80) for i in (p.get("ids") or [])]
+        kind = p.get("from")
+        return AT.detach(project, ids, None if kind is None else text(kind, "from", 10))
+
+    @staticmethod
+    @command(_model_target("Move layer"))
+    def model__move_layer(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        oid = text(p.get("id"), "id", 80)
+        if not E.alive(project, oid):
+            raise NotFound(f"Element {oid} does not exist")
+        LY.move_layer(project, oid, text(p.get("layer"), "layer", 40), p.get("position"))
+        return {"id": oid}
+
+    @staticmethod
     @command(_model_target("Edit element"))
     def model__set_property(project: Project, p: dict[str, Any]) -> dict[str, Any]:
         oid, key = text(p.get("id"), "id", 80), text(p.get("key"), "key", 60)
@@ -1386,6 +1554,16 @@ class _Commands:
         f = MM_PER[project.manifest["unit"]] / 1000.0
         ends = {k: tuple(c * f for c in _point(p[k], k)) if p.get(k) is not None else None for k in ("start", "end")}
         E.stretch_wall(project, oid, ends["start"], ends["end"])
+        return {"id": oid}
+
+    @staticmethod
+    @command(_model_target("Stretch outline"))
+    def model__set_boundary(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Set the outline of a floor or roof (``points``, drawing units): the corner and edge grips of a selected floor send this."""
+        oid = text(p.get("id"), "id", 80)
+        if not E.alive(project, oid):
+            raise NotFound(f"Element {oid} does not exist")
+        E.set_boundary(project, oid, p.get("points"), MM_PER[project.manifest["unit"]] / 1000.0)
         return {"id": oid}
 
     @staticmethod
@@ -1946,6 +2124,37 @@ class _Commands:
         return {"id": view["id"]}
 
     @staticmethod
+    @command(_model_target("View option"))
+    def view__set_option(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Per-view drawing options, for floor plans, sections and elevations. ``opening_direction``: whether the doors' and windows'
+        opening-direction symbols are drawn (plan arcs, or the solid/dashed lines of a section or elevation). ``material_hatching``: whether
+        cut elements are hatched by their material (off: plain filled cut)."""
+        view = project.view(text(p.get("id"), "id", 80))
+        if view["kind"] not in ("plan", "section", "elevation"):
+            raise BadRequest(f"'{view['name']}' is a {view['kind']} view; it draws no door or window symbols")
+        key = text(p.get("key"), "key", 40)
+        field = VIEW_OPTIONS.get(key)
+        if field is None:
+            raise BadRequest(f"'{key}' is not a view option", hint="The options are " + ", ".join(VIEW_OPTIONS))
+        value = p.get("value")
+        view[field] = boolean(value, "value") if not isinstance(value, str) else choice_of(value, ("shown", "hidden"), "value") == "shown"
+        return {"id": view["id"], field: view[field]}
+
+    @staticmethod
+    @command(_model_target("Cut hatching"))
+    def hatch__set(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Assign a hatch pattern to a material for the whole project (every section and plan). ``pattern`` null returns the material to its
+        default. The patterns are SPADRA's configurable ones, not NEN 47 (see ``documentation.HATCH_NOTE``)."""
+        material = choice_of(p.get("material"), tuple(D.DEFAULT_HATCH), "material")
+        table = project.manifest.setdefault("hatching", {})
+        pattern = p.get("pattern")
+        if pattern in (None, "", "default"):
+            table.pop(material, None)
+        else:
+            table[material] = choice_of(pattern, tuple(D.HATCH_PATTERNS), "pattern")
+        return {"material": material, "pattern": (D.hatch_pattern(project, material) or {}).get("pattern")}
+
+    @staticmethod
     @command(_model_target("Flip section"))
     def view__flip_section(project: Project, p: dict[str, Any]) -> dict[str, Any]:
         view = _editable_view(project, p.get("id"))
@@ -2047,6 +2256,8 @@ class _Commands:
         dx, dy = SV.cascade(sheet, width, height)
         vp = {"id": new_id(), "view_id": view_id, "x": number(p.get("x", dx), "x", -1e5, 1e5), "y": number(p.get("y", dy), "y", -1e5, 1e5),
               "scale": choice_of(p.get("scale", sheet["scale"]), SCALES, "scale")}
+        if "x" in p or "y" in p:
+            vp["manual"] = True
         if view["kind"] == "3d":
             az, el = SV.check_camera(p.get("azimuth", SV.DEFAULT_AZIMUTH), p.get("elevation", SV.DEFAULT_ELEVATION))
             shown = SV.model_view(project, az, el, 1000.0 / MM_PER[project.manifest["unit"]])
@@ -2058,8 +2269,9 @@ class _Commands:
         else:
             data = project.drawing_data(view_id)                      # the extent of what the view shows, drawing and model together
             vp["anchor"] = [float(data["bounds"][0][0]), float(data["bounds"][0][1])] if data["bounds"] else [0.0, 0.0]
+        crowded = "x" not in p and "y" not in p and not SV.place_free(project, sheet, vp)
         sheet.setdefault("viewports", []).append(vp)
-        return {"id": vp["id"]}
+        return {"id": vp["id"], "crowded": crowded}
 
     @staticmethod
     @command(_model_target("Place 3D snapshot"))
@@ -2076,8 +2288,13 @@ class _Commands:
         vp = {"id": new_id(), "kind": "snapshot", "x": number(p.get("x", dx), "x", -1e5, 1e5), "y": number(p.get("y", dy), "y", -1e5, 1e5),
               "width": wide, "title": text(p.get("title", ""), "title", 80, empty=True), "image": SV.image_entry(data, w_px, h_px, shot, project.revision)}
         project.snapshots[vp["id"]] = data
+        crowded = False
+        if "x" in p or "y" in p:
+            vp["manual"] = True
+        else:
+            crowded = not SV.place_free(project, sheet, vp)
         sheet.setdefault("viewports", []).append(vp)
-        return {"id": vp["id"], "bytes": len(data)}
+        return {"id": vp["id"], "bytes": len(data), "crowded": crowded}
 
     @staticmethod
     @command(_model_target("Place report"))
@@ -2090,9 +2307,14 @@ class _Commands:
         dx, dy = SV.cascade(sheet, paper_w, paper_h)
         vp = {"id": new_id(), "kind": "report", "report_id": entry["id"], "x": number(p.get("x", dx), "x", -1e5, 1e5), "y": number(p.get("y", dy), "y", -1e5, 1e5),
               "width": w, "size": size, "lines": lines, "title": text(p.get("title", ""), "title", 80, empty=True)}
-        sheet.setdefault("viewports", []).append(vp)
         SV.report_box(project, vp)                                    # read it back now: a report that cannot be laid out is refused here, not when the sheet is drawn
-        return {"id": vp["id"]}
+        crowded = False
+        if "x" in p or "y" in p:
+            vp["manual"] = True
+        else:
+            crowded = not SV.place_free(project, sheet, vp)
+        sheet.setdefault("viewports", []).append(vp)
+        return {"id": vp["id"], "crowded": crowded}
 
     @staticmethod
     @command(_model_target("Edit viewport"))
@@ -2107,7 +2329,22 @@ class _Commands:
         elif key == "title":
             vp["title"] = text(value, "title", 80, empty=True)                        # printed under the view; empty uses the view's name
         elif key in ("x", "y"):
+            if vp.get("locked"):
+                raise Conflict("That viewport is locked", hint="Unlock it to move it")
             vp[key] = number(value, key, -1e5, 1e5)
+            vp["manual"] = True                                                        # placed by hand: Arrange leaves it where it is unless asked to move everything
+        elif key == "position":                                                        # a drop: [x, y], snapping to edges when asked
+            if not isinstance(value, (list, tuple)) or len(value) != 2:
+                raise BadRequest("position is [x, y]")
+            x, y = number(value[0], "x", -1e5, 1e5), number(value[1], "y", -1e5, 1e5)
+            if vp.get("locked"):
+                raise Conflict("That viewport is locked", hint="Unlock it to move it")
+            vp["x"], vp["y"] = SV.snap(project, sheet, vp, x, y) if p.get("snap") else (x, y)
+            vp["manual"] = True
+        elif key == "locked":
+            if value not in (True, False, "locked", "free"):
+                raise BadRequest("locked must be true, false, 'locked' or 'free'")
+            vp["locked"] = value is True or value == "locked"
         elif kind == "model" and key in ("azimuth", "elevation"):
             az, el = SV.check_camera(value if key == "azimuth" else vp["azimuth"], value if key == "elevation" else vp["elevation"])
             shown = SV.model_view(project, az, el, 1000.0 / MM_PER[project.manifest["unit"]])
@@ -2122,6 +2359,49 @@ class _Commands:
         else:
             raise BadRequest(f"'{key}' is not an editable property of this viewport")
         return {"id": vp["id"]}
+
+    @staticmethod
+    @command(_model_target("Import sheet"))
+    def sheet__import(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Make a new sheet from a ``.sldc`` sheet file (``data`` is the file, base64). Viewports whose views are not in this project are listed, not guessed."""
+        import base64
+        import binascii
+        try:
+            raw = base64.b64decode(str(p.get("data", "")), validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise BadRequest("data must be the .sldc file, base64 encoded") from exc
+        return SH.import_sldc(project, raw)
+
+    @staticmethod
+    @command(_model_target("Arrange sheet"))
+    def sheet__arrange(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Lay the sheet's viewports out so that all are visible and none overlaps another or the title block. ``mode`` ``auto`` (default) leaves locked viewports and
+        those placed by hand where they are, ``all`` moves everything that is not locked; ``rescale`` lets a view that cannot otherwise fit take a smaller scale."""
+        sheet = _sheet(project, p.get("id"))
+        return SV.arrange(project, sheet, mode=str(p.get("mode", "auto")), rescale=boolean(p.get("rescale", False), "rescale"))
+
+    @staticmethod
+    @command(_model_target("Align viewports"))
+    def sheet__align(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        sheet = _sheet(project, p.get("id"))
+        ids = p.get("viewports")
+        if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+            raise BadRequest("viewports must be a list of viewport ids")
+        return {"moved": SV.align(project, sheet, ids, str(p.get("how", "")))}
+
+    @staticmethod
+    @command(_model_target("Reorder viewport"))
+    def sheet__order_viewport(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Change what is drawn on top: ``to`` is front, back, forward or backward."""
+        sheet = _sheet(project, p.get("id"))
+        vp = _viewport(sheet, p.get("viewport"))
+        items = sheet["viewports"]
+        i = items.index(vp)
+        j = {"front": len(items) - 1, "back": 0, "forward": min(i + 1, len(items) - 1), "backward": max(i - 1, 0)}.get(str(p.get("to")))
+        if j is None:
+            raise BadRequest("to must be front, back, forward or backward")
+        items.insert(j, items.pop(i))
+        return {"order": [v["id"] for v in items]}
 
     @staticmethod
     @command(_model_target("Remove viewport"))
@@ -2227,7 +2507,27 @@ def _mirrored(e: Mapping[str, Any], a: tuple[float, float], b: tuple[float, floa
 
 
 def _viewport_rows(project: Project, vp: dict[str, Any]) -> list[dict[str, Any]]:
-    """The Properties rows of one viewport on a sheet, by what it shows."""
+    """The Properties rows of one viewport on a sheet, by what it shows, then where it is on the paper and whether it is locked there."""
+    return _viewport_content_rows(project, vp) + _viewport_place_rows(project, vp)
+
+
+def _viewport_place_rows(project: Project, vp: dict[str, Any]) -> list[dict[str, Any]]:
+    kind = SV.kind_of(vp)
+    if kind == "snapshot":
+        name = vp.get("title") or "3D snapshot"
+    elif kind == "report":
+        name = next((r["name"] for r in project.manifest["reports"] if r["id"] == vp["report_id"]), "(missing report)")
+    else:
+        name = project.view(vp["view_id"])["name"]
+        name = SV.model_name({"name": name}) if kind == "model" else name
+    key = lambda field: f"vp:{vp['id']}:{field}"
+    return [{"key": key("x"), "label": f"{name}: x", "type": "number", "unit": "mm", "value": vp["x"]},
+            {"key": key("y"), "label": f"{name}: y", "type": "number", "unit": "mm", "value": vp["y"]},
+            {"key": key("locked"), "label": f"{name}: position", "type": "choice", "value": "locked" if vp.get("locked") else "free",
+             "choices": [{"value": "free", "label": "Free to move"}, {"value": "locked", "label": "Locked"}]}]
+
+
+def _viewport_content_rows(project: Project, vp: dict[str, Any]) -> list[dict[str, Any]]:
     kind = SV.kind_of(vp)
     key = lambda field: f"vp:{vp['id']}:{field}"
     scale = {"key": key("scale"), "type": "choice", "value": vp.get("scale"), "choices": [{"value": c, "label": c} for c in SCALES]}

@@ -27,6 +27,7 @@ from typing import Any, Callable, Mapping
 
 from ..tools.errors import BadRequest, LimitExceeded
 from . import elements as E
+from . import layers as LY
 from . import sfb as SF
 from . import geometry as G
 
@@ -36,6 +37,36 @@ MAX_EDGES = 250_000
 KEY_DIGITS = 6                          # coordinates are matched to a micrometre when edges are compared
 
 Pt3 = tuple[float, float, float]
+
+# ---------------------------------------------------------------------------------------------------------------- cut hatching (arcering)
+# What a cut element is hatched with in sections and plans. The Dutch convention is NEN 47, a paid standard that SPADRA does not hold; its
+# patterns are therefore NOT reproduced here and nothing below claims to be NEN 47. These are plain geometric patterns (parallel lines at an
+# angle, crossed lines, dots, solid, none) that the person assigns to a material per project, so a studio can match its own office standard
+# or the NEN 47 sheet it holds. Every pattern carries ``standard: None`` and the note, and the Properties panel says so.
+HATCH_NOTE = "Configurable patterns, not NEN 47: SPADRA does not hold the standard, so no pattern is presented as the official arcering."
+HATCH_PATTERNS: dict[str, dict[str, Any]] = {
+    "none": {"label": "None (outline only)", "kind": "none", "angle": 0.0, "spacing_mm": 0.0},
+    "solid": {"label": "Solid", "kind": "solid", "angle": 0.0, "spacing_mm": 0.0},
+    "lines-45": {"label": "Lines 45°", "kind": "lines", "angle": 45.0, "spacing_mm": 2.2},
+    "lines-135": {"label": "Lines 135°", "kind": "lines", "angle": 135.0, "spacing_mm": 2.2},
+    "lines-0": {"label": "Lines horizontal", "kind": "lines", "angle": 0.0, "spacing_mm": 2.2},
+    "lines-90": {"label": "Lines vertical", "kind": "lines", "angle": 90.0, "spacing_mm": 2.2},
+    "cross-45": {"label": "Crossed 45°", "kind": "cross", "angle": 45.0, "spacing_mm": 2.2},
+    "cross-0": {"label": "Grid", "kind": "cross", "angle": 0.0, "spacing_mm": 2.2},
+    "dots": {"label": "Dots", "kind": "dots", "angle": 0.0, "spacing_mm": 2.2},
+}
+DEFAULT_HATCH = {"Concrete": "lines-45", "Masonry": "lines-135", "Timber": "lines-0", "Steel": "solid", "Plasterboard": "none", "Glass": "none",
+                 "EPS": "cross-45", "XPS": "cross-45", "PIR": "cross-45", "Mineral wool": "cross-45", "Foam glass": "cross-45",       # insulation
+                 "Sand": "dots", "Gravel": "dots", "Blinding concrete": "lines-45", "Screed": "none", "Floor finish": "none", "Damp-proof membrane": "solid"}
+
+
+def hatch_pattern(project: Any, material: Any) -> dict[str, Any] | None:
+    """The hatch of a material in this project: its assignment if the person made one, else the default. None for a material with neither."""
+    if not isinstance(material, str):
+        return None
+    pid = (project.manifest.get("hatching") or {}).get(material) or DEFAULT_HATCH.get(material)
+    spec = HATCH_PATTERNS.get(pid) if pid else None
+    return {"pattern": pid, **spec, "standard": None} if spec else None
 
 
 # --------------------------------------------------------------------------------------------------------------------- frames
@@ -254,6 +285,8 @@ def facing_surfaces(fr: Frame, verts: list[Pt3], faces: list[tuple[int, int, int
 def project_view(project: Any, view: Mapping[str, Any], f: float) -> dict[str, Any]:
     """Everything a section or an elevation shows, in the drawing's unit (``f`` converts metres), ordered far to near."""
     fr = frame_of(view)
+    show_opening = bool(view.get("show_opening_direction", True))
+    show_hatching = bool(view.get("show_material_hatching", True))
     items: list[dict[str, Any]] = []
     edge_count = 0
     from .project import all_ids
@@ -277,6 +310,15 @@ def project_view(project: Any, view: Mapping[str, Any], f: float) -> dict[str, A
                 "tris": [[round(c * f, 4) for p in t for c in p] for t in tris],
                 "edges": [[round(c * f, 4) for p in e for c in p] for e in edges],
                 "cut": [[[round(x * f, 4), round(y * f, 4)] for x, y in loop] for loop in loops]}
+        if loops and category in LY.LAYERED and LY.is_layered(obj["metadata"]):
+            # a stack of layers: every loop of the cut is one layer, named and (unless the view hides hatching) hatched by its own material
+            item["cut_layers"] = LY.loop_layers(project, oid, loops, fr)
+            if show_hatching:
+                item["cut_hatches"] = [hatch_pattern(project, row["material"]) for row in item["cut_layers"]]
+        elif loops and show_hatching and category != "foundation":
+            item["cut_hatch"] = hatch_pattern(project, E.m(obj["metadata"], "material"))
+        if category in E.OPENINGS and show_opening:
+            item["opening"] = _opening_lines(project, oid, fr, f)                # None for a fixed window or a wall seen edge-on
         if category == "foundation" and loops and fr.cut:
             from . import foundations as FD
             item["cut_material"] = FD.loop_materials(project, obj["metadata"], loops)           # each layer of a build-up is hatched as its own material
@@ -300,6 +342,30 @@ def project_view(project: Any, view: Mapping[str, Any], f: float) -> dict[str, A
         out["span"] = round(float(fr.span or 0) * f, 4)
         out["far"] = round(float(fr.far or 0) * f, 4)
     return out
+
+
+def _opening_lines(project: Any, oid: str, fr: Frame, f: float) -> dict[str, Any] | None:
+    """The opening-direction symbol of a door or window as two lines in the picture's (across, z), in the drawing's unit. Solid when the leaf
+    opens toward the viewer, dashed when it opens away (``toward``). A symbol that the frame would cut (a section's limits) is left out
+    whole, rather than drawn as half a symbol."""
+    sym = E.elevation_symbol(project, oid, (fr.fx, fr.fy))
+    if sym is None:
+        return None
+
+    def lines(one: dict[str, Any]) -> dict[str, Any] | None:
+        pts = [tuple(one[k]) for k in ("apex", "head", "sill")]
+        if any(plane(p) < -1e-9 for p in pts for plane in fr.planes()):
+            return None
+        a, h, s = ((round(fr.across(p) * f, 4), round(p[2] * f, 4)) for p in pts)
+        return {"kind": one["kind"], "toward": one["toward"], "lines": [[a[0], a[1], h[0], h[1]], [a[0], a[1], s[0], s[1]]]}
+
+    main = lines(sym)
+    more = [x for x in (lines(o) for o in sym.get("more", ())) if x]
+    if main is None:
+        if not more:
+            return None
+        main, more = more[0], more[1:]
+    return {**main, **({"more": [{"toward": x["toward"], "lines": x["lines"]} for x in more]} if more else {})}
 
 
 def compass(dx: float, dy: float) -> str:
@@ -349,7 +415,8 @@ COLUMNS: dict[str, list[dict[str, Any]]] = {
              _col("hinge", "Hinge", text=True), _col("swing", "Swing", text=True)],
     "window": [_col("no", "No.", text=True), _col("name", "Name", text=True), _col("level", "Level", text=True), _col("host", "Host wall", text=True),
                _col("width", "Width", "mm"), _col("height", "Height", "mm"), _col("sill", "Sill", "mm"), _col("head", "Head", "mm"),
-               _col("area", "Area", "m²", total=True), _col("material", "Material", text=True)],
+               _col("area", "Area", "m²", total=True), _col("material", "Material", text=True), _col("operation", "Operation", text=True),
+               _col("swing", "Swing", text=True)],
     "wall": [_col("no", "No.", text=True), _col("name", "Name", text=True), _col("level", "Level", text=True), _col("length", "Length", "m", total=True),
              _col("height", "Height", "m"), _col("thickness", "Thickness", "mm"), _col("gross", "Gross area", "m²", total=True),
              _col("openings", "Openings", "m²", total=True), _col("net", "Net area", "m²", total=True), _col("volume", "Volume", "m³", total=True),
@@ -463,7 +530,8 @@ def schedule_data(project: Any, category: str) -> dict[str, Any]:
             if category == "door":
                 row.update(hinge=str(E.m(meta, "hinge", "start")), swing="left" if int(E.m(meta, "swing", 1)) > 0 else "right")
             else:
-                row.update(sill=_r(sill * 1000, 1), head=_r((sill + h) * 1000, 1))
+                row.update(sill=_r(sill * 1000, 1), head=_r((sill + h) * 1000, 1), operation=str(E.m(meta, "operation", "fixed")),
+                           swing=("left" if int(E.m(meta, "swing", 1)) > 0 else "right") if E.opens(meta) else "-")
             if host and E.alive(project, host):
                 fr = E.wall_frame(project, host)
                 order = (order[0], fr["mid"][0], fr["mid"][1] + float(E.m(meta, "offset", 0.0)) * 1e-3)

@@ -155,7 +155,7 @@ def measure(project: Any, ids: Sequence[str]) -> dict[str, Any]:
             d = R.data(project, oid)
             figures += [{"label": "Area", "value": d["area"], "unit": "m²", "basis": "from the room outline (shoelace formula on its corners)"},
                         {"label": "Perimeter", "value": d["perimeter"], "unit": "m", "basis": "sum of the outline's edge lengths"},
-                        {"label": "Volume", "value": d["volume"], "unit": "m³", "basis": "area × the room's height parameter"}]
+                        {"label": "Volume", "value": d["volume"], "unit": "m³", "basis": R.basis_text(d)}]
         else:
             q = project.quantities([oid], None)["rows"][0]
             if q.get("volume_m3") is not None:

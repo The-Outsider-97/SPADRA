@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
-  cutPath, cutWeight, edgePath, inTriangle, insideLoops, itemContains, levelLabel, markArrows, markLabel, projectionAt, snapPolygons, surfacePath, visibleLevels,
+  cutPath, cutWeight, edgePath, inTriangle, insideLoops, itemContains, levelLabel, markArrows, markLabel, projectionAt, snapPolygons, surfacePath, swingPath, visibleLevels,
 } from "../src/client/projection.js";
 import { formatCell, sortRows } from "../src/client/schedule.js";
 import type { ProjItem, Projection, SectionMark } from "../src/client/types.js";
@@ -133,5 +133,19 @@ describe("schedule tables", () => {
     assert.deepEqual(sortRows(rows, "w", 1).map((r) => r.w), [90, 900, 1200]);
     assert.deepEqual(sortRows(rows, "w", -1).map((r) => r.w), [1200, 900, 90]);
     assert.deepEqual(rows.map((r) => r.no), ["D10", "D2", "D1"], "the rows the server sent are not reordered in place");
+  });
+});
+
+describe("opening direction", () => {
+  it("draws a door's leaf and swing as one path, and nothing for a symbol without a swing", () => {
+    const d = swingPath({ kind: "door", hinge: [0, 0], leaf_end: [0, 900], radius: 900, start_angle: 0, end_angle: Math.PI / 2 });
+    assert.ok(d.startsWith("M0 0L0 900M900 0A900 900 0 0 1 "), d);
+    assert.equal(swingPath({ kind: "window", a: [0, 0], b: [1200, 0] }), "", "a fixed window opens nowhere");
+    assert.equal(swingPath({ kind: "door" }), "", "a view that hides the direction sends no swing");
+    assert.equal(swingPath(undefined), "");
+  });
+
+  it("uses the large-arc flag only past a half turn", () => {
+    assert.match(swingPath({ kind: "door", hinge: [0, 0], leaf_end: [1, 0], radius: 1, start_angle: 0, end_angle: Math.PI * 1.5 }), /A1 1 0 1 1 /);
   });
 });

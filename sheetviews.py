@@ -260,3 +260,241 @@ def check_report_box(width: Any, size: Any, lines: Any, paper_width: float) -> t
     sz = number(size, "size", 1.2, 10.0)
     n = number(lines, "lines", float(REPORT_LINES[0]), float(REPORT_LINES[1]))
     return float(w), float(sz), int(n)
+
+
+# ----------------------------------------------------------------------------------------------------------------------------- layout
+# Where things go on the paper. A viewport's (x, y) means a different corner for each kind (the drawing's lower left for a view, the model and a picture; the
+# top left for a schedule and a report), so everything below works with the rectangle a viewport really covers, in millimetres with y up from the paper's
+# lower edge, and converts back only when it writes a position.
+FRAME = 10.0                                       # the drawing frame's distance from the paper's edge (the sheet view draws the same)
+INSET = 5.0                                        # clear space kept between the frame and anything arranged inside it
+GAP = 8.0                                          # clear space kept between two viewports
+LABEL = 7.0                                        # the title printed above a view or schedule
+TITLE_BLOCK = (180.0, 66.0)                        # width and height of the title block, bottom right
+REVISION_ROW = 5.0
+SNAP = 3.0                                         # mm within which a dragged viewport snaps to an edge
+Rect = tuple[float, float, float, float]           # x0, y0, x1, y1
+
+
+def _scale_k(project: Any, vp: Mapping[str, Any]) -> float:
+    from .project import MM_PER
+    num, _, den = str(vp["scale"]).partition(":")
+    return MM_PER[project.manifest["unit"]] * float(num) / float(den)
+
+
+def footprint(project: Any, vp: Mapping[str, Any]) -> tuple[float, float, float, float]:
+    """(width, height, dx, dy) of what a viewport covers: its lower left corner is at (vp.x + dx, vp.y + dy). A view or schedule includes the title printed
+    above it. Sizes are measured from the same data the sheet draws (a schedule's from the same text widths the sheet view uses, so within a character)."""
+    kind = kind_of(vp)
+    if kind == "snapshot":
+        w, h = snapshot_size(vp)
+        return w, h, 0.0, 0.0
+    if kind == "report":
+        box = report_box(project, vp)
+        size = box["line_height"] / LINE_HEIGHT
+        scale = {"h1": 1.35, "h2": 1.1, "h3": 1.0}
+        y = size
+        for line in box["lines"]:
+            y += box["line_height"] * (0.5 if line["style"] == "gap" else scale.get(line["style"], 1.0))
+        return float(vp["width"]), y, 0.0, -y
+    view = project.view(vp["view_id"])
+    if view["kind"] == "schedule":
+        data = D.schedule_data(project, view["category"])
+        size, row, pad = 2.6, 5.0, 1.6
+        cell = lambda v: "" if v is None else str(v)                                   # noqa: E731
+        widths = [max(len(f"{c['label']}{' (' + c['unit'] + ')' if c.get('unit') else ''}"), *(len(cell(r.get(c["key"]))) for r in data["rows"]),
+                      *([len(cell(data["totals"].get(c["key"])))] if c.get("total") else [])) * size * CHAR_WIDTH + 2 * pad for c in data["columns"]]
+        lines = len(data["rows"]) + 1 + (1 if data["rows"] and data["totals"] else 0)
+        return sum(widths), lines * row + LABEL, 0.0, -lines * row
+    k = _scale_k(project, vp)
+    if kind == "model":
+        bounds = model_view(project, vp["azimuth"], vp["elevation"], 1000.0 / _mm_per(project))["bounds"]
+    else:
+        bounds = project.drawing_data(vp["view_id"])["bounds"]
+    if not bounds:
+        return 0.0, 0.0, 0.0, 0.0
+    (x0, y0), (x1, y1) = bounds
+    ax, ay = vp["anchor"]
+    return (x1 - x0) * k, (y1 - y0) * k + LABEL, (x0 - ax) * k, (y0 - ay) * k
+
+
+def _mm_per(project: Any) -> float:
+    from .project import MM_PER
+    return MM_PER[project.manifest["unit"]]
+
+
+def rect_of(project: Any, vp: Mapping[str, Any]) -> Rect:
+    w, h, dx, dy = footprint(project, vp)
+    return (vp["x"] + dx, vp["y"] + dy, vp["x"] + dx + w, vp["y"] + dy + h)
+
+
+def _put(project: Any, vp: dict[str, Any], x0: float, y0: float) -> None:
+    """Move a viewport so that the rectangle it covers has its lower left corner at (x0, y0)."""
+    _, _, dx, dy = footprint(project, vp)
+    vp["x"], vp["y"] = round(x0 - dx, 3), round(y0 - dy, 3)
+
+
+def furniture(sheet: Mapping[str, Any], width: float, height: float) -> list[Rect]:
+    """What the paper already carries: the title block and the revision table above it."""
+    tw, th = TITLE_BLOCK
+    left, bottom = width - FRAME - tw, FRAME
+    rows = min(len(sheet.get("revisions", [])), 6)
+    out = [(left, bottom, width - FRAME, bottom + th)]
+    if rows:
+        out.append((left, bottom + th, width - FRAME, bottom + th + REVISION_ROW * (rows + 1)))
+    return out
+
+
+def _hits(a: Rect, b: Rect, gap: float = 0.0) -> bool:
+    return a[0] < b[2] + gap and b[0] < a[2] + gap and a[1] < b[3] + gap and b[1] < a[3] + gap
+
+
+def overlapping(project: Any, sheet: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """Pairs of viewports whose rectangles cover one another, as (id, id)."""
+    rects = [(vp["id"], rect_of(project, vp)) for vp in sheet.get("viewports", []) if _drawn(project, vp)]
+    return [(a, b) for i, (a, ra) in enumerate(rects) for b, rb in rects[i + 1:] if _hits(ra, rb)]
+
+
+def _drawn(project: Any, vp: Mapping[str, Any]) -> bool:
+    """Whether the sheet actually draws this viewport (a viewport whose view, picture or report is gone is reported by the model check and takes no room)."""
+    kind = kind_of(vp)
+    if kind == "snapshot":
+        return vp["id"] in project.snapshots
+    if kind == "report":
+        return any(r["id"] == vp["report_id"] for r in project.manifest["reports"])
+    view = next((v for v in project.manifest["views"] if v["id"] == vp.get("view_id")), None)
+    return view is not None and (kind == "model" or view["kind"] == "schedule" or vp["view_id"] in project.drawings)
+
+
+def _first_fit(size: tuple[float, float], area: Rect, obstacles: list[Rect]) -> tuple[float, float] | None:
+    """The top-most, then left-most position where a rectangle of this size lies inside ``area``, clear of every obstacle by ``GAP``."""
+    w, h = size
+    xs = sorted({area[0]} | {r[2] + GAP for r in obstacles})
+    ys = sorted({area[3] - h} | {r[1] - GAP - h for r in obstacles}, reverse=True)
+    for y in ys:
+        if y < area[1] - 1e-9:
+            continue
+        for x in xs:
+            if x + w > area[2] + 1e-9:
+                continue
+            if not any(_hits((x, y, x + w, y + h), o, GAP) for o in obstacles):
+                return round(x, 3), round(y, 3)
+    return None
+
+
+def usable(sheet: Mapping[str, Any], width: float, height: float) -> Rect:
+    return (FRAME + INSET, FRAME + INSET, width - FRAME - INSET, height - FRAME - INSET)
+
+
+def place_free(project: Any, sheet: dict[str, Any], vp: dict[str, Any]) -> bool:
+    """Give a new viewport the first free place on the paper, moving nothing that is already there. False when nothing is free (the viewport then keeps the
+    stepped-corner position it has, and the person decides: a larger paper, a smaller scale, or Arrange)."""
+    from .project import paper_size
+    width, height = paper_size(sheet["paper"])
+    w, h, _, _ = footprint(project, vp)
+    taken = furniture(sheet, width, height) + [rect_of(project, o) for o in sheet.get("viewports", []) if _drawn(project, o)]
+    spot = _first_fit((w, h), usable(sheet, width, height), taken)
+    if spot is None:
+        return False
+    _put(project, vp, *spot)
+    return True
+
+
+def arrange(project: Any, sheet: dict[str, Any], *, mode: str = "auto", rescale: bool = False) -> dict[str, Any]:
+    """Lay the viewports out so that all of them are visible and none covers another or the title block.
+
+    ``mode`` ``auto`` moves every viewport except those the person locked or placed by hand; ``all`` also moves the ones placed by hand; a locked viewport never
+    moves. The scale of a view is never changed unless ``rescale`` is set, and then only to the nearest smaller scale that makes it fit. Viewports are placed largest
+    first, each at the top-most then left-most free place. If something cannot be placed nothing is moved, and the answer says what and why."""
+    from .project import SCALES, paper_size
+    if mode not in ("auto", "all"):
+        raise BadRequest("mode must be 'auto' or 'all'")
+    width, height = paper_size(sheet["paper"])
+    area = usable(sheet, width, height)
+    drawn = [vp for vp in sheet.get("viewports", []) if _drawn(project, vp)]
+    fixed = [vp for vp in drawn if vp.get("locked") or (mode == "auto" and vp.get("manual"))]
+    moving = [vp for vp in drawn if vp not in fixed]
+    placed: list[Rect] = furniture(sheet, width, height) + [rect_of(project, vp) for vp in fixed]
+    plan: list[tuple[dict[str, Any], float, float, str | None]] = []
+    failed: list[dict[str, Any]] = []
+    for vp in sorted(moving, key=lambda v: -(lambda f: f[0] * f[1])(footprint(project, v))):
+        trial, rescaled = dict(vp), None
+        while True:
+            w, h, _, _ = footprint(project, trial)
+            spot = _first_fit((w, h), area, placed)
+            if spot is not None or not rescale or kind_of(vp) not in ("view", "model") or trial["scale"] not in SCALES or trial["scale"] == SCALES[-1]:
+                break
+            trial["scale"] = SCALES[SCALES.index(trial["scale"]) + 1]
+            rescaled = trial["scale"]
+        if spot is None:
+            failed.append({"id": vp["id"], "kind": kind_of(vp), "width_mm": round(w, 1), "height_mm": round(h, 1)})
+            continue
+        placed.append((spot[0], spot[1], spot[0] + w, spot[1] + h))
+        plan.append((vp, spot[0], spot[1], rescaled))
+    if failed:
+        from ..tools.errors import Conflict
+        raise Conflict(f"{len(failed)} viewport(s) do not fit on {sheet['paper']} without overlapping: " + ", ".join(f"{f['width_mm']:g} × {f['height_mm']:g} mm" for f in failed),
+                       hint="Use a larger paper size, a smaller scale, or arrange again with 'rescale'. Nothing was moved.")
+    for vp, x, y, scale in plan:
+        if scale:
+            vp["scale"] = scale
+        _put(project, vp, x, y)
+        vp.pop("manual", None)
+    return {"moved": [vp["id"] for vp, *_ in plan], "kept": [vp["id"] for vp in fixed], "rescaled": {vp["id"]: s for vp, _, _, s in plan if s}}
+
+
+def snap(project: Any, sheet: Mapping[str, Any], vp: Mapping[str, Any], x: float, y: float) -> tuple[float, float]:
+    """Where a viewport dropped at (x, y) lands once it snaps to the nearest edge of the margin or of another viewport (within ``SNAP`` mm), horizontally and
+    vertically on their own."""
+    from .project import paper_size
+    width, height = paper_size(sheet["paper"])
+    w, h, dx, dy = footprint(project, vp)
+    area = usable(sheet, width, height)
+    others = [rect_of(project, o) for o in sheet.get("viewports", []) if o["id"] != vp["id"] and _drawn(project, o)] + furniture(sheet, width, height)
+    xs = [area[0], area[2] - w] + [r[0] for r in others] + [r[2] for r in others] + [r[0] - w for r in others] + [r[2] - w for r in others]
+    ys = [area[1], area[3] - h] + [r[1] for r in others] + [r[3] for r in others] + [r[1] - h for r in others] + [r[3] - h for r in others]
+    nx, ny = x + dx, y + dy
+    near = lambda value, options: min((c for c in options if abs(c - value) <= SNAP), key=lambda c: abs(c - value), default=value)      # noqa: E731
+    nx, ny = near(nx, xs), near(ny, ys)
+    return round(nx - dx, 3), round(ny - dy, 3)
+
+
+ALIGNMENTS = ("left", "right", "top", "bottom", "centre-horizontal", "centre-vertical", "distribute-horizontal", "distribute-vertical")
+
+
+def align(project: Any, sheet: dict[str, Any], ids: list[str], how: str) -> list[str]:
+    """Align the chosen viewports to the first one (or, for ``distribute``, space them evenly between the outermost two). Locked viewports stay where they are."""
+    if how not in ALIGNMENTS:
+        raise BadRequest(f"how must be one of: {', '.join(ALIGNMENTS)}")
+    chosen = [vp for vp in sheet.get("viewports", []) if vp["id"] in ids]
+    if len(chosen) != len(set(ids)) or len(chosen) < 2 or (how.startswith("distribute") and len(chosen) < 3):
+        raise BadRequest("Choose at least two viewports on this sheet (three to distribute)")
+    ref = rect_of(project, chosen[0])
+    moved = []
+    if how.startswith("distribute"):
+        axis = 0 if how.endswith("horizontal") else 1
+        ordered = sorted(chosen, key=lambda v: rect_of(project, v)[axis])
+        sizes = [rect_of(project, v)[axis + 2] - rect_of(project, v)[axis] for v in ordered]
+        first, last = rect_of(project, ordered[0]), rect_of(project, ordered[-1])
+        span = last[axis + 2] - first[axis]
+        gap = (span - sum(sizes)) / (len(ordered) - 1)
+        if gap < 0:
+            raise BadRequest("The viewports are too wide to spread out without overlapping")
+        cursor = first[axis]
+        for vp, size in zip(ordered, sizes):
+            r = rect_of(project, vp)
+            if not vp.get("locked") and abs(r[axis] - cursor) > 1e-6:
+                _put(project, vp, cursor if axis == 0 else r[0], cursor if axis == 1 else r[1])
+                vp["manual"] = True
+                moved.append(vp["id"])
+            cursor += size + gap
+        return moved
+    for vp in chosen[1:]:
+        r = rect_of(project, vp)
+        x0, y0 = {"left": (ref[0], r[1]), "right": (ref[2] - (r[2] - r[0]), r[1]), "top": (r[0], ref[3] - (r[3] - r[1])), "bottom": (r[0], ref[1]),
+                  "centre-horizontal": ((ref[0] + ref[2] - (r[2] - r[0])) / 2, r[1]), "centre-vertical": (r[0], (ref[1] + ref[3] - (r[3] - r[1])) / 2)}[how]
+        if not vp.get("locked") and (abs(x0 - r[0]) > 1e-6 or abs(y0 - r[1]) > 1e-6):
+            _put(project, vp, x0, y0)
+            vp["manual"] = True
+            moved.append(vp["id"])
+    return moved
