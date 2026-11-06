@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from functools import lru_cache
+from urllib import error as urlerror
+from urllib import request as urlrequest
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -41,6 +44,9 @@ IFC_SUGGEST = {
     "generic": ("IfcBuildingElementProxyType",),
 }
 MAX_CATALOG_BYTES = 8_000_000
+# CSI publishes the API host, path, and GraphQL query examples. Never accept a
+# user-provided upstream URL (no SSRF) or expose credentials to the browser.
+CSI_API_URL = "https://crosswalk.azure-api.net/v3/query"
 
 @lru_cache(maxsize=1)
 def _ifc() -> dict[str, Any]:
@@ -141,6 +147,142 @@ def catalog() -> dict[str, Any] | None:
         return None
     stat = path.stat()
     return _parse_catalog(str(path.resolve()), stat.st_mtime_ns, stat.st_size)
+
+def _csi_key() -> str:
+    """A server-only CSI Crosswalk API key; never serialize it in API responses."""
+    return os.environ.get("SPADRA_CSI_CROSSWALK_KEY", "").strip()
+
+
+def _csi_rows(standard: str, *, table: int | None = None, number: str = "",
+              search: str = "", crosswalks: bool = False) -> tuple[list[dict[str, Any]], str]:
+    """Query CSI's documented Crosswalk v3 GraphQL endpoint, without copying data into SPADRA.
+
+    Documentation and example queries: github.com/csi-net/crosswalk.
+    The upstream API requires a separately licensed key. The normal UI never
+    sends the key, and it is not inserted in logging, diagnostics or metadata.
+    """
+    key = _csi_key()
+    if not key:
+        raise DependencyMissing("CSI Crosswalk is not configured",
+                                hint="Set SPADRA_CSI_CROSSWALK_KEY or load an authorized local catalog")
+    if standard not in ("omniclass", "uniformat") or (table is not None and table not in (21, 23)):
+        raise BadRequest("Invalid CSI standard or OmniClass table")
+    args = ["id: " + json.dumps(standard)]
+    if table is not None:
+        args.append("table: " + json.dumps(str(table)))
+    filters = []
+    if number:
+        filters.append("number: " + json.dumps(_code(number, "Classification number")))
+    elif search:
+        filters.append("search: " + json.dumps(_code(search, "Classification query")))
+    cls_args = "(" + ", ".join(filters) + ")" if filters else ""
+    details = ("crosswalks { number title standards { name version } }"
+               if crosswalks else "")
+    query = ("{ standards(" + ", ".join(args) + ") { name number version "
+             "classifications" + cls_args + " { number title " + details + " } } }")
+    request = urlrequest.Request(
+        CSI_API_URL, data=json.dumps({"query": query}).encode("utf-8"),
+        headers={"Authorization": key, "Content-Type": "application/json",
+                 "Accept": "application/json", "User-Agent": "SPADRA/1.0"},
+        method="POST")
+    try:
+        with urlrequest.urlopen(request, timeout=8.0) as response:
+            # Guard against unexpectedly large upstream content and HTML error pages.
+            data = response.read(2_000_001)
+            if len(data) > 2_000_000:
+                raise DependencyMissing("CSI Crosswalk response exceeded the size limit")
+        result = json.loads(data)
+    except urlerror.HTTPError as exc:
+        # Do not echo response bodies or request headers (subscription key).
+        raise DependencyMissing(
+            "CSI Crosswalk request was refused",
+            hint="Check the CSI license/API key and connection",
+            details={"http_status": exc.code}) from None
+    except (urlerror.URLError, TimeoutError, OSError, ValueError) as exc:
+        raise DependencyMissing("CSI Crosswalk is unreachable or returned invalid data",
+                                hint="Check connection and CSI Crosswalk service") from None
+    if not isinstance(result, dict) or result.get("errors"):
+        raise DependencyMissing("CSI Crosswalk returned an unsuccessful GraphQL result")
+    standards = result.get("data", {}).get("standards")
+    if not isinstance(standards, list):
+        raise DependencyMissing("Unexpected CSI Crosswalk response structure")
+    rows = []
+    edition = ""
+    for st in standards:
+        if not isinstance(st, dict):
+            continue
+        edition = str(st.get("version") or edition)
+        classes = st.get("classifications") or []
+        if not isinstance(classes, list):
+            raise DependencyMissing("Invalid CSI Crosswalk classification payload")
+        rows.extend(x for x in classes if isinstance(x, dict))
+    return rows, edition
+
+
+def _csi_lookup(code: str, table: int) -> dict[str, Any] | None:
+    matches, edition = _csi_rows("omniclass", table=table, number=code)
+    normalized = re.sub(r"\s+", "", code).casefold()
+    for row in matches:
+        number = row.get("number")
+        if isinstance(number, str) and re.sub(r"\s+", "", number).casefold() == normalized:
+            return {"code": number, "title": str(row.get("title") or number),
+                    "table": table, "edition": edition}
+    return None
+
+
+def _csi_search(kind: str, q: str, table: int, limit: int) -> list[dict[str, Any]]:
+    # Without a search term the API returns only root classifications;
+    # with a term it searches the licensed catalog throughout the hierarchy.
+    standard = "uniformat" if kind == "assembly" else "omniclass"
+    rows, edition = _csi_rows(standard, table=table if kind == "omniclass" else None,
+                             search=q.strip()[:100])
+    out = []
+    seen = set()
+    for item in rows:
+        number = item.get("number")
+        title = item.get("title")
+        if not isinstance(number, str) or not isinstance(title, str) or len(number) > 100:
+            continue
+        k = number.casefold()
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append({"code": number, "title": title,
+                    **({"table": table} if kind == "omniclass" else {}),
+                    "edition": edition})
+    return out[:limit]
+
+
+def _csi_crosswalk(assembly_code: str) -> list[dict[str, str]]:
+    """Only authoritative UniFormat -> OmniClass Table 21 direct crosswalks.
+
+    Return every distinct code/edition candidate; the caller autofills only
+    when there is a single unambiguous candidate. No word-similarity guessing.
+    """
+    classes, _ = _csi_rows("uniformat", number=assembly_code, crosswalks=True)
+    candidates = {}
+    for cls in classes:
+        code = cls.get("number")
+        if not isinstance(code, str) or code.casefold() != assembly_code.casefold():
+            continue
+        for other in cls.get("crosswalks") or []:
+            if not isinstance(other, dict):
+                continue
+            number = other.get("number")
+            if not isinstance(number, str) or not re.match(r"^21[-\s]", number):
+                continue
+            for standard in other.get("standards") or []:
+                if not isinstance(standard, dict):
+                    continue
+                if str(standard.get("name", "")).casefold().replace(" ", "") != "omniclass":
+                    continue
+                edition = str(standard.get("version") or "")
+                candidate = {"omniclass_code": number,
+                             "source": "CSI Crosswalk v3 UniFormat → OmniClass Table 21"
+                                       + (", version " + edition if edition else "")}
+                candidates[(number.casefold(), edition)] = candidate
+    return list(candidates.values())
+
 
 def info() -> dict[str, Any]:
     cs = catalog()
