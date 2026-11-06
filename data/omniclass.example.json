@@ -1,0 +1,10 @@
+{
+  "schema": "spadra.omniclass.v1",
+  "edition": "REPLACE WITH LICENSED CSI OMNICLASS EDITION",
+  "license_note": "Template only. Do not commit or publish licensed OmniClass tables or crosswalks without appropriate permission.",
+  "tables": {
+    "21": [],
+    "23": []
+  },
+  "assembly_mappings": []
+}
