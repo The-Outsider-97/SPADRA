@@ -48,10 +48,10 @@ function projectInfo(store: Store): HTMLElement[] {
 
 function group(store: Store, p: Properties, g: PropGroup): HTMLElement {
   const key = `${p.kind}:${g.title.replace(/\s*\(\d+\)$/, "")}`;
-  const isOpen = open.get(key) !== false;
+  const isOpen = open.get(key) ?? !g.collapsed;
   const el = h("div", { class: "prop-group", data: { open: String(isOpen) } });
   el.appendChild(h("button", { class: "group-head", type: "button", attrs: { "aria-expanded": String(isOpen) },
-    on: { click: (e) => { const now = !(open.get(key) !== false); open.set(key, now); el.dataset["open"] = String(now); (e.currentTarget as HTMLElement).setAttribute("aria-expanded", String(now)); } } },
+    on: { click: (e) => { const now = !(open.get(key) ?? !g.collapsed); open.set(key, now); el.dataset["open"] = String(now); (e.currentTarget as HTMLElement).setAttribute("aria-expanded", String(now)); } } },
     glyph("chevron-down"), g.title));
   for (const row of g.rows) el.appendChild(rowEl(store, p, row));
   if (g.add) el.appendChild(addForm(store, p, g.add));
