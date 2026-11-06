@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Private, separately licensed classification catalogs; never commit them.
+data/omniclass.local.json
+data/omniclass.private.json
