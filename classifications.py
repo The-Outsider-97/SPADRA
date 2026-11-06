@@ -289,8 +289,8 @@ def groups_for(meta: Mapping[str, Any], category: str) -> list[dict[str, Any]]:
     ifc = {"title": "Classification (IFC 4.3)", "rows": [
         {"key": "ifc_type", "label": "IFC Type Product", "type": "catalog",
          "catalog": "ifc", "value": type_name,
-         "catalog_suggest": [{"code": n, "title": n} for n in IFC_SUGGEST.get(category, ()
-                     if ifc_lookup(n)]},
+         "catalog_suggest": [{"code": n, "title": n} for n in IFC_SUGGEST.get(category, ())
+                             if ifc_lookup(n)]},
         {"key": "ifc_predefined_type", "label": "IFC PredefinedType", "type": "choice",
          "value": read(meta, "ifc_predefined_type"),
          "choices": [{"value": "", "label": "— Unassigned —"}] +
