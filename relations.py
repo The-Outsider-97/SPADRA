@@ -15,6 +15,7 @@ from ..tools.errors import BadRequest, NotFound
 from ..tools.validation import text
 from . import elements as E
 from . import sfb as SF
+from . import classifications as CL
 
 CUSTOM_NS = "custom"
 _CUSTOM_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,39}$")
@@ -210,6 +211,7 @@ def augment(project: Any, oid: str, out: dict[str, Any], relations: bool = False
     if item:
         out["groups"].append({"title": "Array", "rows": item})
     out["groups"].append(SF.rows_for(meta, cat))
+    out["groups"].extend(CL.groups_for(meta, cat))
     custom = custom_of(meta)
     out["groups"].append({"title": "Custom properties", "rows": [
         {"key": f"custom:{n}", "label": n, "type": "choice" if isinstance(v, bool) else "number" if isinstance(v, (int, float)) else "text",
