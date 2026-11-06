@@ -3,7 +3,7 @@
  *  Custom properties and sheet notes can be added and removed; a sheet's revision history opens the issue dialog. */
 import { h } from "../../../tools/web/src/dom.js";
 import { glyph } from "../../../tools/web/src/icons.js";
-import { toast } from "../../../tools/web/src/ui.js";
+import { promptDialog, toast } from "../../../tools/web/src/ui.js";
 import type { Store } from "./store.js";
 import type { PropGroup, Properties, PropRow, SfbEntry, CatalogEntry } from "./types.js";
 
@@ -92,7 +92,19 @@ function rowEl(store: Store, p: Properties, row: PropRow): HTMLElement {
   if (row.type === "sfb") return sfbRow(store, p, row, id, label);
   if (row.type === "catalog") return catalogRow(store, p, row, id, label);
   if (row.type === "choice") {
-    const select = h("select", { id, on: { change: () => { void commit(store, p, key, select.value, "choice"); } } },
+    const select = h("select", { id, on: { change: () => {
+      if (p.kind === "sheet" && key === "paper" && select.value === "custom") {
+        void (async () => {
+          const width = await promptDialog({ title: "Custom paper", label: "Width (mm)", placeholder: "900", confirmLabel: "Next" });
+          if (width === null) { select.value = String(row.value); return; }
+          const height = await promptDialog({ title: "Custom paper", label: "Height (mm)", placeholder: "600", confirmLabel: "Set paper" });
+          const w = Number(width), h = Number(height);
+          if (height === null) { select.value = String(row.value); return; }
+          if (![w, h].every((v) => Number.isFinite(v) && v >= 210 && v <= 5000)) { toast("Custom paper width and height must be 210–5000 mm.", { kind: "error" }); select.value = String(row.value); return; }
+          await commit(store, p, key, `Custom ${w}x${h} mm`, "choice");
+        })();
+      } else void commit(store, p, key, select.value, "choice");
+    } } },
       ...(row.choices ?? []).map((c) => h("option", { value: c.value, text: c.label, selected: c.value === row.value })));
     return h("div", { class: "prop-row" }, label, remove ? h("div", { class: "with-unit" }, select, remove) : select);
   }
@@ -208,6 +220,7 @@ export function editCommand(p: Pick<Properties, "kind" | "ref">, key: string, va
     if (key.startsWith("note:")) return { op: "sheet.set_note", params: { id: ref["sheet"], note: key.slice(5), key: "text", value } };
     return { op: "sheet.set", params: { id: ref["sheet"], key, value } };
   }
+  if (p.kind === "view" && (key === "cut_reference" || key === "cut_offset")) return { op: "view.set_cut_plane", params: { id: ref["view"], key, value } };
   if (p.kind === "view" && key === "name") return { op: "view.rename", params: { id: ref["view"], name: value } };
   if (p.kind === "view" && key === "depth") return { op: "view.set_section", params: { id: ref["view"], depth: value } };
   if (p.kind === "view" && (key === "opening_direction" || key === "material_hatching")) return { op: "view.set_option", params: { id: ref["view"], key, value } };

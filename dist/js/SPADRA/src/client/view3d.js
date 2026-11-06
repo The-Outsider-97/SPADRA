@@ -5,6 +5,7 @@ import { glyph } from "../../../tools/web/src/icons.js";
 import { toast } from "../../../tools/web/src/ui.js";
 import { cameraEye, cameraMatrices, centreOf, cross, featureEdges, HOME_VIEW, lookAround, normalise, orbitAbout, rayPlaneZ, rayThrough, rayTriangle, sub, transform, viewerDirection, walk, zoomAt, } from "./math3d.js";
 import { cssColor, rgba } from "./palette.js";
+import { addLayerDialog } from "./dialogs.js";
 const MM_PER = { mm: 1, cm: 10, m: 1000 };
 const MATERIAL_COLOR = {
     Concrete: [0.72, 0.73, 0.75], Timber: [0.70, 0.50, 0.30], Glass: [0.55, 0.75, 0.88], Masonry: [0.72, 0.42, 0.34], Steel: [0.50, 0.56, 0.64], Plasterboard: [0.92, 0.91, 0.88],
@@ -21,6 +22,7 @@ export class ModelView {
     overlay;
     octx;
     hud;
+    layerControls = h("div", { class: "layer-controls", attrs: { "aria-label": "Add layer on selected faces" } });
     levelSelect;
     hudGroups = [];
     fields = {};
@@ -90,7 +92,7 @@ export class ModelView {
         this.hud = h("div", { class: "wall-hud", hidden: true }, h("label", {}, "Level", this.levelSelect), ...this.hudGroups);
         const rail = h("div", { class: "view-rail", attrs: { role: "toolbar", "aria-label": "View tools" } }, this.railButton("home", "Home view", () => { this.home(); }), this.railButton("search", "Zoom to selection", () => { this.zoomSelection(); }), this.railButton("pan", "Pan (hold the right mouse button, or toggle here)", (b) => { this.panMode = !this.panMode; b.setAttribute("aria-pressed", String(this.panMode)); }), this.orbitButton = this.railButton("orbit", "Orbit around the selected element (turn off to orbit around the point in the middle of the view)", () => { this.store.setOrbitSelection(!this.store.orbitSelection); }), this.railButton("fit", "Zoom to fit the whole model", () => { this.fit(); }));
         const unavailable = h("div", { class: "view-unavailable", hidden: !!this.gl, text: "3D view needs WebGL 2, which this browser does not provide. The model, properties and exports still work." });
-        this.el = h("div", { class: "canvas-wrap" }, this.canvas, this.overlay, this.hud, rail, unavailable);
+        this.el = h("div", { class: "canvas-wrap" }, this.canvas, this.overlay, this.layerControls, this.hud, rail, unavailable);
         if (this.gl)
             this.setup(this.gl);
         new ResizeObserver(() => this.resize()).observe(this.el);
@@ -178,7 +180,7 @@ export class ModelView {
                 gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(pos), gl.STATIC_DRAW);
                 gl.bindBuffer(gl.ARRAY_BUFFER, edge);
                 gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(edges), gl.STATIC_DRAW);
-                this.drawables.push({ id: o.id, name: o.name, material: o.material, category: o.category, tri, triCount: pos.length / 6, edge, edgeCount: edges.length / 3, verts: o.vertices, faces: o.faces });
+                this.drawables.push({ id: o.id, name: o.name, material: o.material, category: o.category, tri, triCount: pos.length / 6, edge, edgeCount: edges.length / 3, verts: o.vertices, faces: o.faces, layerPoints: o.layer_points ?? [] });
             }
         }
         this.buildGrid();
@@ -829,6 +831,27 @@ export class ModelView {
         this.matrices = cameraMatrices(this.cam, this.width, this.height, this.extent);
         this.paintScene();
         this.paintOverlay();
+        this.syncLayerControls();
+    }
+    syncLayerControls() {
+        this.layerControls.replaceChildren();
+        const selection = this.store.selection;
+        if (this.clean || this.store.tool !== "select" || selection?.kind !== "model" || selection.ids.length !== 1)
+            return;
+        const id = selection.ids[0];
+        const item = this.drawables.find((d) => d.id === id && ["wall", "floor", "roof"].includes(d.category));
+        if (!item)
+            return;
+        for (const { side, point } of item.layerPoints) {
+            const pos = this.project(point);
+            if (!pos || pos[0] < 8 || pos[1] < 8 || pos[0] > this.width - 8 || pos[1] > this.height - 8)
+                continue;
+            const button = h("button", { class: "layer-plus", type: "button", text: "+", attrs: { title: `Add ${side} ${item.category} layer`, "aria-label": `Add ${side} ${item.category} layer` },
+                on: { click: (event) => { event.stopPropagation(); void addLayerDialog(this.store, id, item.category, side); } } });
+            button.style.left = `${pos[0]}px`;
+            button.style.top = `${pos[1]}px`;
+            this.layerControls.appendChild(button);
+        }
     }
     parseColor(value) { return rgba(value); }
     paintScene() {

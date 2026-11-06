@@ -16,6 +16,8 @@ export class SheetView {
     box = { x: 0, y: 0, w: 841, h: 594 };
     svg = null;
     drag = null;
+    selectedViewport = null;
+    moving = null;
     kept = null; // the person's zoom and pan, while the whole sheet is set up for printing
     pageRule = new CSSStyleSheet();
     source = null; // set by the shell, which owns the 3D view
@@ -24,9 +26,11 @@ export class SheetView {
         this.host = h("div", { class: "sheet-wrap", attrs: { tabindex: "0", "aria-label": "Sheet. Arrow keys move it, plus and minus zoom, 0 shows the whole sheet." } });
         this.el = h("div", { class: "canvas-wrap", hidden: true }, this.host);
         this.host.addEventListener("wheel", (e) => { e.preventDefault(); this.zoom(e); }, { passive: false });
-        this.host.addEventListener("pointerdown", (e) => { this.host.setPointerCapture(e.pointerId); this.drag = { x: e.clientX, y: e.clientY }; });
-        this.host.addEventListener("pointermove", (e) => this.pan(e));
-        this.host.addEventListener("pointerup", () => { this.drag = null; });
+        this.host.addEventListener("pointerdown", (e) => this.pointerDown(e));
+        this.host.addEventListener("pointermove", (e) => this.pointerMove(e));
+        this.host.addEventListener("pointerup", (e) => { void this.pointerUp(e); });
+        this.host.addEventListener("pointercancel", () => { this.moving = null; this.drag = null; if (this.data)
+            this.draw(this.data); });
         this.host.addEventListener("keydown", (e) => this.key(e));
         window.addEventListener("beforeprint", () => this.prepareToPrint()); // also for Ctrl+P and the browser's own menu
         window.addEventListener("afterprint", () => this.restoreAfterPrint());
@@ -50,15 +54,64 @@ export class SheetView {
         document.adoptedStyleSheets = document.adoptedStyleSheets.filter((x) => x !== this.pageRule);
     }
     /** Print the sheet (or save it as PDF from the browser's print dialog). */
-    print() { this.prepareToPrint(); try {
-        window.print();
+    print() { this.prepareToPrint(); window.print(); }
+    /** The same SVG scene used by Print, rasterized as the SLDC reader's portable visual preview.
+     *  The editable drawing primitives remain in the SPADRA SLDC extension. */
+    async printablePng() {
+        const d = this.data;
+        if (!d || !this.svg)
+            throw new Error("Open the sheet before exporting it.");
+        const clone = this.svg.cloneNode(true);
+        clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+        clone.setAttribute("viewBox", `0 0 ${d.width} ${d.height}`);
+        clone.setAttribute("width", String(Math.round(d.width * 96 / 25.4)));
+        clone.setAttribute("height", String(Math.round(d.height * 96 / 25.4)));
+        clone.setAttribute("style", "--paper:#ffffff;--ink:#1d232a;--border:#66717c;--muted:#66717c;--select:#1766bd;font-family:Arial,sans-serif");
+        // Selection handles are an editing aid, never part of the paper.
+        clone.querySelectorAll('[data-sheet-selection="true"]').forEach((el) => el.remove());
+        const xml = new XMLSerializer().serializeToString(clone);
+        const url = URL.createObjectURL(new Blob([xml], { type: "image/svg+xml;charset=utf-8" }));
+        try {
+            const picture = new Image();
+            picture.src = url;
+            await picture.decode();
+            const canvas = document.createElement("canvas");
+            canvas.width = Math.round(d.width * 96 / 25.4);
+            canvas.height = Math.round(d.height * 96 / 25.4);
+            const context = canvas.getContext("2d");
+            if (!context)
+                throw new Error("The browser does not support sheet image export.");
+            context.fillStyle = "#fff";
+            context.fillRect(0, 0, canvas.width, canvas.height);
+            context.drawImage(picture, 0, 0, canvas.width, canvas.height);
+            return canvas.toDataURL("image/png").split(",")[1] ?? "";
+        }
+        finally {
+            URL.revokeObjectURL(url);
+        }
     }
-    finally {
-        this.restoreAfterPrint();
-    } }
     key(e) {
         const d = this.data;
-        if (!d || e.ctrlKey || e.metaKey || e.altKey)
+        if (!d || e.ctrlKey || e.metaKey)
+            return;
+        if (e.key === "Escape" && this.selectedViewport) {
+            this.selectedViewport = null;
+            e.preventDefault();
+            this.draw(d);
+            return;
+        }
+        if (e.altKey && e.key.startsWith("Arrow") && this.selectedViewport) {
+            const vp = d.viewports.find((v) => v.id === this.selectedViewport);
+            if (vp && !vp.locked) {
+                e.preventDefault();
+                const step = e.shiftKey ? 0.1 : 1;
+                const x = vp.x + (e.key === "ArrowRight" ? step : e.key === "ArrowLeft" ? -step : 0);
+                const y = vp.y + (e.key === "ArrowUp" ? step : e.key === "ArrowDown" ? -step : 0);
+                void this.store.run("sheet.set_viewport", { id: d.id, viewport: vp.id, key: "position", value: [x, y] });
+            }
+            return;
+        }
+        if (e.altKey)
             return;
         const step = (e.shiftKey ? 0.25 : 0.06);
         const move = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
@@ -133,14 +186,81 @@ export class SheetView {
         this.drag = { x: e.clientX, y: e.clientY };
         this.applyBox();
     }
+    /** Convert from physical screen pixels to the sheet's SVG millimetres, including letterboxing and zoom/pan. */
+    paperPoint(e) {
+        const matrix = this.svg?.getScreenCTM();
+        return matrix ? new DOMPoint(e.clientX, e.clientY).matrixTransform(matrix.inverse()) : null;
+    }
+    pointerDown(e) {
+        if (e.button !== 0 && e.button !== 1)
+            return;
+        let target = e.target instanceof Element ? e.target.closest("[data-viewport]") : null;
+        // The inner drawing group also has a viewport id; drag the outer wrapper so its title and selection move together.
+        while (target?.parentElement?.closest("[data-viewport]"))
+            target = target.parentElement.closest("[data-viewport]");
+        const id = target?.dataset["viewport"];
+        const vp = id && e.button === 0 ? this.data?.viewports.find((v) => v.id === id) : undefined;
+        this.host.setPointerCapture(e.pointerId);
+        if (vp) {
+            this.selectedViewport = vp.id;
+            const from = this.paperPoint(e);
+            if (from && target && !vp.locked)
+                this.moving = { vp, group: target, pointer: e.pointerId, from, dx: 0, dy: 0, started: false };
+            this.drag = null;
+            return;
+        }
+        this.selectedViewport = null;
+        this.drag = { x: e.clientX, y: e.clientY };
+    }
+    pointerMove(e) {
+        if (!this.moving || this.moving.pointer !== e.pointerId) {
+            this.pan(e);
+            return;
+        }
+        const at = this.paperPoint(e);
+        if (!at)
+            return;
+        const moving = this.moving;
+        moving.dx = at.x - moving.from.x;
+        moving.dy = at.y - moving.from.y;
+        if (Math.hypot(moving.dx, moving.dy) > 0.5)
+            moving.started = true;
+        if (moving.started)
+            moving.group.setAttribute("transform", `translate(${moving.dx} ${moving.dy})`);
+    }
+    async pointerUp(e) {
+        this.drag = null;
+        const moving = this.moving;
+        this.moving = null;
+        if (!moving || moving.pointer !== e.pointerId)
+            return;
+        if (!moving.started) {
+            if (this.data)
+                this.draw(this.data);
+            return;
+        }
+        // Screen Y points down; sheet Y measures up from the bottom edge.
+        const finalX = moving.vp.x + moving.dx, finalY = moving.vp.y - moving.dy;
+        const done = await this.store.run("sheet.set_viewport", { id: this.data?.id, viewport: moving.vp.id, key: "position", value: [finalX, finalY], snap: this.store.snapGrid });
+        if (!done && this.data)
+            this.draw(this.data);
+    }
     applyBox() { this.svg?.setAttribute("viewBox", `${this.box.x} ${this.box.y} ${this.box.w} ${this.box.h}`); }
     draw(d) {
         const svg = s("svg", { attrs: { viewBox: `${this.box.x} ${this.box.y} ${this.box.w} ${this.box.h}`, role: "img", "aria-label": `Sheet ${d.number} ${d.name}`, preserveAspectRatio: "xMidYMid meet" },
             css: { width: "100%", height: "100%", display: "block", cursor: "grab", "touch-action": "none" } });
         svg.appendChild(s("rect", { attrs: { x: 0, y: 0, width: d.width, height: d.height, fill: "var(--paper)", stroke: "var(--border)", "stroke-width": 0.6 } }));
         svg.appendChild(s("rect", { attrs: { x: MARGIN, y: MARGIN, width: d.width - 2 * MARGIN, height: d.height - 2 * MARGIN, fill: "none", stroke: "var(--ink)", "stroke-width": 0.7 } }));
-        for (const vp of d.viewports)
-            svg.appendChild(this.viewport(d, vp));
+        for (const vp of d.viewports) {
+            const wrap = s("g", { data: { viewport: vp.id }, attrs: { role: "group", "aria-label": `${vp.title || vp.view.name}, ${vp.locked ? "locked" : "drag to reposition"}` } });
+            const b = vp.bounds_mm;
+            if (b && b[2] > b[0] && b[3] > b[1])
+                wrap.appendChild(s("rect", { attrs: { x: b[0], y: d.height - b[3], width: b[2] - b[0], height: b[3] - b[1], fill: "transparent", "pointer-events": "all" } }));
+            wrap.appendChild(this.viewport(d, vp));
+            if (vp.id === this.selectedViewport && b)
+                wrap.appendChild(s("rect", { attrs: { x: b[0], y: d.height - b[3], width: b[2] - b[0], height: b[3] - b[1], fill: "none", stroke: "var(--select)", "stroke-width": 0.8, "stroke-dasharray": "3 2", "pointer-events": "none", "data-sheet-selection": "true" } }));
+            svg.appendChild(wrap);
+        }
         svg.appendChild(this.titleBlock(d));
         this.svg = svg;
         replace(this.host, svg);
@@ -163,7 +283,7 @@ export class SheetView {
             this.solidFaces(g, vp.solid);
         const outline = (w) => `M${w.polygon.map((p) => `${p[0]} ${p[1]}`).join("L")}Z`;
         const stroke = { stroke: "var(--ink)", "stroke-width": 1, "vector-effect": "non-scaling-stroke", "stroke-linejoin": "round" };
-        for (const cat of ["foundation", "floor", "room", "generic", "stair", "wall", "structural", "window", "door", "column", "gutter", "downpipe", "grid"]) {
+        for (const cat of ["foundation", "floor", "roof", "room", "generic", "stair", "wall", "structural", "window", "door", "column", "gutter", "downpipe", "grid"]) {
             for (const w of (vp.model ?? []).filter((m) => m.category === cat)) {
                 if (cat === "room" || cat === "generic" || cat === "column" || cat === "stair" || cat === "grid" || cat === "gutter" || cat === "downpipe")
                     this.otherItem(g, w, 1 / k);
@@ -182,7 +302,7 @@ export class SheetView {
                                 g.appendChild(s("path", { attrs: { d: bd, fill: "none", "stroke-width": 0.3, stroke: "var(--ink)", "vector-effect": "non-scaling-stroke" } }));
                         }
                 }
-                else if (cat === "floor")
+                else if (cat === "floor" || cat === "roof")
                     g.appendChild(s("path", { attrs: { d: outline(w), fill: "var(--ink)", "fill-opacity": 0.05, stroke: "var(--muted)", "stroke-width": 0.75, "vector-effect": "non-scaling-stroke" } }));
                 else if (cat === "structural")
                     g.appendChild(s("path", { attrs: { d: outline(w), fill: "none", "stroke-dasharray": "6 4", ...stroke } }));

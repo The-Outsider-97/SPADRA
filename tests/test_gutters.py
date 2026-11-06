@@ -218,7 +218,7 @@ class Downpipes(Case):
     def test_downpipes_are_drawn_on_every_level_they_pass_and_the_gutter_on_its_own(self):
         self.pipe(offset=5.0)
         names = lambda level: sorted(i["category"] for i in E.plan_items(self.p, level, 1000.0))             # noqa: E731
-        self.assertEqual(names(self.roof_level), ["downpipe", "gutter"])
+        self.assertEqual(names(self.roof_level), ["downpipe", "gutter", "roof"])
         self.assertEqual(names(self.l2), ["downpipe"])
         self.assertEqual(names(self.l1), ["downpipe"])
 

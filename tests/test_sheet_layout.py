@@ -46,6 +46,19 @@ class Layout(Case):
 
 
 class NewViewports(Layout):
+    def test_all_a_series_orientations_and_custom_sizes_are_real_sheet_dimensions(self):
+        from applications.SPADRA.project import paper_size
+        for size in range(5):
+            for orientation in ("Portrait", "Landscape"):
+                name = f"A{size} {orientation}"
+                self.run_("sheet.set", id=self.sheet, key="paper", value=name)
+                dims = paper_size(name)
+                self.assertEqual((self.p.sheet_data(self.sheet)["width"], self.p.sheet_data(self.sheet)["height"]), dims)
+        self.run_("sheet.set", id=self.sheet, key="paper", value="Custom 900x610 mm")
+        self.assertEqual((self.p.sheet_data(self.sheet)["width"], self.p.sheet_data(self.sheet)["height"]), (900, 610))
+        with self.assertRaises(BadRequest):
+            self.run_("sheet.set", id=self.sheet, key="paper", value="Custom 100x120 mm")
+
     def test_new_viewports_land_in_free_places_and_never_pile_up(self):
         out = [self.place(scale="1:100") for _ in range(4)]
         self.assertFalse(any(o["crowded"] for o in out))
@@ -224,6 +237,37 @@ class Export(Layout):
             self.assertIn(needle, text)
         self.assertEqual(len(package.assets), 1)                                       # the 3D picture, byte for byte
 
+    def test_graphical_sheet_export_keeps_the_a1_page_and_editable_viewport_structure(self):
+        from applications.SPADRA import sheets as SH
+        from src.utils import sldc as S
+        from .test_sheet_contents import png
+        viewport = self.place(scale="1:100")["id"]
+        sheet_png = png(841, 594)
+        data, _ = SH.to_sldc(self.p, self.sheet, sheet_png)
+        pkg = S.loads_package(data)
+        section = pkg.document["sections"][0]
+        self.assertEqual(section["page"]["width_mm"], 841.0)
+        self.assertEqual(section["page"]["height_mm"], 594.0)
+        figure = pkg.document["blocks"][0]
+        self.assertEqual(figure["type"], "figure")
+        self.assertEqual(figure["section"], section["id"])
+        self.assertEqual(figure["figure"]["width_mm"], 841.0)
+        self.assertEqual(figure["figure"]["height_mm"], 594.0)
+        self.assertEqual(pkg.assets[figure["figure"]["asset"]].data, sheet_png)
+        self.assertEqual(SH.read_sldc(data)["sheet"]["viewports"][0]["id"], viewport)
+        self.assertTrue(SH.verify_sldc(self.p, data, self.sheet)["identical"])
+        imported = self.run_("sheet.import", data=__import__("base64").b64encode(data).decode())["id"]
+        reopened = self.p.sheet_data(imported)
+        self.assertEqual((reopened["width"], reopened["height"]), (841.0, 594.0))
+        self.assertEqual([(v["x"], v["y"], v["scale"]) for v in reopened["viewports"]],
+                         [(v["x"], v["y"], v["scale"]) for v in self.p.sheet_data(self.sheet)["viewports"]])
+
+    def test_sheet_export_refuses_a_preview_with_incorrect_page_proportions(self):
+        from applications.SPADRA import sheets as SH
+        from .test_sheet_contents import png
+        with self.assertRaises(BadRequest):
+            SH.to_sldc(self.p, self.sheet, png(210, 297))
+
     def test_reading_the_file_back_finds_no_difference_from_the_sheet(self):
         from applications.SPADRA import sheets as SH
         self.build()
@@ -291,14 +335,19 @@ class Export(Layout):
 class OverHttp(ServerCase):
     def test_the_sheet_downloads_as_sldc_and_verifies_against_itself(self):
         from src.utils import sldc
+        from .test_sheet_contents import png
+        import base64
         a = self.api
         a.post("/api/project/new", {"name": "S", "unit": "mm"})
         sid = a.cmd("sheet.create", {"name": "Plan"})["result"]["id"]
-        status, headers, raw = a.raw("GET", f"/api/export/sheet/{sid}")
-        self.assertEqual(status, 200)
-        self.assertIn("sldc", headers["content-type"])
+        self.assertEqual(a.call("GET", f"/api/export/sheet/{sid}")[0], 409)
+        project_revision = a.get("/api/project/tree")["project"]["revision"]
+        result = a.post(f"/api/export/sheet/{sid}", {"preview_png": base64.b64encode(png(841, 594)).decode(), "revision": project_revision})
+        raw = base64.b64decode(result["data"])
         package = sldc.loads_package(raw)
         self.assertEqual(package.document["extensions"]["spadra.sheet"]["format"], "spadra.sheet.v1")
+        self.assertEqual(package.document["sections"][0]["page"]["width_mm"], 841.0)
+        self.assertEqual(package.document["blocks"][0]["type"], "figure")
         check = a.get(f"/api/export/sheet/{sid}/verify")
         self.assertEqual((check["identical"], check["differences"]), (True, []))
-        self.assertEqual(a.call("GET", "/api/export/sheet/nope")[0], 404)
+        self.assertEqual(a.call("GET", "/api/export/sheet/nope?legacy_text=1")[0], 404)

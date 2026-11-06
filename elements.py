@@ -25,7 +25,7 @@ from . import classifications as CL
 NS = "spadra"
 MATERIALS = ("Concrete", "Timber", "Glass", "Masonry", "Steel", "Plasterboard")
 BEAM_MATERIALS = ("Steel", "Concrete", "Timber")
-CUT_HEIGHT = 1.2                      # plan view cuts walls 1.2 m above the level, as architects' plans do
+CUT_HEIGHT = 1.5                      # default cut plane, relative to the associated level (metres)
 DOOR_LEAF = 0.05                      # thickness of the drawn door leaf, m
 GLASS = 0.03                          # thickness of the drawn glazing panel, m
 ROOF_TYPES = {"flat": "Flat Roof", "shed": "Shed Roof", "gable": "Gable Roof", "hip": "Hip Roof"}      # the four everyday roofs; each can be changed to another later
@@ -1355,11 +1355,13 @@ def _wall_piece(fr: Mapping[str, Any], x0: float, x1: float, f: float) -> list[l
     return [[(fr["start"][0] + c * x - s * y) * f, (fr["start"][1] + s * x + c * y) * f] for x, y in corners]
 
 
-def plan_items(project: Any, level_id: str, f: float, *, show_opening: bool = True, show_hatching: bool = True) -> list[dict[str, Any]]:
+def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | None = None, show_opening: bool = True, show_hatching: bool = True) -> list[dict[str, Any]]:
     """What the model shows on the plan of a level, in drawing units (``f`` converts metres). Read from parameters on every call, so it
     can never disagree with the 3D model."""
     out: list[dict[str, Any]] = []
     walls: dict[str, dict[str, Any]] = {}
+    cut_z = level_elevation(project, level_id) + CUT_HEIGHT if cut_elevation is None else float(cut_elevation)
+    wall_cuts: dict[str, float] = {}
     for oid in element_ids(project):
         obj = project.model.get(oid)
         meta = obj["metadata"]
@@ -1372,7 +1374,13 @@ def plan_items(project: Any, level_id: str, f: float, *, show_opening: bool = Tr
             except BadRequest:
                 pass                                                                     # a downpipe without its gutter is reported by the model check, not drawn
             continue
-        if m(meta, "level") != level_id:
+        if cat == "wall":
+            frame = wall_frame(project, oid)
+            relative_cut = cut_z - frame["base"]
+            if not 0.0 <= relative_cut < frame["height"]:
+                continue
+            wall_cuts[oid] = relative_cut
+        elif m(meta, "level") != level_id:
             continue
         if cat == "gutter":
             from . import gutters as GU
@@ -1386,8 +1394,9 @@ def plan_items(project: Any, level_id: str, f: float, *, show_opening: bool = Tr
                 continue
             walls[oid] = fr
             axis = {"a": [fr["start"][0] * f, fr["start"][1] * f], "b": [fr["end"][0] * f, fr["end"][1] * f], "thickness": fr["thickness"] * f}
+            local_height = wall_cuts[oid]
             cuts = sorted(opening_span(project.model.get(h)["metadata"])[:2] for h in hosted(project, oid)
-                          if opening_span(project.model.get(h)["metadata"])[2] <= CUT_HEIGHT < opening_span(project.model.get(h)["metadata"])[3])
+                          if opening_span(project.model.get(h)["metadata"])[2] <= local_height < opening_span(project.model.get(h)["metadata"])[3])
             cursor = 0.0
             from . import layers as LY
             layered = LY.is_layered(meta)
@@ -1400,7 +1409,7 @@ def plan_items(project: Any, level_id: str, f: float, *, show_opening: bool = Tr
                         piece["hatch"] = DOC.hatch_pattern(project, m(meta, "material"))
                     if layered and first:                                                                  # every layer's band, once for the whole wall
                         piece["bands"] = LY.plan_bands(project, oid, fr, [{"id": h, "x0": opening_span(project.model.get(h)["metadata"])[0], "x1": opening_span(project.model.get(h)["metadata"])[1]}
-                                                                          for h in hosted(project, oid) if opening_span(project.model.get(h)["metadata"])[2] <= CUT_HEIGHT < opening_span(project.model.get(h)["metadata"])[3]], f)
+                                                                          for h in hosted(project, oid) if opening_span(project.model.get(h)["metadata"])[2] <= local_height < opening_span(project.model.get(h)["metadata"])[3]], f)
                         if show_hatching:
                             from . import documentation as DOC
                             for band in piece["bands"]:
@@ -1414,6 +1423,12 @@ def plan_items(project: Any, level_id: str, f: float, *, show_opening: bool = Tr
             if m(meta, "cut"):
                 item["holes"] = [[[q[0] * f, q[1] * f] for q in h] for h in m(meta, "cut")]
             out.append(item)
+        elif cat == "roof":
+            # Roof plans show the roof's projected footprint below the cut
+            # plane, including its editable boundary. Sections retain the
+            # actual pitched surfaces and material cut geometry.
+            boundary = [[q[0] * f, q[1] * f] for q in m(meta, "boundary")]
+            out.append({"id": oid, "category": "roof", "name": obj["name"], "polygon": boundary, "outline": boundary})
         elif cat in FORMS:
             from . import forms as FX
             out.append(FX.plan_item(project, oid, f))
@@ -1453,7 +1468,7 @@ def plan_items(project: Any, level_id: str, f: float, *, show_opening: bool = Tr
         fr = walls[m(meta, "host")]
         x0, x1, sill, head = opening_span(meta)
         item: dict[str, Any] = {"id": oid, "category": cat, "name": obj["name"], "polygon": _rect(fr["start"], fr["angle"], x0, x1, fr["thickness"] / 2, f),
-                                "cut": sill <= CUT_HEIGHT < head}
+                                "cut": sill <= wall_cuts[m(meta, "host")] < head}
         item["symbol"] = _symbol(cat, meta, fr, x0, x1, f, show_opening=show_opening)
         out.append(item)
     return out

@@ -6,6 +6,31 @@ import { flatten, type Store } from "./store.js";
 
 const KEY = "spadra.appearance";
 
+/** Contextual '+' on a selected BIM face; Properties remains the editor for layers already placed. */
+export async function addLayerDialog(store: Store, id: string, category: "wall" | "floor" | "roof", side: string): Promise<void> {
+  const choices = store.properties?.groups.find((g) => g.title.startsWith("Layers ("))?.rows.find((r) => r.key?.endsWith(":material"))?.choices ?? [];
+  const material = h("select", { attrs: { "aria-label": "Layer material" } },
+    ...(choices.length ? choices : [{ value: "Concrete", label: "Concrete" }, { value: "Plasterboard", label: "Plasterboard" }]).map((c) => h("option", { value: c.value, text: c.label })));
+  material.value = category === "wall" ? "Plasterboard" : material.options[0]?.value ?? "Concrete";
+  const thickness = h("input", { type: "number", value: category === "wall" ? "12.5" : "50", min: "1", max: "5000", step: "any", attrs: { "aria-label": "Layer thickness in millimetres" } });
+  const openings = h("select", { attrs: { "aria-label": "Opening inheritance" } }, h("option", { value: "all", text: "Inherit all openings and voids" }), h("option", { value: "none", text: "Do not inherit existing cuts" }));
+  const boundary = category === "wall" ? ["start", "end", "bottom", "top"].map((edge) => [edge, h("input", { type: "number", value: "0", step: "any", attrs: { "aria-label": `${edge} edge offset in mm` } })] as const) : [];
+  const handle = openDialog<true>({ title: `Add ${side} ${category} layer`, size: "normal",
+    body: h("div", { css: { display: "grid", gap: ".65rem" } },
+      labelled("Material", material), labelled("Thickness (mm)", thickness), labelled("Opening / void cuts", openings),
+      ...boundary.map(([edge, input]) => labelled(`${edge[0]?.toUpperCase()}${edge.slice(1)} boundary (mm)`, input)),
+      h("p", { class: "muted", text: "Preview the resulting geometry after adding. The layer's material, cut selection, and edge offsets remain editable in Properties." })),
+    actions: [{ label: "Add layer", kind: "primary", run: async () => {
+      const amount = Number(thickness.value);
+      if (!Number.isFinite(amount) || amount < 1 || amount > 5000) { toast("Thickness must be between 1 and 5000 mm.", { kind: "error" }); return undefined; }
+      const edgeValues: Record<string, number> = {};
+      for (const [edge, input] of boundary) { const n = Number(input.value); if (!Number.isFinite(n)) { toast(`Enter a valid ${edge} boundary.`, { kind: "error" }); return undefined; } edgeValues[edge] = n; }
+      return (await store.run("model.add_layer", { id, side, thickness: amount, material: material.value, openings: openings.value, ...edgeValues })) ? true : undefined;
+    } }],
+  });
+  await handle.result;
+}
+
 export function loadAppearance(): Appearance {
   try { return normaliseAppearance(JSON.parse(window.localStorage.getItem(KEY) ?? "null") as Partial<Appearance> | null); } catch { return DEFAULT_APPEARANCE; }
 }

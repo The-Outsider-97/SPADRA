@@ -92,7 +92,7 @@ def _rebuild(project: Any, oid: str) -> None:
 
 # ----------------------------------------------------------------------------------------------------------------------------- editing
 def add_layer(project: Any, oid: str, p: Mapping[str, Any]) -> str:
-    """Add a layer (the "+" of the Properties panel). ``position`` is its place in the stack (default: last)."""
+    """Add a layer on a chosen physical side. The stack order determines the face it grows from."""
     cat = _check_cat(project, oid)
     rows = stack(project, oid)
     if len(rows) >= MAX_LAYERS:
@@ -101,9 +101,36 @@ def add_layer(project: Any, oid: str, p: Mapping[str, Any]) -> str:
     if material not in materials():
         raise BadRequest(f"material must be one of {', '.join(materials())}")
     thickness = number(p.get("thickness", 12.5 if cat == "wall" else 50), "thickness (mm)", 1, 5000) / 1000.0
-    row = _full({"name": text(p.get("name") or material, "name", 60), "material": material, "thickness": thickness})
-    position = len(rows) if p.get("position") is None else int(number(p["position"], "position", 0, len(rows)))
+    mode = p.get("openings", "all")
+    if mode not in MODES:
+        raise BadRequest(f"openings must be one of {', '.join(MODES)}")
+    opening_ids = p.get("opening_ids") or []
+    if mode == "selected" and (not isinstance(opening_ids, list) or any(i not in {o["id"] for o in openers(project, oid)} for i in opening_ids)):
+        raise BadRequest("Selected openings must belong to the host element")
+    row = _full({"name": text(p.get("name") or material, "name", 60), "material": material, "thickness": thickness,
+                 "openings": mode, "opening_ids": opening_ids if mode == "selected" else []})
+    side = p.get("side")
+    faces = {"wall": ("left", "right"), "floor": ("top", "bottom"), "roof": ("outside", "inside")}[cat]
+    if side is not None and side not in faces:
+        raise BadRequest(f"{cat} layers must use side {faces[0]} or {faces[1]}")
+    if side is not None and p.get("position") is not None:
+        raise BadRequest("Choose a physical side or a stack position, not both")
+    position = (0 if side == faces[0] else len(rows)) if side is not None else (len(rows) if p.get("position") is None else int(number(p["position"], "position", 0, len(rows))))
+    if cat == "wall":
+        for edge in EDGES:
+            if edge in p:
+                row[edge] = number(p[edge], f"{edge} (mm)", -100000, 100000) / 1000.0
     rows.insert(position, row)
+    # Preserve the pre-existing assembly's world-space faces. A layer on the
+    # opposite side must grow outwards, not shift the original slab/roof.
+    if side is not None:
+        current_offset = float(E.m(E.meta_of(project, oid), "offset", 0.0))
+        roof_kind = E.m(E.meta_of(project, oid), "roof", "flat")
+        delta = (thickness if cat == "floor" and side == "top" else
+                 -thickness if cat == "roof" and roof_kind == "flat" and side == "inside" else
+                 thickness if cat == "roof" and roof_kind != "flat" and side == "outside" else 0.0)
+        if delta:
+            E._attach(project, oid, {"offset": current_offset + delta})
     _store(project, oid, rows)
     _rebuild(project, oid)
     return row["id"]
@@ -431,4 +458,4 @@ def rows(project: Any, oid: str) -> dict[str, Any] | None:
             block += [{"key": key(e), "label": f"{n}. {e.title()} edge", "type": "number", "unit": "mm", "value": round(lay[e] * 1000, 6)} for e in EDGES]
         out += block
     out.append({"label": "Total thickness", "type": "readonly", "value": f"{total(layers) * 1000:g} mm"})
-    return {"title": f"Layers ({len(layers)})", "rows": out, "add": "layer"}
+    return {"title": f"Layers ({len(layers)})", "rows": out}

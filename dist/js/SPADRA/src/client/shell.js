@@ -47,12 +47,58 @@ export class Shell {
     area = h("div", { class: "canvas-area" });
     empty = h("div", { class: "empty-stage", text: "Open a view from the Project Browser." });
     el = h("div", { id: "app" });
+    /** Keep panel sizing within the shared workspace, without introducing another layout manager. */
+    resizePanel(workspace, panel, side) {
+        const key = side === "left" ? "spadra.browserWidth" : "spadra.propertiesWidth";
+        const variable = side === "left" ? "--browser-width" : "--properties-width";
+        try {
+            const previous = Number(localStorage.getItem(key));
+            if (previous >= 190 && previous <= 720)
+                workspace.style.setProperty(variable, `${previous}px`);
+        }
+        catch { /* Private browsing: widths remain session-only. */ }
+        const handle = h("div", { class: `panel-resizer ${side}`, attrs: { role: "separator", tabindex: "0", "aria-label": `Resize ${side === "left" ? "Project Browser" : "Properties"}`, "aria-orientation": "vertical", title: "Drag to resize; double-click to reset" } });
+        const setWidth = (requested) => {
+            const max = Math.max(190, Math.min(720, workspace.clientWidth - (side === "left" ? workspace.lastElementChild?.clientWidth ?? 230 : workspace.firstElementChild?.clientWidth ?? 230) - 360));
+            const width = Math.round(Math.max(190, Math.min(max, requested)));
+            workspace.style.setProperty(variable, `${width}px`);
+            handle.setAttribute("aria-valuenow", String(width));
+            try {
+                localStorage.setItem(key, String(width));
+            }
+            catch { /* Unavailable. */ }
+        };
+        handle.addEventListener("pointerdown", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            handle.setPointerCapture(event.pointerId);
+            const origin = event.clientX, width = panel.getBoundingClientRect().width;
+            const move = (e) => setWidth(width + (e.clientX - origin) * (side === "left" ? 1 : -1));
+            const stop = () => { handle.removeEventListener("pointermove", move); handle.removeEventListener("pointerup", stop); handle.removeEventListener("pointercancel", stop); };
+            handle.addEventListener("pointermove", move);
+            handle.addEventListener("pointerup", stop);
+            handle.addEventListener("pointercancel", stop);
+        });
+        handle.addEventListener("dblclick", () => setWidth(280));
+        handle.addEventListener("keydown", (e) => { if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+            e.preventDefault();
+            setWidth(panel.getBoundingClientRect().width + (e.key === "ArrowRight" ? 16 : -16) * (side === "left" ? 1 : -1));
+        }
+        else if (e.key === "Home") {
+            e.preventDefault();
+            setWidth(280);
+        } });
+        panel.appendChild(handle);
+    }
     constructor() {
         this.area.append(this.drawing.el, this.model.el, this.sheet.el, this.schedule.el, this.empty);
         this.sheet.source = { camera: () => this.model.cameraDirection() };
         const stage = h("div", { class: "stage" }, this.tabs, this.area, this.timeline.el);
         const right = h("section", { class: "panel", attrs: { "aria-label": "Properties" } }, h("div", { class: "panel-head" }, h("span", { text: "Properties" })), this.props);
-        this.el.append(this.title, this.menubar, this.ribbon, h("main", { class: "workspace" }, this.browser.el, stage, right), this.status, this.toastEl, this.assistant.el);
+        const workspace = h("main", { class: "workspace" }, this.browser.el, stage, right);
+        this.resizePanel(workspace, this.browser.el, "left");
+        this.resizePanel(workspace, right, "right");
+        this.el.append(this.title, this.menubar, this.ribbon, workspace, this.status, this.toastEl, this.assistant.el);
         store.openDialog = (name, ref) => this.openNamed(name, ref);
         store.changed.on(() => this.render());
         store.jobsChanged.on(() => this.renderStatus());
@@ -176,7 +222,15 @@ export class Shell {
         }
     }
     async exportSheetFile() {
-        const file = await store.exportSheet();
+        let preview;
+        try {
+            preview = await this.sheet.printablePng();
+        }
+        catch (error) {
+            toast(error instanceof Error ? error.message : "The sheet could not be rendered.", { kind: "error" });
+            return;
+        }
+        const file = await store.exportSheet(preview);
         if (file) {
             saveBlob(file.blob, file.filename);
             store.setStatus(`Exported ${file.filename}`);

@@ -41,6 +41,43 @@ class Case(unittest.TestCase):
 
 
 class Levels(Case):
+    def test_roof_level_opens_an_existing_plan_and_migrates_an_old_missing_plan_once(self):
+        roof_plan = next(v for v in self.p.manifest["views"] if v.get("level_id") == self.roof_level)
+        self.assertIn(roof_plan["id"], self.p.drawings)
+        self.assertEqual(self.run_("level.ensure_plan", id=self.roof_level)["id"], roof_plan["id"])
+        self.p.manifest["views"].remove(roof_plan)
+        del self.p.drawings[roof_plan["id"]]
+        created = self.run_("level.ensure_plan", id=self.roof_level)
+        self.assertTrue(created["created"])
+        self.assertEqual(self.run_("level.ensure_plan", id=self.roof_level)["id"], created["id"])
+        self.assertEqual(self.p.drawing_data(created["id"])["view"]["level_id"], self.roof_level)
+
+    def test_roof_level_plan_draws_the_roof_and_supports_boundary_stretching(self):
+        roof = self.run_("model.add_roof", level=self.roof_level, roof="flat", points=[[0, 0], [6000, 0], [6000, 4000], [0, 4000]], thickness=100)["id"]
+        plan = next(v for v in self.p.manifest["views"] if v.get("level_id") == self.roof_level)
+        shown = next(item for item in self.p.drawing_data(plan["id"])["model"] if item["id"] == roof)
+        self.assertEqual(shown["category"], "roof")
+        self.assertEqual(len(shown["outline"]), 4)
+        self.run_("model.set_boundary", id=roof, points=[[0, 0], [7000, 0], [7000, 4000], [0, 4000]])
+        shown = next(item for item in self.p.drawing_data(plan["id"])["model"] if item["id"] == roof)
+        self.assertEqual(max(p[0] for p in shown["outline"]), 7000)
+
+    def test_default_plan_cut_height_and_upper_level_reference_change_real_intersections(self):
+        wall = self.wall()
+        door = self.run_("model.add_window", wall=wall, offset=1.0, width=1000, height=900, sill=900)["id"]
+        plan = next(v for v in self.p.manifest["views"] if v.get("level_id") == self.l1)
+        shown = self.p.drawing_data(plan["id"])["model"]
+        self.assertTrue(next(item for item in shown if item["id"] == door)["cut"])
+        self.run_("view.set_cut_plane", id=plan["id"], key="cut_offset", value=2300)
+        shown = self.p.drawing_data(plan["id"])["model"]
+        self.assertFalse(next(item for item in shown if item["id"] == door)["cut"])
+        self.run_("view.set_cut_plane", id=plan["id"], key="cut_reference", value=self.l2)
+        group = self.p.properties({"view": plan["id"]})["groups"][0]
+        self.assertIn("3200", str(group["rows"][-1]["value"]))
+        self.assertNotIn(wall, [i["id"] for i in self.p.drawing_data(plan["id"])["model"]])
+        self.p.undo()
+        self.assertFalse(next(item for item in self.p.drawing_data(plan["id"])["model"] if item["id"] == door)["cut"])
+
     def test_adding_a_level_gives_it_a_floor_plan(self):
         out = self.run_("level.add", name="Level 03", elevation=9.6)
         self.assertEqual([l["name"] for l in self.p.manifest["levels"]], ["Level 01", "Level 02", "Roof Level", "Level 03"])

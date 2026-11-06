@@ -31,7 +31,7 @@ class Creation(ProjectCase):
     def test_new_project_has_real_levels_views_and_empty_documents(self):
         m = self.p.manifest
         self.assertEqual([l["name"] for l in m["levels"]], ["Level 01", "Level 02", "Roof Level"])
-        self.assertEqual(sorted(v["kind"] for v in m["views"]), ["3d", "elevation", "elevation", "elevation", "elevation", "plan", "plan"])
+        self.assertEqual(sorted(v["kind"] for v in m["views"]), ["3d", "elevation", "elevation", "elevation", "elevation", "plan", "plan", "plan"])
         self.assertEqual(sorted(v["name"] for v in m["views"] if v["kind"] == "elevation"), ["East", "North", "South", "West"])
         self.assertEqual(self.p.model.query_ids(), [])
         self.assertEqual(self.p.drawing(self.plan).query_ids(), [])
@@ -591,7 +591,7 @@ class TreeAndChecks(ProjectCase):
         self.p.execute("sheet.create", {"name": "Plan"})
         tree = {s["id"]: s for s in self.p.tree()["sections"]}
         plans = tree["views"]["children"][1]["children"]
-        self.assertEqual([n["label"] for n in plans], ["Level 01", "Level 02"])
+        self.assertEqual([n["label"] for n in plans], ["Level 01", "Level 02", "Roof Level"])
         walls = next(c for c in tree["categories"]["children"] if c["label"] == "Walls")["children"]
         self.assertEqual([n["id"] for n in walls], [w])
         self.assertEqual(tree["sheets"]["children"][0]["label"], "A101 - Plan")

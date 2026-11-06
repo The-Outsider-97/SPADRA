@@ -512,11 +512,38 @@ def export_report(app: SpadraApp, req: Request) -> Any:
 
 @router.route("GET", "/api/export/sheet/{sheet}")
 def export_sheet(app: SpadraApp, req: Request) -> Any:
-    """The sheet as a .sldc file: the sheet as a person reads it plus, in an extension, everything the sheet draws (see sheets.to_sldc)."""
+    """Require a rendered page; never quietly export the old A4 text report as a drawing sheet."""
     from . import sheets as SH
+    if req.query.get("legacy_text") != "1":
+        from ..tools.errors import Conflict
+        raise Conflict("A drawing-sheet SLDC export needs its print-matched page rendering",
+                       hint="Open the sheet in SPADRA and use Export .sldc. For an old text-only report, request ?legacy_text=1 explicitly.")
     with app.lock:
         data, name = SH.to_sldc(app.require(), req.params["sheet"])
         return file_response(data, name, "application/x-slai-sldc+zip")
+
+
+@router.route("POST", "/api/export/sheet/{sheet}")
+def export_sheet_printable(app: SpadraApp, req: Request) -> Any:
+    """Preserve the live SVG sheet as a full-size visual plus editable semantic sheet data."""
+    import base64
+    import binascii
+    from . import sheets as SH
+    body = req.json()
+    raw = body.get("preview_png")
+    if not isinstance(raw, str) or len(raw) > 12_000_000:
+        raise BadRequest("A printable PNG preview of the sheet is required")
+    try:
+        preview = base64.b64decode(raw, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise BadRequest("The printable preview is not valid base64") from exc
+    with app.lock:
+        project = app.require()
+        if body.get("revision") != project.revision:
+            from ..tools.errors import Conflict
+            raise Conflict("The project changed while the sheet was being exported; try again")
+        data, name = SH.to_sldc(project, req.params["sheet"], preview)
+        return {"data": base64.b64encode(data).decode("ascii"), "filename": name}
 
 
 @router.route("GET", "/api/export/sheet/{sheet}/verify")
