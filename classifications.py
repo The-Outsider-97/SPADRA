@@ -289,11 +289,12 @@ def info() -> dict[str, Any]:
     return {
         "ifc": {"schema": _ifc()["schema"], "version": _ifc()["version"],
                 "types": len(_ifc()["types"]), "source": _ifc()["source_url"]},
-        "omniclass": {"available": cs is not None,
+        "omniclass": {"available": cs is not None or bool(_csi_key()),
+                      "provider": "local_catalog" if cs is not None else "csi_crosswalk" if _csi_key() else "unconfigured",
                       "edition": cs["edition"] if cs else None,
-                      "tables": {t: len(cs["codes"][t]) if cs else 0 for t in ("21", "23")},
-                      "verified_assembly_codes": len(cs["mappings"]) if cs else 0,
-                      "notice": "CSI data and crosswalks require appropriate permission; no official mapping is bundled."},
+                      "tables": {t: len(cs["codes"][t]) if cs else None if _csi_key() else 0 for t in ("21", "23")},
+                      "verified_assembly_codes": len(cs["mappings"]) if cs else None if _csi_key() else 0,
+                      "notice": "CSI-licensed table content requires appropriate access; no official mapping is bundled."},
     }
 
 def search(kind: str, q: str = "", *, table: int = 21, limit: int = 30) -> list[dict[str, Any]]:
@@ -304,8 +305,8 @@ def search(kind: str, q: str = "", *, table: int = 21, limit: int = 30) -> list[
     if table not in (21, 23):
         raise BadRequest("OmniClass table must be 21 or 23")
     cs = catalog()
-    if not cs:
-        return []
+    if cs is None:
+        return _csi_search(kind, q, table, limit) if _csi_key() else []
     term = q.strip().casefold()
     if kind == "assembly":
         return [{"code": rows[0]["assembly_code"], "title": "Assembly / UniFormat",
@@ -339,15 +340,19 @@ def _manual_omni(value: Any, table: int) -> str | None:
     if value is None or (isinstance(value, str) and not value.strip()):
         return None
     c = catalog()
-    if c is None:
-        raise BadRequest("Configure a licensed OmniClass catalog before assigning a code")
-    entry = c["codes"][str(table)].get(_code(value, "OmniClass code").casefold())
+    code = _code(value, "OmniClass code")
+    if c is None and _csi_key():
+        entry = _csi_lookup(code, table)
+    elif c is not None:
+        entry = c["codes"][str(table)].get(code.casefold())
+    else:
+        raise BadRequest("Configure a licensed OmniClass catalog or CSI Crosswalk key first")
     if entry is None:
         raise BadRequest("Code is not in the configured OmniClass Table " + str(table))
     return entry["code"]
 
 def set_field(project: Any, oid: str, field: str, value: Any) -> None:
-    """No inferred mapping without explicit verified local crosswalk evidence."""
+    """Only explicitly verified local or CSI-provided crosswalks can auto-fill OmniClass."""
     from . import elements as E
     if field not in FIELDS:
         raise BadRequest("Unknown classification field " + field)
@@ -359,7 +364,8 @@ def set_field(project: Any, oid: str, field: str, value: Any) -> None:
             changes.update({"omniclass_21": None, "omniclass_21_origin": None, "omniclass_21_source": None})
         if new and (not read(meta, "omniclass_21") or read(meta, "omniclass_21_origin") == "auto"):
             cs = catalog()
-            hits = cs["mappings"].get(new.casefold(), []) if cs else []
+            hits = (cs["mappings"].get(new.casefold(), []) if cs is not None
+                    else _csi_crosswalk(new) if _csi_key() else [])
             if len(hits) == 1:
                 changes.update({"omniclass_21": hits[0]["omniclass_code"],
                                 "omniclass_21_origin": "auto", "omniclass_21_source": hits[0]["source"]})
@@ -404,11 +410,12 @@ def groups_for(meta: Mapping[str, Any], category: str) -> list[dict[str, Any]]:
     code21 = read(meta, "omniclass_21")
     code23 = read(meta, "omniclass_23")
     def title(table: str, code: str) -> str:
-        if not cs:
-            return "OmniClass catalog not configured (licensed data required)."
+        if cs is None:
+            return ("CSI Crosswalk connected: search the licensed table." if _csi_key()
+                    else "OmniClass catalog not configured (licensed access required).") if not code else code
         entry = cs["codes"][table].get(code.casefold()) if code else None
         return entry["title"] if entry else ("This code is not in the current catalog." if code else "")
-    if a and not code21 and cs and len(cs["mappings"].get(a.casefold(), [])) > 1:
+    if a and not code21 and cs is not None and len(cs["mappings"].get(a.casefold(), [])) > 1:
         status = "Ambiguous assembly crosswalk: choose the OmniClass element manually."
     elif a and not code21:
         status = "No verified one-to-one mapping for this Assembly Code."
