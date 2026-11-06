@@ -1,12 +1,13 @@
-"""IFC 4.3 type products and optional, locally licensed OmniClass classifications.
+"""IFC 4.3 type products and all 15 CSI OmniClass classification facets.
 
 The IFC vocabulary is generated from the official IFC4X3_ADD2 EXPRESS schema.
-CSI OmniClass tables/crosswalks are NOT redistributed: load a permitted
-catalog from SPADRA_OMNICLASS_CATALOG or data/omniclass.local.json.
+No proprietary CSI classification rows or crosswalks are redistributed.
+The existing classification service reads a permitted private local catalog
+or connects to CSI Crosswalk with separately licensed API credentials.
 
-A Revit-style Assembly Code is UniFormat, *not* an OmniClass number.
-A verified, unique local crosswalk can fill OmniClass Table 21 (Elements);
-Table 23 (Products) is intentionally independent and is never inferred.
+A Revit Assembly Code belongs to UniFormat, not OmniClass. Only one
+unambiguous verified source mapping can auto-fill OmniClass Table 21.
+OmniClass Table 23 (Products) is independent and is never inferred.
 """
 from __future__ import annotations
 
@@ -231,7 +232,6 @@ def _spreadsheet_rows(path: Path) -> list[dict[str, str]]:
 
 def _header(row: dict[str, str], *names: str) -> str:
     """Find one column, ignoring punctuation/whitespace and preserving values."""
-    import re
     cleaned = {re.sub(r"[^a-z0-9]", "", str(key).lower()): value for key, value in row.items()}
     for name in names:
         result = cleaned.get(re.sub(r"[^a-z0-9]", "", name.lower()))
