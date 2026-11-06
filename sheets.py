@@ -12,6 +12,7 @@ the last issued revision*."""
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
 import re
 from datetime import date as _date
@@ -283,15 +284,26 @@ def SV_kind(vp: Mapping[str, Any]) -> str:
     return {"view": "drawing", "model": "3D model", "snapshot": "3D picture", "report": "report", "schedule": "schedule"}.get(kind, kind)
 
 
-def to_sldc(project: Any, sheet_id: Any) -> tuple[bytes, str]:
-    """The sheet as ``.sldc`` bytes (validated by the SLDC writer) and the file name to offer."""
+def to_sldc(project: Any, sheet_id: Any, preview_png: bytes | None = None) -> tuple[bytes, str]:
+    """Editable sheet data plus a print-matched full-page visual when supplied by the sheet renderer.
+
+    The image is for general SLDC document readers; SPADRA reopens the semantic vectors,
+    placed views and annotations from ``spadra.sheet`` rather than modifying this image.
+    """
     import copy
     from src.utils import sldc as S
+    from . import sheetviews as SV
     from ..tools.errors import LimitExceeded
     sheet = find(project, sheet_id)
     data = copy.deepcopy(project.sheet_data(sheet["id"]))
     placed = {vp["id"]: vp for vp in sheet.get("viewports", [])}
     assets, figures = [], {}
+    if preview_png is not None:
+        _, pixel_width, pixel_height = SV.decode_png(base64.b64encode(preview_png).decode("ascii"))
+        if abs(pixel_width / pixel_height - data["width"] / data["height"]) > 0.002:
+            raise BadRequest("The printable preview does not match the sheet's selected paper ratio")
+        sheet_asset = S.make_asset(preview_png)
+        assets.append(sheet_asset)
     for vp in data["viewports"]:
         raw = placed[vp["id"]]
         vp["locked"] = bool(raw.get("locked"))
@@ -305,10 +317,21 @@ def to_sldc(project: Any, sheet_id: Any) -> tuple[bytes, str]:
             figures[vp["id"]] = S.make_figure(asset, f"3D picture on sheet {data['number']}", caption=str(vp.get("title") or "3D snapshot"), width_mm=round(w, 3))      # width alone: a height would need SLDC 1.1
     envelope = {"format": SLDC_FORMAT, "sheet": data, "order": [vp["id"] for vp in data["viewports"]],
                 "unit": project.manifest["unit"], "model_revision": project.revision}
+    if preview_png is not None:
+        envelope["preview_asset"] = sheet_asset.id
+        blocks = [S.make_figure(sheet_asset, f"Complete drawing sheet {data['number']}", width_mm=data["width"], height_mm=data["height"],
+                                placement={"mode": "floating", "anchor": "page", "x_mm": 0, "y_mm": 0, "wrap": "none"}) | {"section": "drawing-sheet"}]
+    else:
+        blocks = _blocks(project, data, figures)  # Legacy programmatic exports without a browser-provided visual.
+    # SLDC page sections retain the actual sheet size instead of the reader's A4 default.
+    sections = [{"id": "drawing-sheet", "page": {"width_mm": data["width"], "height_mm": data["height"],
+                                                   "margins_mm": {"top": 0, "right": 0, "bottom": 0, "left": 0}}}]
     try:
-        package = S.new_package(f"Sheet {data['number']} {data['name']}".strip(), _blocks(project, data, figures), assets=assets,
+        package = S.new_package(f"Sheet {data['number']} {data['name']}".strip(), blocks, assets=assets, sections=sections,
                                 metadata={"project": project.name, "sheet": data["number"], "paper": data["paper"], "model_revision": str(project.revision)},
                                 extensions={SLDC_EXTENSION: envelope})
+        if preview_png is not None:
+            package.version = "1.1.0"  # full-size positioned figures are an SLDC 1.1 capability
         out = S.dumps_package(package)
     except S.SLDCError as exc:
         raise BadRequest(f"The sheet could not be written: {exc}") from exc

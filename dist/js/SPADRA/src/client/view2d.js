@@ -2,7 +2,7 @@
  *  The canvas draws what the server returned; every change is a command the server validates and records for undo. */
 import { h } from "../../../tools/web/src/dom.js";
 import { promptDialog, toast } from "../../../tools/web/src/ui.js";
-import { hatchDialog, mirrorKeepDialog, numberPrompt } from "./dialogs.js";
+import { addLayerDialog, hatchDialog, mirrorKeepDialog, numberPrompt } from "./dialogs.js";
 import { clamp } from "../../../tools/web/src/util.js";
 import { alongFrom, angleBetween, closedLoop, distToSegment, dist, entityDistance, entityBounds, fitBox, formatDimension, gripAt, grips, hatchLoops, insideBox, mid, niceStep, normaliseRect, orthoConstrain, pointInPolygon, polygonDistance, polygonsBounds, rotateAbout, roundAngle, segments, snapPoint, textBox, wallBand, } from "./geom2d.js";
 import { cssColor, withAlpha } from "./palette.js";
@@ -56,6 +56,7 @@ export class DrawingView {
     markSel = null; // the section whose cut line is selected on this plan
     lengthBox = null; // the length of the selected wall, where it can be clicked and typed over
     wallHud;
+    layerControls = h("div", { class: "layer-controls", attrs: { "aria-label": "Add a layer to the selected element" } });
     wallFields;
     formHuds = new Map(); // the option strips of the Extrude, Void and Sweep tools
     constructor(store) {
@@ -78,7 +79,7 @@ export class DrawingView {
         this.wallFields = { height, thickness };
         this.wallHud = h("div", { class: "wall-hud", hidden: true }, heightLabel, thicknessLabel, h("span", { class: "muted", text: "Click for each corner. Shift keeps it straight. Double-click or Esc ends." }));
         this.buildFormHuds();
-        this.el = h("div", { class: "canvas-wrap" }, this.canvas, this.wallHud, ...[...this.formHuds.values()].map((x) => x.el), this.hint);
+        this.el = h("div", { class: "canvas-wrap" }, this.canvas, this.layerControls, this.wallHud, ...[...this.formHuds.values()].map((x) => x.el), this.hint);
         new ResizeObserver(() => this.resize()).observe(this.el);
         this.bind();
     }
@@ -797,7 +798,7 @@ export class DrawingView {
             for (const end of ["a", "b"])
                 out.push({ at: axis[end], shape: "square", edit: () => ({ kind: "end", id: wall.id, end, axis, from: axis[end], now: axis[end], moved: false }) });
         }
-        const floor = ids.length === 1 ? data.model.find((w) => w.id === ids[0] && w.category === "floor" && w.outline && w.outline.length >= 3) : undefined;
+        const floor = ids.length === 1 ? data.model.find((w) => w.id === ids[0] && (w.category === "floor" || w.category === "roof") && w.outline && w.outline.length >= 3) : undefined;
         if (floor?.outline) {
             const pts = floor.outline;
             pts.forEach((at, i) => out.push({ at, shape: "square", edit: () => ({ kind: "outline", id: floor.id, points: pts, corner: i, edge: -1, from: at, now: at, moved: false }) })); // a corner moves freely
@@ -1098,7 +1099,7 @@ export class DrawingView {
         if (this.data?.projection)
             return projectionAt(this.data.projection, world, PICK_PX / this.scale);
         for (const w of this.data?.model ?? []) {
-            if (w.category === "floor" || w.category === "room")
+            if (w.category === "floor" || w.category === "roof" || w.category === "room")
                 continue;
             const d = this.modelDistance(w, world);
             if (d <= bestD) {
@@ -1109,8 +1110,8 @@ export class DrawingView {
         if (best)
             return best;
         for (const w of this.data?.model ?? [])
-            if (w.category === "floor" && polygonDistance(world, w.polygon) === 0)
-                best = w.id; // a floor is picked by its area, last
+            if ((w.category === "floor" || w.category === "roof") && polygonDistance(world, w.polygon) === 0)
+                best = w.id;
         if (best)
             return best;
         for (const w of this.data?.model ?? [])
@@ -1205,6 +1206,7 @@ export class DrawingView {
         this.paintSectionMarks(k);
         this.paintGrips(k);
         this.paintHandles(k);
+        this.syncLayerControls();
         this.paintPreview(k);
         if (this.drag?.moved)
             this.paintMoveGhost(k);
@@ -1223,6 +1225,39 @@ export class DrawingView {
         if (this.snap && this.snap.kind !== "none" && this.cursor)
             this.paintSnap(this.snap, k);
         ctx.restore();
+    }
+    /** The '+' is anchored to the selected wall's two actual faces or to a selected slab on the drawing. */
+    syncLayerControls() {
+        this.layerControls.replaceChildren();
+        if (this.store.tool !== "select" || this.data?.projection || this.store.selection?.kind !== "model" || this.store.selection.ids.length !== 1)
+            return;
+        const id = this.store.selection.ids[0];
+        const element = this.data?.model.find((item) => item.id === id && (item.category === "wall" || item.category === "floor" || item.category === "roof"));
+        if (!element)
+            return;
+        let points = [];
+        if (element.category === "wall" && element.axis) {
+            const { a, b, thickness } = element.axis;
+            const length = Math.max(dist(a, b), 1e-9), nx = -(b[1] - a[1]) / length, ny = (b[0] - a[0]) / length;
+            const center = mid(a, b), offset = thickness / 2 + 20 / this.scale;
+            points = [{ side: "left", at: [center[0] + nx * offset, center[1] + ny * offset] }, { side: "right", at: [center[0] - nx * offset, center[1] - ny * offset] }];
+        }
+        else {
+            const bounds = polygonsBounds([element.polygon]);
+            if (!bounds)
+                return;
+            const center = [(bounds[0][0] + bounds[1][0]) / 2, (bounds[0][1] + bounds[1][1]) / 2];
+            const labels = element.category === "roof" ? ["outside", "inside"] : ["top", "bottom"];
+            points = [{ side: labels[0], at: [center[0], center[1] + 25 / this.scale] }, { side: labels[1], at: [center[0], center[1] - 25 / this.scale] }];
+        }
+        for (const { at, side } of points) {
+            const [x, y] = this.toScreen(at);
+            const button = h("button", { class: "layer-plus", type: "button", text: "+", attrs: { title: `Add layer on ${side} side`, "aria-label": `Add ${side} ${element.category} layer` },
+                on: { click: (event) => { event.stopPropagation(); void addLayerDialog(this.store, id, element.category, side); } } });
+            button.style.left = `${x}px`;
+            button.style.top = `${y}px`;
+            this.layerControls.appendChild(button);
+        }
     }
     /** The wall options strip shows while the wall tool is active, with the values the 3D view's wall tool uses too. */
     syncWallHud() {
@@ -1742,7 +1777,7 @@ export class DrawingView {
         ctx.lineWidth = selected ? 2.5 : 1.5;
         ctx.strokeStyle = color;
         ctx.fillStyle = color;
-        if (w.category === "floor") {
+        if (w.category === "floor" || w.category === "roof") {
             trace();
             ctx.setLineDash([]);
             ctx.lineWidth = selected ? 2 : 1;

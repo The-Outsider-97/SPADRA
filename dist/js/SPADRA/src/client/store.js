@@ -340,9 +340,9 @@ export class Store {
         const sel = this.selection;
         this.properties = null;
         let ref = null;
-        if (!sel) { // nothing selected: a section, elevation or schedule describes itself
+        if (!sel) { // nothing selected: a plan, section, elevation or schedule describes itself
             const tab = this.tab;
-            const own = tab?.ref.kind === "schedule" || (tab?.ref.kind === "drawing" && (this.drawing?.view.kind === "section" || this.drawing?.view.kind === "elevation"));
+            const own = tab?.ref.kind === "schedule" || (tab?.ref.kind === "drawing" && ["plan", "section", "elevation"].includes(this.drawing?.view.kind ?? ""));
             if (!tab || !own)
                 return;
             ref = { view: tab.ref.id };
@@ -563,13 +563,21 @@ export class Store {
         return this.guard(() => this.api.download(`/export/schedule/${tab.ref.id}`), "Exporting");
     }
     /** The open sheet as a .sldc file (the sheet as read, plus everything it draws, so that opening the file gives the sheet back). */
-    async exportSheet() {
+    async exportSheet(previewPng) {
         const tab = this.tab;
         if (!tab || tab.ref.kind !== "sheet") {
             toast("Open a sheet to export it as .sldc.", { kind: "info" });
             return null;
         }
-        return this.guard(() => this.api.download(`/export/sheet/${tab.ref.id}`), "Exporting the sheet");
+        if (!previewPng) {
+            toast("The printable sheet preview is required for SLDC export.", { kind: "error" });
+            return null;
+        }
+        return this.guard(async () => {
+            const result = await this.api.post(`/export/sheet/${tab.ref.id}`, { preview_png: previewPng, revision: this.project?.revision });
+            const bytes = Uint8Array.from(atob(result.data), (ch) => ch.charCodeAt(0));
+            return { blob: new Blob([bytes], { type: "application/x-slai-sldc+zip" }), filename: result.filename };
+        }, "Exporting the sheet");
     }
     /** Lay out the sheet's viewports so that none overlaps another or the title block; what is locked or placed by hand stays where it is unless ``all``. */
     async arrangeSheet(id, all = false, rescale = false) {

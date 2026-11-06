@@ -140,7 +140,7 @@ export class Browser {
 
   /** What can be done with a row: open it, show its properties, delete it (when the server has a command that deletes that kind of row). */
   private menuFor(n: TreeNode, anchor: HTMLElement): void {
-    const entries: MenuEntry[] = [{ label: n.select ? "Select" : "Open", icon: iconFor(n), disabled: !(n.report || n.dialog || n.open || n.select), run: () => { void this.activate(n, false); } }];
+    const entries: MenuEntry[] = [{ label: n.select ? "Select" : "Open", icon: iconFor(n), disabled: !(n.report || n.dialog || n.open || n.select || this.store.levels.some((level) => level.id === n.id)), run: () => { void this.activate(n, false); } }];
     const del = this.deletion(n);
     if (del) entries.push("separator", { label: `Delete ${n.label}`, icon: "close", run: () => { void this.confirmDelete(n, del); } });
     openMenu(anchor, entries, { label: n.label });
@@ -172,6 +172,13 @@ export class Browser {
     if (n.report) { this.store.openDialog?.("report", n.report); return; }
     if (n.dialog) { this.store.openDialog?.(n.dialog, n.ref); return; }
     if (n.open) { await this.store.openTab(n.open, n.label); return; }
+    // Legacy projects may have a level without a plan (notably Roof Level).
+    // Create its SDRW view once through the same transactional command as other project edits.
+    if (this.store.levels.some((level) => level.id === n.id)) {
+      const made = await this.store.run("level.ensure_plan", { id: n.id });
+      if (typeof made?.result["id"] === "string") await this.store.openTab({ kind: "drawing", id: made.result["id"] }, String(made.result["name"] ?? n.label));
+      return;
+    }
     if (n.select) {
       const model = flatten(this.store.tree).find((t) => t.open?.kind === "3d");
       if (this.store.tab?.ref.kind !== "3d" && model?.open) await this.store.openTab(model.open, model.label);

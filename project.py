@@ -142,7 +142,7 @@ class Project:
                   {"id": level_ids[2], "name": "Roof Level", "elevation": 6.4}]
         views = [{"id": new_id(), "kind": "3d", "name": "3D Model"}]
         drawings: dict[str, SDRWDocument] = {}
-        for level in levels[:2]:                                   # a floor plan per occupied level; the roof level gets none
+        for level in levels:                                       # every level, including the roof, has an openable plan
             vid = new_id()
             views.append({"id": vid, "kind": "plan", "name": level["name"], "level_id": level["id"]})
             drawings[vid] = SDRWDocument.new(level["name"], unit=unit)
@@ -619,7 +619,9 @@ class Project:
         view = self.view(view_id)
         if view["kind"] != "plan" or not view.get("level_id"):
             return []
-        return E.plan_items(self, view["level_id"], 1000.0 / MM_PER[self.manifest["unit"]], show_opening=bool(view.get("show_opening_direction", True)),
+        reference = view.get("cut_reference_level") or view["level_id"]
+        cut_elevation = self.level(reference)["elevation"] + float(view.get("cut_offset", 1.5))
+        return E.plan_items(self, view["level_id"], 1000.0 / MM_PER[self.manifest["unit"]], cut_elevation=cut_elevation, show_opening=bool(view.get("show_opening_direction", True)),
                             show_hatching=bool(view.get("show_material_hatching", True)))
 
     def scene_data(self, max_vertices: int = 400_000, time: float | None = None) -> dict[str, Any]:
@@ -640,8 +642,10 @@ class Project:
             if total > max_vertices:
                 raise LimitExceeded(f"The model has more than {max_vertices} vertices to draw", hint="Hide or simplify objects")
             meta = obj["metadata"]
-            objects.append({"id": oid, "name": obj["name"], "category": meta.get(f"{NS}:category", "generic"),
-                            "material": meta.get(f"{NS}:material"), "vertices": verts, "faces": mesh["faces"]})
+            category = meta.get(f"{NS}:category", "generic")
+            objects.append({"id": oid, "name": obj["name"], "category": category,
+                            "material": meta.get(f"{NS}:material"), "vertices": verts, "faces": mesh["faces"],
+                            "layer_points": self._layer_points(category, meta, verts, mesh["faces"])})
         all_bounds = raw.bounds_by_object()
         wb = [all_bounds[o["id"]] for o in objects]
         bounds = None
@@ -650,6 +654,47 @@ class Project:
             hi = [max(b[1][i] for b in wb) for i in range(3)]
             bounds = [lo, hi]
         return {"unit": "m", "revision": self.revision, "objects": objects, "bounds": bounds}
+
+    @staticmethod
+    def _layer_points(category: str, meta: Mapping[str, Any], verts: list[list[float]], faces: list[list[int]]) -> list[dict[str, Any]]:
+        """World-space handles derived from real host geometry, never guessed screen offsets."""
+        if not verts or category not in ("wall", "floor", "roof"):
+            return []
+        if category == "wall":
+            a, b = meta.get(f"{NS}:start"), meta.get(f"{NS}:end")
+            if not a or not b:
+                return []
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            length = (dx * dx + dy * dy) ** 0.5
+            if length < 1e-9:
+                return []
+            nx, ny = -dy / length, dx / length
+            z = (min(v[2] for v in verts) + max(v[2] for v in verts)) / 2
+            mid = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, z]
+            thick = float(meta.get(f"{NS}:thickness", 0.2))
+            return [{"side": side, "point": [mid[0] + sign * nx * (thick / 2 + 0.05), mid[1] + sign * ny * (thick / 2 + 0.05), z]}
+                    for side, sign in (("left", 1), ("right", -1))]
+        # The largest outward-facing surface on each side is a stable place for a
+        # layer control, including pitched roofs. Its offset follows its normal.
+        best: dict[str, tuple[float, list[float]]] = {}
+        names = ("top", "bottom") if category == "floor" else ("outside", "inside")
+        for face in faces:
+            if len(face) < 3:
+                continue
+            try:
+                a, b, c = (verts[face[i]] for i in range(3))
+            except (IndexError, TypeError):
+                continue
+            u, v = [b[i] - a[i] for i in range(3)], [c[i] - a[i] for i in range(3)]
+            n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]]
+            area = sum(x * x for x in n) ** 0.5
+            if area < 1e-9 or abs(n[2]) < area * 0.2:
+                continue
+            side = names[0 if n[2] > 0 else 1]
+            point = [sum(p[i] for p in (a, b, c)) / 3 + n[i] * 0.05 / area for i in range(3)]
+            if side not in best or area > best[side][0]:
+                best[side] = (area, point)
+        return [{"side": side, "point": best[side][1]} for side in names if side in best]
 
     def _animated_scene(self, max_vertices: int, time: float) -> dict[str, Any]:
         from src.utils.spatial_formats.sgeo.tessellation import tessellate
@@ -855,27 +900,36 @@ class Project:
         f = 1000.0 / MM_PER[self.manifest["unit"]]
         for vp in sheet.get("viewports", []):
             kind = SV.kind_of(vp)
+            # A deleted/missing view remains a model-check finding, not a reason
+            # the rest of the sheet becomes impossible to display or export.
+            if kind == "snapshot" and vp["id"] not in self.snapshots:
+                continue
+            if kind == "report" and not any(r["id"] == vp["report_id"] for r in self.manifest["reports"]):
+                continue
+            if kind not in ("snapshot", "report") and not any(v["id"] == vp.get("view_id") for v in self.manifest["views"]):
+                continue
+            placement = {"bounds_mm": list(SV.rect_of(self, vp))}
             if kind == "snapshot":
                 if vp["id"] in self.snapshots:
                     w, h = SV.snapshot_size(vp)
-                    viewports.append({**vp, "image": SV.snapshot_data(self, vp), "paper_width": w, "paper_height": h, "view": {"name": vp.get("title") or "3D snapshot"}})
+                    viewports.append({**vp, **placement, "image": SV.snapshot_data(self, vp), "paper_width": w, "paper_height": h, "view": {"name": vp.get("title") or "3D snapshot"}})
                 continue
             if kind == "report":
                 if any(r["id"] == vp["report_id"] for r in self.manifest["reports"]):
-                    viewports.append({**vp, "report": SV.report_box(self, vp), "view": {"name": vp.get("title") or "Report"}})
+                    viewports.append({**vp, **placement, "report": SV.report_box(self, vp), "view": {"name": vp.get("title") or "Report"}})
                 continue
             view = next((v for v in self.manifest["views"] if v["id"] == vp["view_id"]), None)
             if view is not None and kind == "model":
-                viewports.append({**vp, "view": view, "mm_per_unit": MM_PER[self.manifest["unit"]], "unit": self.manifest["unit"], "layers": [], "entities": [], "model": [],
+                viewports.append({**vp, **placement, "view": view, "mm_per_unit": MM_PER[self.manifest["unit"]], "unit": self.manifest["unit"], "layers": [], "entities": [], "model": [],
                                   "projection": None, "section_marks": [], "solid": SV.model_view(self, vp["azimuth"], vp["elevation"], f)})
                 continue
             if view is not None and view["kind"] == "schedule":
-                viewports.append({**vp, "view": view, "schedule": D.schedule_data(self, view["category"])})
+                viewports.append({**vp, **placement, "view": view, "schedule": D.schedule_data(self, view["category"])})
                 continue
             if vp["view_id"] not in self.drawings or view is None:
                 continue                                              # reported by check(); there is nothing to draw
             data = self.drawing_data(vp["view_id"])
-            viewports.append({**vp, "view": data["view"], "unit": data["unit"], "mm_per_unit": MM_PER[data["unit"]], "layers": data["layers"], "entities": data["entities"],
+            viewports.append({**vp, **placement, "view": data["view"], "unit": data["unit"], "mm_per_unit": MM_PER[data["unit"]], "layers": data["layers"], "entities": data["entities"],
                               "model": data["model"], "projection": data["projection"], "section_marks": data["section_marks"]})
         return {"id": sheet["id"], "number": sheet["number"], "name": sheet["name"], "paper": sheet["paper"], "scale": sheet["scale"], "revision": sheet["revision"],
                 "width": width, "height": height, "project": self.name, "viewports": viewports, "revision_number": self.revision,
@@ -1023,6 +1077,14 @@ def _view_properties(project: Project, vid: str) -> dict[str, Any]:
     top.append({"key": "name", "label": "Name", "type": "text", "value": view["name"]} if kind in ("section", "elevation", "schedule")
                else {"label": "Name", "type": "readonly", "value": view["name"]})
     groups: list[dict[str, Any]] = []
+    if kind == "plan":
+        reference = view.get("cut_reference_level") or view["level_id"]
+        offset = float(view.get("cut_offset", 1.5))
+        groups.append({"title": "Plan cut plane", "rows": [
+            {"key": "cut_reference", "label": "Height reference", "type": "choice", "value": reference,
+             "choices": [{"value": level["id"], "label": level["name"]} for level in project.manifest["levels"]]},
+            {"key": "cut_offset", "label": "Offset", "type": "number", "unit": "mm", "value": offset * 1000},
+            {"label": "Absolute cut height", "type": "readonly", "value": f"{(project.level(reference)['elevation'] + offset) * 1000:g} mm"}]})
     if kind == "section":
         fr = D.frame_of(view)
         here, there = D.compass(fr.fx, fr.fy), D.compass(-fr.fx, -fr.fy)
@@ -1062,7 +1124,9 @@ def _sheet_properties(project: Project, sid: str) -> dict[str, Any]:
                    "changed": f"Changed since revision {state['revision']}: " + ", ".join(state["changed"])}[state["state"]]
     return {"ref": {"sheet": sid}, "title": f"Sheet {sheet['number']}", "category": "sheet", "kind": "sheet",
             "top": [text_row("number", "Sheet Number", sheet["number"]), text_row("name", "Sheet Name", sheet["name"]),
-                    {"key": "paper", "label": "Paper Size", "type": "choice", "value": sheet["paper"], "choices": [{"value": p, "label": p} for p in PAPERS]},
+                    {"key": "paper", "label": "Paper Size", "type": "choice", "value": sheet["paper"], "choices": [{"value": p, "label": p} for p in PAPERS]
+                     + ([{"value": sheet["paper"], "label": sheet["paper"]}] if sheet["paper"].startswith("Custom ") else [])
+                     + [{"value": "custom", "label": "Custom dimensions…"}]},
                     {"key": "scale", "label": "Scale", "type": "choice", "value": sheet["scale"], "choices": [{"value": s, "label": s} for s in SCALES]},
                     revision],
             "groups": [
@@ -1082,14 +1146,19 @@ def _sheet_properties(project: Project, sid: str) -> dict[str, Any]:
                                                                     for n in sheet["notes"]], "add": "note"}]}
 
 
-PAPERS = ("A0 Landscape", "A1 Landscape", "A2 Landscape", "A3 Landscape", "A4 Landscape", "A4 Portrait")
+PAPERS = tuple(f"A{i} {orientation}" for i in range(5) for orientation in ("Landscape", "Portrait"))
 SCALES = ("1:1", "1:2", "1:5", "1:10", "1:20", "1:50", "1:100", "1:200", "1:500")
 PAPER_MM = {"A0": (841.0, 1189.0), "A1": (594.0, 841.0), "A2": (420.0, 594.0), "A3": (297.0, 420.0), "A4": (210.0, 297.0)}
 
 
 def paper_size(paper: str) -> tuple[float, float]:
     """Width and height in mm of a paper name such as 'A1 Landscape'."""
+    custom = re.fullmatch(r"Custom ([0-9]+(?:\.[0-9]+)?)x([0-9]+(?:\.[0-9]+)?) mm", paper)
+    if custom:
+        return float(custom.group(1)), float(custom.group(2))
     size, _, orientation = paper.partition(" ")
+    if size not in PAPER_MM or orientation not in ("Portrait", "Landscape"):
+        raise BadRequest("Unknown sheet format", hint="Select an A0–A4 paper size or enter valid custom dimensions")
     short, long_ = sorted(PAPER_MM[size])
     return (long_, short) if orientation == "Landscape" else (short, long_)
 
@@ -2124,6 +2193,39 @@ class _Commands:
         return {"id": view["id"]}
 
     @staticmethod
+    @command(_model_target("Open level plan"))
+    def level__ensure_plan(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Create the missing plan of an existing level once, including legacy projects without a roof plan."""
+        level = project.level(text(p.get("id"), "id", 80))
+        existing = DT.plan_view(project, level["id"])
+        if existing:
+            return {"id": existing["id"], "name": existing["name"], "created": False}
+        name = level["name"]
+        taken = {v["name"].lower() for v in project.manifest["views"]}
+        if name.lower() in taken:
+            name += " (plan)"
+        vid = new_id()
+        project.manifest["views"].append({"id": vid, "kind": "plan", "name": name, "level_id": level["id"]})
+        project.drawings[vid] = SDRWDocument.new(name, unit=project.manifest["unit"])
+        return {"id": vid, "name": name, "created": True}
+
+    @staticmethod
+    @command(_model_target("Set plan cut plane"))
+    def view__set_cut_plane(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        view = project.view(text(p.get("id"), "id", 80))
+        if view["kind"] != "plan":
+            raise BadRequest("Only a floor plan has a plan cut plane")
+        key = choice_of(p.get("key"), ("cut_reference", "cut_offset"), "key")
+        if key == "cut_reference":
+            reference = text(p.get("value"), "reference level", 80)
+            project.level(reference)
+            view["cut_reference_level"] = reference
+            view["cut_offset"] = 0.0 if reference != view["level_id"] else 1.5
+        else:
+            view["cut_offset"] = number(p.get("value"), "cut offset (mm)", -1000000, 1000000) / 1000.0
+        return {"id": view["id"], "reference": view.get("cut_reference_level") or view["level_id"], "offset": view.get("cut_offset", 1.5)}
+
+    @staticmethod
     @command(_model_target("View option"))
     def view__set_option(project: Project, p: dict[str, Any]) -> dict[str, Any]:
         """Per-view drawing options, for floor plans, sections and elevations. ``opening_direction``: whether the doors' and windows'
@@ -2196,7 +2298,12 @@ class _Commands:
         elif key == "name":
             value = text(value, "name", 80, empty=True)
         elif key == "paper":
-            value = choice_of(value, PAPERS, "paper")
+            if isinstance(value, str) and value.startswith("Custom "):
+                width, height = paper_size(value)
+                if not 210 <= width <= 5000 or not 210 <= height <= 5000:
+                    raise BadRequest("Custom sheet dimensions must be 210–5000 mm on each side")
+            else:
+                value = choice_of(value, PAPERS, "paper")
         elif key == "scale":
             value = choice_of(value, SCALES, "scale")
         elif key == "revision":

@@ -9,6 +9,7 @@ import {
   type Camera, type Mat4, type Ray,
 } from "./math3d.js";
 import { cssColor, rgba } from "./palette.js";
+import { addLayerDialog } from "./dialogs.js";
 import type { Store } from "./store.js";
 import type { Pt3, Scene } from "./types.js";
 
@@ -24,7 +25,7 @@ const PITCH_LIMIT = Math.PI / 2 - 0.02;
 interface Drawable {
   id: string; name: string; material: string | null; category: string;
   tri: WebGLBuffer; triCount: number; edge: WebGLBuffer; edgeCount: number;
-  verts: Pt3[]; faces: number[][];
+  verts: Pt3[]; faces: number[][]; layerPoints: Array<{ side: string; point: Pt3 }>;
 }
 
 interface ElementDrag { id: string; start: Pt3; base: number[]; delta: number[]; y0: number }
@@ -36,6 +37,7 @@ export class ModelView {
   private readonly overlay: HTMLCanvasElement;
   private readonly octx: CanvasRenderingContext2D;
   private readonly hud: HTMLElement;
+  private readonly layerControls = h("div", { class: "layer-controls", attrs: { "aria-label": "Add layer on selected faces" } });
   private readonly levelSelect: HTMLSelectElement;
   private hudGroups: HTMLElement[] = [];
   private readonly fields: Record<string, HTMLInputElement | HTMLSelectElement> = {};
@@ -112,7 +114,7 @@ export class ModelView {
       this.orbitButton = this.railButton("orbit", "Orbit around the selected element (turn off to orbit around the point in the middle of the view)", () => { this.store.setOrbitSelection(!this.store.orbitSelection); }),
       this.railButton("fit", "Zoom to fit the whole model", () => { this.fit(); }));
     const unavailable = h("div", { class: "view-unavailable", hidden: !!this.gl, text: "3D view needs WebGL 2, which this browser does not provide. The model, properties and exports still work." });
-    this.el = h("div", { class: "canvas-wrap" }, this.canvas, this.overlay, this.hud, rail, unavailable);
+    this.el = h("div", { class: "canvas-wrap" }, this.canvas, this.overlay, this.layerControls, this.hud, rail, unavailable);
     if (this.gl) this.setup(this.gl);
     new ResizeObserver(() => this.resize()).observe(this.el);
     this.bind();
@@ -183,7 +185,7 @@ export class ModelView {
         if (!tri || !edge) continue;
         gl.bindBuffer(gl.ARRAY_BUFFER, tri); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(pos), gl.STATIC_DRAW);
         gl.bindBuffer(gl.ARRAY_BUFFER, edge); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(edges), gl.STATIC_DRAW);
-        this.drawables.push({ id: o.id, name: o.name, material: o.material, category: o.category, tri, triCount: pos.length / 6, edge, edgeCount: edges.length / 3, verts: o.vertices, faces: o.faces });
+        this.drawables.push({ id: o.id, name: o.name, material: o.material, category: o.category, tri, triCount: pos.length / 6, edge, edgeCount: edges.length / 3, verts: o.vertices, faces: o.faces, layerPoints: o.layer_points ?? [] });
       }
     }
     this.buildGrid();
@@ -667,6 +669,24 @@ export class ModelView {
     this.matrices = cameraMatrices(this.cam, this.width, this.height, this.extent);
     this.paintScene();
     this.paintOverlay();
+    this.syncLayerControls();
+  }
+
+  private syncLayerControls(): void {
+    this.layerControls.replaceChildren();
+    const selection = this.store.selection;
+    if (this.clean || this.store.tool !== "select" || selection?.kind !== "model" || selection.ids.length !== 1) return;
+    const id = selection.ids[0] as string;
+    const item = this.drawables.find((d) => d.id === id && ["wall", "floor", "roof"].includes(d.category));
+    if (!item) return;
+    for (const { side, point } of item.layerPoints) {
+      const pos = this.project(point);
+      if (!pos || pos[0] < 8 || pos[1] < 8 || pos[0] > this.width - 8 || pos[1] > this.height - 8) continue;
+      const button = h("button", { class: "layer-plus", type: "button", text: "+", attrs: { title: `Add ${side} ${item.category} layer`, "aria-label": `Add ${side} ${item.category} layer` },
+        on: { click: (event) => { event.stopPropagation(); void addLayerDialog(this.store, id, item.category as "wall" | "floor" | "roof", side); } } });
+      button.style.left = `${pos[0]}px`; button.style.top = `${pos[1]}px`;
+      this.layerControls.appendChild(button);
+    }
   }
 
   private parseColor(value: string): [number, number, number, number] { return rgba(value); }

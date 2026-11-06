@@ -120,7 +120,7 @@ export interface ScheduleData {
   totals: Record<string, number>; count: number; note: string;
 }
 
-export interface SceneObject { id: string; name: string; category: string; material: string | null; vertices: Pt3[]; faces: number[][] }
+export interface SceneObject { id: string; name: string; category: string; material: string | null; vertices: Pt3[]; faces: number[][]; layer_points?: Array<{ side: string; point: Pt3 }> }
 export interface Scene { unit: "m"; revision: number; objects: SceneObject[]; bounds: [Pt3, Pt3] | null; time?: number }
 
 /** The model's animation as the SLAI Animation Agent holds it in the SGEO scene. Times are seconds. ``lanes`` is the same tracks in the units
@@ -228,6 +228,7 @@ export interface Viewport {
   projection?: Projection | null; section_marks?: SectionMark[]; schedule?: ScheduleData;
   azimuth?: number; elevation?: number; solid?: SolidView;
   image?: SnapshotImage; paper_width?: number; paper_height?: number; report?: ReportBox;
+  locked?: boolean; manual?: boolean; bounds_mm?: [number, number, number, number];
 }
 export interface SheetNote { id: string; text: string; x: number; y: number; size: number }
 export interface SheetRevision { rev: string; date: string; description: string; by: string; model_revision: number }

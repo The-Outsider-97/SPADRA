@@ -31,6 +31,22 @@ class Walls(Case):
         self.assertEqual(len(self.layers()), 2)
         self.assertEqual(self.layers()[1]["id"], lid)
 
+    def test_contextual_left_and_right_insertion_and_cut_inheritance(self):
+        left = self.add(material="Plasterboard", side="left", openings="none", thickness=25)
+        right = self.add(material="Mineral wool", side="right", openings="all", thickness=40)
+        self.assertEqual([r["id"] for r in self.layers()], [left, "main", right])
+        self.assertEqual(LY.inherited(self.layers()[0], [self.door, self.win]), [])
+        self.assertEqual(LY.inherited(self.layers()[-1], [self.door, self.win]), [self.door, self.win])
+        self.assertGreater(self.vol(self.w), 0)
+        self.p.undo()
+        self.assertEqual([r["id"] for r in self.layers()], [left, "main"])
+
+    def test_3d_wall_face_controls_are_anchored_to_host_orientation(self):
+        obj = next(o for o in self.p.scene_data()["objects"] if o["id"] == self.w)
+        points = {row["side"]: row["point"] for row in obj["layer_points"]}
+        self.assertEqual(set(points), {"left", "right"})
+        self.assertGreater(points["left"][1], points["right"][1])
+
     def test_the_thickness_is_the_sum_of_the_layers_and_the_volume_agrees(self):
         before = self.vol(self.w)
         self.add(material="Plasterboard", thickness=12.5)
@@ -144,11 +160,11 @@ class Walls(Case):
         self.assertGreater(total, 0)
         self.assertTrue(all(self.p.model.volume(i, unit="m") > 0 for i in (self.w, other)))
 
-    def test_the_properties_panel_lists_the_layers_and_the_plus(self):
+    def test_the_properties_panel_edits_existing_layers_without_an_add_button(self):
         lid = self.add(material="Plasterboard", thickness=50)
         out = self.p.properties({"model": self.w})
         group = next(g for g in out["groups"] if g["title"].startswith("Layers"))
-        self.assertEqual(group["add"], "layer")
+        self.assertNotIn("add", group)  # creation is contextual on the selected faces
         keys = [r.get("key") for r in group["rows"]]
         self.assertIn(f"layer:{lid}:thickness", keys)
         self.assertIn(f"layer:{lid}:openings", keys)
@@ -226,6 +242,24 @@ class Floors(Case):
     def add(self, **kw):
         return self.run_("model.add_layer", id=self.f, **kw)["layer"]
 
+    def test_top_and_bottom_contextual_layers_preserve_the_existing_slab_location(self):
+        before = self.p.model.world_bounds(self.f)
+        above = self.add(material="Screed", thickness=50, side="top")
+        after_top = self.p.model.world_bounds(self.f)
+        self.assertAlmostEqual(after_top[0][2], before[0][2], places=7)
+        self.assertAlmostEqual(after_top[1][2], before[1][2] + 0.05, places=7)
+        below = self.add(material="EPS", thickness=80, side="bottom")
+        after_both = self.p.model.world_bounds(self.f)
+        self.assertAlmostEqual(after_both[0][2], before[0][2] - 0.08, places=7)
+        self.assertAlmostEqual(after_both[1][2], before[1][2] + 0.05, places=7)
+        self.assertEqual([row["id"] for row in LY.stack(self.p, self.f)], [above, "main", below])
+
+    def test_3d_floor_face_controls_are_on_opposing_surface_normals(self):
+        obj = next(o for o in self.p.scene_data()["objects"] if o["id"] == self.f)
+        points = {row["side"]: row["point"] for row in obj["layer_points"]}
+        self.assertEqual(set(points), {"top", "bottom"})
+        self.assertGreater(points["top"][2], points["bottom"][2])
+
     def test_floor_layers_stack_downward_from_the_top_and_add_up(self):
         a = self.add(material="Screed", thickness=60, position=0)                 # on top
         self.add(material="EPS", thickness=100)                                  # under the slab
@@ -266,6 +300,21 @@ class Floors(Case):
 
 
 class Roofs(Case):
+    def test_inside_flat_roof_layer_grows_below_without_moving_existing_roof(self):
+        roof = self.run_("model.add_roof", level=self.roof_level, roof="flat", points=[[0, 0], [6000, 0], [6000, 4000], [0, 4000]], thickness=100)["id"]
+        before = self.p.model.world_bounds(roof)
+        self.run_("model.add_layer", id=roof, side="inside", thickness=80)
+        after = self.p.model.world_bounds(roof)
+        self.assertAlmostEqual(after[0][2], before[0][2] - 0.08, places=7)
+        self.assertAlmostEqual(after[1][2], before[1][2], places=7)
+
+    def test_3d_roof_face_controls_follow_a_pitched_surface(self):
+        roof = self.run_("model.add_roof", level=self.roof_level, roof="gable", points=[[0, 0], [6000, 0], [6000, 4000], [0, 4000]], thickness=100, pitch=30)["id"]
+        obj = next(o for o in self.p.scene_data()["objects"] if o["id"] == roof)
+        points = {row["side"]: row["point"] for row in obj["layer_points"]}
+        self.assertEqual(set(points), {"outside", "inside"})
+        self.assertNotEqual(points["outside"][2], points["inside"][2])
+
     def test_a_layered_flat_roof_keeps_standing_on_its_level(self):
         r = self.run_("model.add_roof", level=self.roof_level, roof="flat", points=[[0, 0], [6000, 0], [6000, 4000], [0, 4000]], thickness=100)["id"]
         base = next(l["elevation"] for l in self.p.manifest["levels"] if l["id"] == self.roof_level)
