@@ -136,7 +136,20 @@ def _parse_catalog(path: str, mtime_ns: int, size: int) -> dict[str, Any]:
         items = by_assembly.setdefault(assembly.casefold(), [])
         if not any(i["omniclass_code"] == row["omniclass_code"] for i in items):
             items.append(row)
-    return {"edition": raw["edition"], "codes": codes, "mappings": by_assembly}
+    listed = raw.get("assemblies", [])
+    if not isinstance(listed, list):
+        raise BadRequest("assemblies must be a list")
+    assembly_codes: dict[str, dict[str, str]] = {}
+    for item in listed:
+        if not isinstance(item, dict):
+            raise BadRequest("UniFormat assembly entries must be objects")
+        code = _code(item.get("code"), "UniFormat code")
+        title = _code(item.get("title"), "UniFormat title")
+        if code.casefold() in assembly_codes:
+            raise BadRequest("Duplicate UniFormat assembly code: " + code)
+        assembly_codes[code.casefold()] = {"code": code, "title": title}
+    return {"edition": raw["edition"], "codes": codes, "mappings": by_assembly,
+            "assemblies": assembly_codes}
 
 def catalog() -> dict[str, Any] | None:
     path = _catalog_path()
@@ -309,10 +322,15 @@ def search(kind: str, q: str = "", *, table: int = 21, limit: int = 30) -> list[
         return _csi_search(kind, q, table, limit) if _csi_key() else []
     term = q.strip().casefold()
     if kind == "assembly":
-        return [{"code": rows[0]["assembly_code"], "title": "Assembly / UniFormat",
-                 "mapped": [r["omniclass_code"] for r in rows]}
-                for rows in sorted(cs["mappings"].values(), key=lambda items: items[0]["assembly_code"])
-                if term in rows[0]["assembly_code"].casefold()][:limit]
+        rows = dict(cs["assemblies"])
+        for name, mappings in cs["mappings"].items():
+            rows.setdefault(name, {"code": mappings[0]["assembly_code"], "title": "UniFormat assembly"})
+        found = [{"code": row["code"], "title": row["title"],
+                  "mapped": [x["omniclass_code"] for x in cs["mappings"].get(key, [])]}
+                 for key, row in rows.items()
+                 if term in row["code"].casefold() or term in row["title"].casefold()]
+        found.sort(key=lambda row: (not row["code"].casefold().startswith(term), row["code"]))
+        return found[:limit]
     vals = [x for x in cs["codes"][str(table)].values()
             if term in x["code"].casefold() or term in x["title"].casefold()]
     vals.sort(key=lambda x: (not x["code"].casefold().startswith(term), x["code"]))
