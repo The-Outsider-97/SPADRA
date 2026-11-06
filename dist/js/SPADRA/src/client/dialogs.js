@@ -143,7 +143,8 @@ export async function mirrorKeepDialog() {
     });
     return handle.result;
 }
-/** Array: copy the selected elements along a line or round a point. The step and centre are in the drawing's unit; every copy is an ordinary element. */
+/** Array: repeat the selected elements along X, Y, Z (or any mix) or round a point, and keep the pattern: the array is an element of its own that regenerates
+ *  its copies when its count, spacing, direction or source change (edit it in Properties; "Release array" keeps the copies and drops the pattern). */
 export async function arrayDialog(store) {
     const sel = store.selection;
     if (!store.project || sel?.kind !== "model" || !sel.ids.length) {
@@ -151,23 +152,34 @@ export async function arrayDialog(store) {
         return;
     }
     const unit = store.unit;
-    const mode = h("select", {}, h("option", { value: "linear", text: "Linear: along a line" }), h("option", { value: "radial", text: "Radial: round a point" }));
+    const mode = h("select", {}, h("option", { value: "grid", text: "Rectangular: along X, Y and/or Z" }), h("option", { value: "radial", text: "Radial: round a point" }));
+    const dimension = h("select", {}, ...["X", "Y", "Z", "XY", "XZ", "YZ", "XYZ"].map((d) => h("option", { value: d, text: d })));
     const number = (value, step = "any", min) => h("input", { type: "number", value, step, ...(min ? { min } : {}), attrs: { autocomplete: "off" } });
-    const count = number("3", "1", "2");
-    const dx = number("1000"), dy = number("0"), dz = number("0");
+    const counts = [number("3", "1", "1"), number("1", "1", "1"), number("1", "1", "1")];
+    const spacings = [number("1000", "any"), number("1000", "any"), number("1000", "any")];
+    const axisRows = ["X", "Y", "Z"].map((name, i) => h("div", { css: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" } }, labelled(`${name}: number of items`, counts[i]), labelled(`${name}: spacing (${unit})`, spacings[i])));
+    const showAxes = () => { axisRows.forEach((row, i) => { row.hidden = !dimension.value.includes("XYZ"[i]); }); };
+    dimension.addEventListener("change", showAxes);
+    const count = number("4", "1", "2");
     const cx = number("0"), cy = number("0"), angle = number("360");
-    const linear = h("div", { css: { display: "grid", gap: "0.75rem" } }, labelled(`Step X (${unit})`, dx), labelled(`Step Y (${unit})`, dy), labelled(`Step Z (${unit})`, dz));
-    const radial = h("div", { css: { display: "grid", gap: "0.75rem" }, hidden: true }, labelled(`Centre X (${unit})`, cx), labelled(`Centre Y (${unit})`, cy), labelled("Angle (degrees)", angle, { hint: "360 spreads the items evenly round the circle. Any other angle puts the last item on that angle." }));
-    mode.addEventListener("change", () => { linear.hidden = mode.value !== "linear"; radial.hidden = mode.value !== "radial"; });
+    const linked = h("input", { type: "checkbox", checked: true, attrs: { "aria-label": "Linked to the source" } });
+    const rect = h("div", { css: { display: "grid", gap: "0.75rem" } }, labelled("Directions", dimension, { hint: "X, Y and Z are the model's axes; a combination makes a two- or three-dimensional pattern. Any direction is possible in Properties afterwards." }), ...axisRows);
+    const radial = h("div", { css: { display: "grid", gap: "0.75rem" }, hidden: true }, labelled("Number of items", count, { hint: "Counts the originals." }), labelled(`Centre X (${unit})`, cx), labelled(`Centre Y (${unit})`, cy), labelled("Angle (degrees)", angle, { hint: "360 spreads the items evenly round the circle. Any other angle puts the last item on that angle." }));
+    mode.addEventListener("change", () => { rect.hidden = mode.value !== "grid"; radial.hidden = mode.value !== "radial"; });
+    showAxes();
     const handle = openDialog({
-        title: "Array", size: "narrow", focus: () => count,
-        body: h("div", { css: { display: "grid", gap: "1rem" } }, labelled("Kind", mode), labelled("Number of items", count, { hint: "Counts the originals: 3 makes two copies of each." }), linear, radial, h("p", { class: "muted", text: "The copies are ordinary elements: change the original later and the copies stay as they are. A wall brings its doors and windows." })),
-        actions: [{ label: "Make copies", kind: "primary", run: async () => {
-                    const n = Number(count.value);
-                    const params = { ids: sel.ids, mode: mode.value, count: n };
-                    if (mode.value === "linear")
-                        params["step"] = [Number(dx.value), Number(dy.value), Number(dz.value)];
+        title: "Array", size: "narrow", focus: () => counts[0],
+        body: h("div", { css: { display: "grid", gap: "1rem" } }, labelled("Kind", mode), rect, radial, h("label", { css: { display: "flex", gap: "0.5rem", alignItems: "center" } }, linked, h("span", { text: "Linked: the copies follow the original when it changes" })), h("p", { class: "muted", text: "The array stays editable: select it (Project Browser, Arrays) to change its count, spacing or direction. Change a copy by hand and it becomes independent. A wall brings its doors and windows." })),
+        actions: [{ label: "Make array", kind: "primary", run: async () => {
+                    const params = { ids: sel.ids, mode: mode.value, linked: linked.checked };
+                    if (mode.value === "grid") {
+                        const letters = dimension.value.split("");
+                        params["dimension"] = dimension.value;
+                        params["counts"] = letters.map((l) => Number(counts["XYZ".indexOf(l)].value));
+                        params["spacings"] = letters.map((l) => Number(spacings["XYZ".indexOf(l)].value));
+                    }
                     else {
+                        params["count"] = Number(count.value);
                         params["centre"] = [Number(cx.value), Number(cy.value)];
                         params["angle"] = Number(angle.value);
                     }
@@ -181,4 +193,15 @@ export async function arrayDialog(store) {
                 } }],
     });
     await handle.result;
+}
+/** Release the array of the selected element: the pattern goes, every copy stays as an ordinary element. */
+export async function releaseArray(store) {
+    const sel = store.selection;
+    if (!store.project || sel?.kind !== "model" || sel.ids.length !== 1) {
+        toast("Select an array, or one of its copies, then choose Release array.", { kind: "info" });
+        return;
+    }
+    const out = await store.run("model.release_array", { id: sel.ids[0] });
+    if (out)
+        toast("The array is released: its copies are ordinary elements now.", { kind: "info" });
 }

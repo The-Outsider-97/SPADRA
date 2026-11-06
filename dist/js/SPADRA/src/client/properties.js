@@ -26,7 +26,7 @@ export function iconFor(p) {
         return "page";
     if (p.kind === "entity")
         return p.category === "tag" ? "tag" : p.category === "dimension" ? "dimension" : p.category === "text" ? "text" : p.category === "circle" ? "circle" : "line";
-    const byCategory = { wall: "wall", door: "door", window: "window", floor: "floor", roof: "roof", gutter: "gutter", downpipe: "downpipe", structural: "beam", beam: "beam", column: "column", room: "room", stair: "stair", grid: "grid", generic: "family" };
+    const byCategory = { wall: "wall", door: "door", window: "window", floor: "floor", roof: "roof", gutter: "gutter", downpipe: "downpipe", foundation: "foundation", structural: "beam", beam: "beam", column: "column", room: "room", stair: "stair", grid: "grid", generic: "family" };
     return byCategory[p.category] ?? "cube";
 }
 function projectInfo(store) {

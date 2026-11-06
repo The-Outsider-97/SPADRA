@@ -10,7 +10,7 @@ const ICONS = {
     views: "views", "views-3d": "cube", "views-plan": "plan", "views-section": "section", "views-elevation": "elevation", "views-schedule": "table",
     models: "cube", drawings: "plan", levels: "levels", families: "family", sheets: "page", scenes: "clock", "animation-assets": "layers", reports: "report", categories: "list",
     "cat-Walls": "wall", "cat-Doors": "door", "cat-Windows": "window", "cat-Floors": "floor", "cat-Roofs": "roof", "cat-Gutters": "gutter", "cat-Downpipes": "downpipe", "cat-Structural": "beam", "cat-Rooms": "room",
-    "cat-Columns": "column", "cat-Stairs": "stair", "cat-Grids": "grid", "cat-Generic": "family",
+    "cat-Columns": "column", "cat-Stairs": "stair", "cat-Grids": "grid", "cat-Generic": "family", "cat-Extrusions": "extrude", "cat-Voids": "void", "cat-Sweeps": "sweep", "cat-Foundations": "foundation",
 };
 /** The icon for a row: its own entry, else what it opens, else what it is. */
 export function iconFor(n) {

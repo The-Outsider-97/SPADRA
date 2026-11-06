@@ -13,8 +13,9 @@ import { diagnosticsDialog, jobChip, jobsDialog } from "./jobs_ui.js";
 import { exportDialog, importDialog } from "./interchange.js";
 import { familiesDialog, issueDialog, levelsDialog, newReportDialog, reportDialog } from "./project_ui.js";
 import { propertiesDialog, recoverDialog } from "./project_dialogs.js";
-import { appearanceDialog, arrayDialog, ensureClean, newProjectDialog, openProjectDialog, reviewDialog } from "./dialogs.js";
+import { appearanceDialog, arrayDialog, releaseArray, ensureClean, newProjectDialog, openProjectDialog, reviewDialog } from "./dialogs.js";
 import { downpipeDialog, drainageDialog, gutterDialog } from "./gutters.js";
+import { foundationDialog, foundationReportDialog } from "./foundations.js";
 import { renderProperties } from "./properties.js";
 import { ScheduleView } from "./schedule.js";
 import { SheetView } from "./sheet.js";
@@ -133,7 +134,7 @@ export class Shell {
     }
     scheduleMenu(anchor) {
         const have = new Set(flatten(store.tree).filter((n) => n.view_kind === "schedule").map((n) => n.label));
-        const kinds = [["door", "Door Schedule"], ["window", "Window Schedule"], ["wall", "Wall Schedule"], ["floor", "Floor Schedule"], ["roof", "Roof Schedule"], ["gutter", "Gutter Schedule"], ["downpipe", "Downpipe Schedule"], ["structural", "Beam & Column Schedule"], ["room", "Room Schedule"]];
+        const kinds = [["door", "Door Schedule"], ["window", "Window Schedule"], ["wall", "Wall Schedule"], ["floor", "Floor Schedule"], ["roof", "Roof Schedule"], ["gutter", "Gutter Schedule"], ["downpipe", "Downpipe Schedule"], ["foundation", "Foundation Schedule"], ["structural", "Beam & Column Schedule"], ["room", "Room Schedule"]];
         const entries = kinds.filter(([, label]) => !have.has(label)).map(([category, label]) => ({ label, icon: "table", run: () => { void this.addView("view.add_schedule", { category }, "schedule"); } }));
         openMenu(anchor, entries.length ? entries : [{ label: "Every schedule already exists", disabled: true, run: () => undefined }], { label: "New schedule" });
     }
@@ -345,6 +346,8 @@ export class Shell {
                     T("gutter", "Gutter", "gutter", !!store.project, { run: () => gutterDialog(store), note: "Select a roof, then hang gutters (and downpipes) on its eaves" }),
                     T("downpipe", "Downpipe", "downpipe", !!store.project, { run: () => downpipeDialog(store), note: "Select a gutter, then add a downpipe under it" }),
                     T("drainage", "Drainage", "report", !!store.project, { run: () => drainageDialog(store), note: "The rain each roof sends to its gutters and downpipes" }),
+                    T("foundation", "Foundation", "foundation", !!store.project, { run: () => { void foundationDialog(store); }, note: "Pads, strips, foundation beams, rafts and ground-bearing slabs; select walls or columns to stand them on" }),
+                    T("foundationqty", "Foundation quantities", "report", !!store.project, { run: () => { void foundationReportDialog(store); }, note: "Concrete, build-up, thermal resistance and indicative bars of the selected foundation" }),
                     T("beam", "Beam", "beam", kind === "3d", { tool: "beam" }), T("column", "Column", "column", on3dOrPlan, { tool: "column" }),
                     T("room", "Room", "room", onPlan, { tool: "room" }),
                     T("autorooms", store.project?.auto_rooms ? "Auto rooms: on" : "Auto rooms: off", "room", !!store.project, { run: () => this.toggleAutoRooms(), note: "Make a room wherever walls close a space (no roof needed), and keep it in step with the walls" }),
@@ -354,7 +357,7 @@ export class Shell {
                     T("void", "Void", "void", onPlan, { tool: "void", note: "Draw an outline that cuts the floors, extrusions and walls it passes through" }),
                     T("sweep", "Sweep", "sweep", onPlan, { tool: "sweep", note: "Carry a profile along a path drawn in plan" }),
                     T("makevoid", "Make void", "void", !!store.project, { run: () => this.makeVoid(), note: "Turn the selected extrusions into voids that cut" }),
-                    T("array", "Array", "array", !!store.project, { run: () => arrayDialog(store), note: "Copy the selection along a line or round a point" })],
+                    T("array", "Array", "array", !!store.project, { run: () => arrayDialog(store), note: "Repeat the selection along X, Y, Z or round a point, and keep the pattern editable" }), T("releasearray", "Release array", "array", !!store.project, { run: () => releaseArray(store), note: "Keep the copies of the selected array as ordinary elements and drop the pattern" })],
                 [T("section", "Section", "section", on3dOrPlan, { tool: "section" }), T("elevation", "Elevation", "elevation", !!store.project, { run: () => this.elevationMenu(this.ribbon) }),
                     T("schedule", "Schedule", "table", !!store.project, { run: () => this.scheduleMenu(this.ribbon) })],
                 [T("levels", "Levels", "levels", !!store.project, { run: () => levelsDialog(store), note: "Add, rename or move the building's levels" }),
@@ -395,8 +398,9 @@ export class Shell {
                 [T("floor", "Floor", "floor", true, { tool: "floor" }), T("roof", "Roof", "roof", true, { tool: "roof" }),
                     T("gutter", "Gutter", "gutter", true, { run: () => gutterDialog(store), note: "Select a roof, then hang gutters (and downpipes) on its eaves" }),
                     T("downpipe", "Downpipe", "downpipe", true, { run: () => downpipeDialog(store), note: "Select a gutter, then add a downpipe under it" }),
-                    T("drainage", "Drainage", "report", true, { run: () => drainageDialog(store), note: "The rain each roof sends to its gutters and downpipes" })], [T("beam", "Beam", "beam", true, { tool: "beam" }), T("column", "Column", "column", true, { tool: "column" })], [nope("dim3", "Dimension", "dimension")],
-                [T("makevoid", "Make void", "void", true, { run: () => this.makeVoid(), note: "Turn the selected extrusions into voids that cut" }), T("array", "Array", "array", true, { run: () => arrayDialog(store), note: "Copy the selection along a line or round a point" })],
+                    T("drainage", "Drainage", "report", true, { run: () => drainageDialog(store), note: "The rain each roof sends to its gutters and downpipes" }),
+                    T("foundation", "Foundation", "foundation", true, { run: () => { void foundationDialog(store); }, note: "Pads, strips, foundation beams, rafts and ground-bearing slabs; select walls or columns to stand them on" })], [T("beam", "Beam", "beam", true, { tool: "beam" }), T("column", "Column", "column", true, { tool: "column" })], [nope("dim3", "Dimension", "dimension")],
+                [T("makevoid", "Make void", "void", true, { run: () => this.makeVoid(), note: "Turn the selected extrusions into voids that cut" }), T("array", "Array", "array", true, { run: () => arrayDialog(store), note: "Repeat the selection along X, Y, Z or round a point, and keep the pattern editable" }), T("releasearray", "Release array", "array", !!store.project, { run: () => releaseArray(store), note: "Keep the copies of the selected array as ordinary elements and drop the pattern" })],
                 [T("snapshot", "Snapshot", "cube", true, { run: () => this.snapshotMenu(this.ribbon), note: "Put a picture of this 3D view on a sheet" })],
                 [T("section", "Section", "section", true, { tool: "section" }), T("elevation", "Elevation", "elevation", true, { run: () => this.elevationMenu(this.ribbon) }), T("schedule", "Schedule", "table", true, { run: () => this.scheduleMenu(this.ribbon) })]];
         if (kind === "schedule")
@@ -419,7 +423,7 @@ export class Shell {
                 T("extend", "Extend", "extend", kind === "drawing", { tool: "extend" }), T("fillet", "Fillet", "fillet", kind === "drawing", { tool: "fillet" }),
                 T("mirror", "Mirror", "mirror", kind === "drawing", { tool: "mirror" }), T("hatch", "Hatch", "hatch", kind === "drawing", { tool: "hatch" }),
                 T("rotate", "Rotate", "rotate", onPlan, { tool: "rotate", note: "Turn the selected walls, columns, floors, rooms … about a point you pick" }),
-                T("array", "Array", "array", !!store.project, { run: () => arrayDialog(store), note: "Copy the selection along a line or round a point" })],
+                T("array", "Array", "array", !!store.project, { run: () => arrayDialog(store), note: "Repeat the selection along X, Y, Z or round a point, and keep the pattern editable" }), T("releasearray", "Release array", "array", !!store.project, { run: () => releaseArray(store), note: "Keep the copies of the selected array as ordinary elements and drop the pattern" })],
             [T("dimension", "Dimension", "dimension", kind === "drawing", { tool: "dimension" }), T("text", "Text", "text", kind === "drawing", { tool: "text" })],
             [T("wall", "Wall", "wall", onPlan, { tool: "wall" }), T("door", "Door", "door", onPlan, { tool: "door" }), T("window", "Window", "window", onPlan, { tool: "window" }), T("floor", "Floor", "floor", onPlan, { tool: "floor" })],
             [T("extrude", "Extrude", "extrude", onPlan, { tool: "extrude" }), T("void", "Void", "void", onPlan, { tool: "void" }), T("sweep", "Sweep", "sweep", onPlan, { tool: "sweep" }),

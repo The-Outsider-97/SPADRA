@@ -224,6 +224,8 @@ export function snapPoint(p, entities, tolerance, gridStep, polygons = []) {
                 continue;
             consider(a, "end");
             consider(mid(a, b), "mid");
+            if (poly.length === 2 && i === 0 && distToSegment(p, a, b) <= tolerance)
+                near.push([a, b]); // a grid line or a wall's centre line can be crossed by another
         }
     }
     for (let i = 0; i < near.length; i++)

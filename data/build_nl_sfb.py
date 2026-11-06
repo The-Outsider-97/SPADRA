@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import json
 import sys
+
+from datetime import date, datetime
 from pathlib import Path
 
-import openpyxl
+import openpyxl # type: ignore
 
 SHEETS = {0: "NL-SfB_Tabel 0", 1: "NL-SfB_Tabel 1", 2: "NL-SfB_Tabel 2", 3: "NL-SfB_Tabel 3", 4: "NL-SfB_Tabel 4"}
 TITLES = {0: ("Ruimtelijke voorzieningen", "Physical environment"), 1: ("Functionele gebouwelementen", "Elements"), 2: ("Constructiemethoden", "Constructions"),
@@ -37,8 +39,10 @@ def build(source: Path) -> dict:
     version = ""
     for row in book["NL-SfB"].iter_rows(values_only=True):
         cells = [c for c in row if c is not None]
-        if cells and hasattr(cells[0], "year"):
+        if cells and isinstance(cells[0], datetime):
             version = cells[0].date().isoformat()
+        elif cells and isinstance(cells[0], date):
+            version = cells[0].isoformat()
     rows: list[list] = []
     fixed_rows = 0
     for table, sheet in SHEETS.items():

@@ -121,6 +121,17 @@ export function edgePath(item, map) {
 export function cutPath(item, map) {
     return item.cut.map((loop) => loop.map((p, i) => { const q = map(p); return `${i ? "L" : "M"}${r(q[0])} ${r(q[1])}`; }).join("") + "Z").join("");
 }
+/** How a cut material is drawn in a section: fill opacity and the hatch laid over it (concrete diagonal, insulation crossed, granular fill dotted). */
+export function cutStyle(material) {
+    const m = material.toLowerCase();
+    if (/(eps|xps|pir|mineral wool|foam glass|insulation)/.test(m))
+        return { alpha: 0.06, hatch: "cross" };
+    if (/(sand|gravel|fill)/.test(m))
+        return { alpha: 0.12, hatch: "dots" };
+    if (/(concrete|masonry)/.test(m))
+        return { alpha: 0.45, hatch: "diag" };
+    return { alpha: 0.28, hatch: "none" };
+}
 /** How strongly an element's cut is filled: structure is solid, glazing and doors are lighter so they read as different from the wall. */
 export function cutWeight(category) {
     return category === "window" ? 0.25 : category === "door" ? 0.55 : 1;
@@ -132,4 +143,46 @@ export function visibleLevels(projection, mmPerUnit) {
         return [];
     const slack = 300 / mmPerUnit;
     return projection.levels.filter((l) => l.z >= b[0][1] - slack && l.z <= b[1][1] + slack);
+}
+/** Hatch lines (or dots) laid over one closed loop, as a path in the loop's own units, clipped to the loop (even-odd, so any simple outline works). */
+export function hatchPath(loop, hatch, step) {
+    if (loop.length < 3 || !(step > 0))
+        return "";
+    const xs = loop.map((p) => p[0]), ys = loop.map((p) => p[1]);
+    const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+    const edges = loop.map((a, i) => [a, loop[(i + 1) % loop.length]]);
+    const out = [];
+    if (hatch === "dots") {
+        const inside = (x, y) => { let c = false; for (const [a, b] of edges)
+            if ((a[1] > y) !== (b[1] > y) && x < ((b[0] - a[0]) * (y - a[1])) / (b[1] - a[1]) + a[0])
+                c = !c; return c; };
+        let row = 0;
+        for (let y = y0 + step / 2; y < y1; y += step, row++)
+            for (let x = x0 + step / 2 + (row % 2 ? step / 2 : 0); x < x1; x += step)
+                if (inside(x, y))
+                    out.push(`M${r(x)} ${r(y)}l${r(step * 0.02)} 0`);
+        return out.join("");
+    }
+    const lines = (sign) => {
+        const lo = Math.min(x0 - sign * y0, x0 - sign * y1, x1 - sign * y0, x1 - sign * y1), hi = Math.max(x0 - sign * y0, x0 - sign * y1, x1 - sign * y0, x1 - sign * y1);
+        for (let c = Math.ceil(lo / step) * step; c < hi; c += step) {
+            const hits = [];
+            for (const [a, b] of edges) {
+                const ua = a[0] - sign * a[1] - c, ub = b[0] - sign * b[1] - c;
+                if ((ua < 0) !== (ub < 0) && ua !== ub) {
+                    const t = ua / (ua - ub);
+                    hits.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+                }
+            }
+            hits.sort((p, q) => p[0] - q[0] || p[1] - q[1]);
+            for (let i = 0; i + 1 < hits.length; i += 2) {
+                const p = hits[i], q = hits[i + 1];
+                out.push(`M${r(p[0])} ${r(p[1])}L${r(q[0])} ${r(q[1])}`);
+            }
+        }
+    };
+    lines(1);
+    if (hatch === "cross")
+        lines(-1);
+    return out.join("");
 }

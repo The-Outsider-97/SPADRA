@@ -2,7 +2,7 @@
 import { h, replace, s } from "../../../tools/web/src/dom.js";
 import { openMenu } from "./menus.js";
 import { entityBounds, formatDimension, segments, textBox } from "./geom2d.js";
-import { cutPath, cutWeight, edgePath, levelLabel, markArrows, markLabel, surfacePath, visibleLevels } from "./projection.js";
+import { cutPath, cutStyle, cutWeight, edgePath, hatchPath, levelLabel, markArrows, markLabel, surfacePath, visibleLevels } from "./projection.js";
 import { formatCell } from "./schedule.js";
 import { iconFor } from "./browser.js";
 import { flatten, openable } from "./store.js";
@@ -163,10 +163,12 @@ export class SheetView {
             this.solidFaces(g, vp.solid);
         const outline = (w) => `M${w.polygon.map((p) => `${p[0]} ${p[1]}`).join("L")}Z`;
         const stroke = { stroke: "var(--ink)", "stroke-width": 1, "vector-effect": "non-scaling-stroke", "stroke-linejoin": "round" };
-        for (const cat of ["floor", "room", "generic", "stair", "wall", "structural", "window", "door", "column", "gutter", "downpipe", "grid"]) {
+        for (const cat of ["foundation", "floor", "room", "generic", "stair", "wall", "structural", "window", "door", "column", "gutter", "downpipe", "grid"]) {
             for (const w of (vp.model ?? []).filter((m) => m.category === cat)) {
                 if (cat === "room" || cat === "generic" || cat === "column" || cat === "stair" || cat === "grid" || cat === "gutter" || cat === "downpipe")
                     this.otherItem(g, w, 1 / k);
+                else if (cat === "foundation")
+                    g.appendChild(s("path", { attrs: { d: outline(w), fill: "var(--ink)", "fill-opacity": 0.06, "stroke-dasharray": "5 2 1 2", ...stroke, "stroke-width": 0.5 } }));
                 else if (cat === "wall")
                     g.appendChild(s("path", { attrs: { d: outline(w), fill: "var(--ink)", "fill-opacity": 0.22, ...stroke } }));
                 else if (cat === "floor")
@@ -248,9 +250,13 @@ export class SheetView {
                 return;
             g.appendChild(s("path", { attrs: { d: `M${a[0]} ${a[1]}L${b[0]} ${b[1]}`, fill: "none", ...stroke, "stroke-dasharray": "10 2 1 2", "stroke-width": 0.4 } }));
             if (l && "radius" in l) {
-                const r = 3 * unitsPerMm, dx = a[0] - b[0], dy = a[1] - b[1], len = Math.hypot(dx, dy) || 1, cx = a[0] + (dx / len) * r, cy = a[1] + (dy / len) * r;
-                g.appendChild(s("circle", { attrs: { cx, cy, r, fill: "var(--paper)", ...stroke } }));
-                g.appendChild(label([cx, cy - r * 0.0], r * 1.1, l.name, 700));
+                const r = 3 * unitsPerMm;
+                for (const end of l.bubbles ?? ["start"]) {
+                    const [from, to] = end === "start" ? [a, b] : [b, a];
+                    const dx = from[0] - to[0], dy = from[1] - to[1], len = Math.hypot(dx, dy) || 1, cx = from[0] + (dx / len) * r, cy = from[1] + (dy / len) * r;
+                    g.appendChild(s("circle", { attrs: { cx, cy, r, fill: "var(--paper)", ...stroke } }));
+                    g.appendChild(label([cx, cy - r * 0.0], r * 1.1, l.name, 700));
+                }
             }
         }
     }
@@ -266,6 +272,13 @@ export class SheetView {
                 g.appendChild(s("text", { attrs: { transform: `translate(${pr.bounds[0][0] - pad} ${l.z + size * 0.4}) scale(1 -1)`, "font-size": size, "text-anchor": "end", fill: "var(--muted)" }, text: levelLabel(l.name, l.z, mmPerUnit) }));
             }
         }
+        if (pr.bounds)
+            for (const gm of pr.grid_marks ?? []) { // the grids this picture meets, with their bubbles above
+                const pad = (pr.bounds[1][1] - pr.bounds[0][1]) * 0.08 + 4 * unitsPerMm, r = 3 * unitsPerMm, top = pr.bounds[1][1] + pad + r * 2;
+                g.appendChild(s("path", { attrs: { d: `M${gm.x} ${pr.bounds[0][1] - pad}L${gm.x} ${top - r * 2}`, fill: "none", stroke: "var(--muted)", "stroke-width": 0.4, "stroke-dasharray": "10 2 1 2", "vector-effect": "non-scaling-stroke" } }));
+                g.appendChild(s("circle", { attrs: { cx: gm.x, cy: top - r, r, fill: "var(--paper)", ...ink, "stroke-width": 0.5 } }));
+                g.appendChild(s("text", { attrs: { transform: `translate(${gm.x} ${top - r - r * 0.4}) scale(1 -1)`, "font-size": r * 1.1, "text-anchor": "middle", "font-weight": 700, fill: "var(--ink)", stroke: "none" }, text: gm.name }));
+            }
         for (const it of pr.items) { // far to near, so nearer elements cover what they hide
             g.appendChild(s("path", { attrs: { d: surfacePath(it, same), fill: "var(--paper)", "fill-rule": "nonzero", stroke: "none" }, data: { element: it.id } }));
             g.appendChild(s("path", { attrs: { d: edgePath(it, same), fill: "none", "stroke-width": 0.5, ...ink } }));
@@ -273,6 +286,17 @@ export class SheetView {
         for (const it of pr.items) {
             if (!it.cut.length)
                 continue;
+            if (it.cut_material) { // a foundation: one region per layer, hatched by its material
+                it.cut.forEach((loop, n) => {
+                    const style = cutStyle(it.cut_material?.[n] ?? "Concrete");
+                    const d = `M${loop.map((p) => `${p[0]} ${p[1]}`).join("L")}Z`;
+                    g.appendChild(s("path", { attrs: { d, fill: "var(--ink)", "fill-opacity": style.alpha, stroke: "none" }, data: { cut: it.id } }));
+                    if (style.hatch !== "none")
+                        g.appendChild(s("path", { attrs: { d: hatchPath(loop, style.hatch, 2.2 * unitsPerMm), fill: "none", "stroke-width": 0.35, ...ink } }));
+                    g.appendChild(s("path", { attrs: { d, fill: "none", "stroke-width": 0.9, ...ink } }));
+                });
+                continue;
+            }
             g.appendChild(s("path", { attrs: { d: cutPath(it, same), fill: "var(--ink)", "fill-opacity": cutWeight(it.category), "fill-rule": "evenodd", "stroke-width": 0.9, ...ink }, data: { cut: it.id } }));
         }
     }
