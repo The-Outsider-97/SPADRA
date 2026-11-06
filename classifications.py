@@ -25,10 +25,26 @@ DIR = Path(__file__).with_name("data")
 IFC_DATA = DIR / "ifc_type_products.json"
 LOCAL_OMNICLASS = DIR / "omniclass.local.json"
 SCHEMA = "spadra.omniclass.v1"
-FIELDS = frozenset({
-    "assembly_code", "omniclass_21", "omniclass_23",
-    "ifc_type", "ifc_predefined_type",
-})
+# Public names of CSI's 15 table FACETS (not the licensed classification rows).
+OMNICLASS_TABLES = {
+    11: "Construction Entities by Function",
+    12: "Construction Entities by Form",
+    13: "Spaces by Function",
+    14: "Spaces by Form",
+    21: "Elements",
+    22: "Work Results",
+    23: "Products",
+    31: "Phases",
+    32: "Services",
+    33: "Disciplines",
+    34: "Organizational Roles",
+    35: "Tools",
+    36: "Information",
+    41: "Materials",
+    49: "Properties",
+}
+FIELDS = frozenset({"assembly_code", "ifc_type", "ifc_predefined_type"} |
+                   {"omniclass_" + str(t) for t in OMNICLASS_TABLES})
 IFC_SUGGEST = {
     "wall": ("IfcWallType", "IfcCurtainWallType"),
     "door": ("IfcDoorType",),
@@ -100,10 +116,11 @@ def _parse_catalog(path: str, mtime_ns: int, size: int) -> dict[str, Any]:
     if not isinstance(raw.get("edition"), str) or not raw["edition"].strip():
         raise BadRequest("OmniClass catalog must state its edition")
     tables = raw.get("tables")
-    if not isinstance(tables, dict) or set(tables) != {"21", "23"}:
-        raise BadRequest("OmniClass catalog requires tables 21 and 23")
-    codes: dict[str, dict[str, dict[str, str]]] = {"21": {}, "23": {}}
-    for table in ("21", "23"):
+    if not isinstance(tables, dict) or not {"21", "23"}.issubset(tables) or any(
+            not str(k).isdigit() or int(k) not in OMNICLASS_TABLES for k in tables):
+        raise BadRequest("OmniClass catalog must contain tables 21 and 23; optional tables: 11-14, 22, 31-36, 41, 49")
+    codes: dict[str, dict[str, dict[str, str]]] = {str(t): {} for t in OMNICLASS_TABLES}
+    for table in tables:
         if not isinstance(tables[table], list):
             raise BadRequest("OmniClass table " + table + " must be a list")
         for entry in tables[table]:
@@ -373,7 +390,7 @@ def _csi_rows(standard: str, *, table: int | None = None, number: str = "",
     if not key:
         raise DependencyMissing("CSI Crosswalk is not configured",
                                 hint="Set SPADRA_CSI_CROSSWALK_KEY or load an authorized local catalog")
-    if standard not in ("omniclass", "uniformat") or (table is not None and table not in (21, 23)):
+    if standard not in ("omniclass", "uniformat") or (table is not None and table not in OMNICLASS_TABLES):
         raise BadRequest("Invalid CSI standard or OmniClass table")
     args = ["id: " + json.dumps(standard)]
     if table is not None:
@@ -510,8 +527,8 @@ def search(kind: str, q: str = "", *, table: int = 21, limit: int = 30) -> list[
         return ifc_search(q, limit)
     if kind not in ("omniclass", "assembly"):
         raise BadRequest("Classification kind must be ifc, omniclass, or assembly")
-    if table not in (21, 23):
-        raise BadRequest("OmniClass table must be 21 or 23")
+    if table not in OMNICLASS_TABLES:
+        raise BadRequest("Unknown OmniClass table (see /api/classifications for supported facets)")
     cs = catalog()
     if cs is None:
         return _csi_search(kind, q, table, limit) if _csi_key() else []
@@ -584,8 +601,8 @@ def set_field(project: Any, oid: str, field: str, value: Any) -> None:
                                 "omniclass_21_origin": "auto", "omniclass_21_source": hits[0]["source"]})
         _put(project, oid, changes)
         return
-    if field in ("omniclass_21", "omniclass_23"):
-        table = int(field[-2:])
+    if field.startswith("omniclass_"):
+        table = int(field.removeprefix("omniclass_"))
         code = _manual_omni(value, table)
         changes = {field: code}
         if table == 21:
