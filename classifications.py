@@ -59,7 +59,7 @@ IFC_SUGGEST = {
     "room": ("IfcSpaceType",),
     "generic": ("IfcBuildingElementProxyType",),
 }
-MAX_CATALOG_BYTES = 8_000_000
+MAX_CATALOG_BYTES = 64_000_000
 # CSI publishes the API host, path, and GraphQL query examples. Never accept a
 # user-provided upstream URL (no SSRF) or expose credentials to the browser.
 CSI_API_URL = "https://crosswalk.azure-api.net/v3/query"
@@ -187,8 +187,8 @@ def _spreadsheet_rows(path: Path) -> list[dict[str, str]]:
     import csv
     if not path.is_file():
         raise ValueError("Classification source file does not exist: " + str(path))
-    if path.stat().st_size > 20_000_000:
-        raise ValueError("Source file exceeds 20 MB safety limit")
+    if path.stat().st_size > 32_000_000:
+        raise ValueError("Source file exceeds 32 MB safety limit")
     suffix = path.suffix.lower()
     if suffix == ".xlsx":
         try:
@@ -421,7 +421,7 @@ def _csi_rows(standard: str, *, table: int | None = None, number: str = "",
     cls_args = "(" + ", ".join(filters) + ")" if filters else ""
     details = ("crosswalks { number title standards { name version } }"
                if crosswalks else "")
-    query = ("{ standards(" + ", ".join(args) + ") { name number version "
+    query = ("{ standards(" + ", ".join(args) + ") { name version "
              "classifications" + cls_args + " { number title " + details + " } } }")
     request = urlrequest.Request(
         CSI_API_URL, data=json.dumps({"query": query}).encode("utf-8"),
@@ -446,7 +446,8 @@ def _csi_rows(standard: str, *, table: int | None = None, number: str = "",
                                 hint="Check connection and CSI Crosswalk service") from None
     if not isinstance(result, dict) or result.get("errors"):
         raise DependencyMissing("CSI Crosswalk returned an unsuccessful GraphQL result")
-    standards = result.get("data", {}).get("standards")
+    payload = result.get("data")
+    standards = payload.get("standards") if isinstance(payload, dict) else None
     if not isinstance(standards, list):
         raise DependencyMissing("Unexpected CSI Crosswalk response structure")
     rows = []
