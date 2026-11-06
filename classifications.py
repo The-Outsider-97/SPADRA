@@ -161,6 +161,196 @@ def catalog() -> dict[str, Any] | None:
     stat = path.stat()
     return _parse_catalog(str(path.resolve()), stat.st_mtime_ns, stat.st_size)
 
+def _spreadsheet_rows(path: Path) -> list[dict[str, str]]:
+    """Read user-provided, authorized CSI/UniFormat CSV, TSV, or XLSX exports.
+
+    This importer is intentionally an offline step, not a bundle of third-party
+    classification data. openpyxl is already used by data/build_nl_sfb.py.
+    """
+    import csv
+    if not path.is_file():
+        raise ValueError("Classification source file does not exist: " + str(path))
+    if path.stat().st_size > 20_000_000:
+        raise ValueError("Source file exceeds 20 MB safety limit")
+    suffix = path.suffix.lower()
+    if suffix == ".xlsx":
+        try:
+            import openpyxl
+        except ImportError as exc:
+            raise RuntimeError("Install openpyxl to import XLSX (pip install openpyxl)") from exc
+        book = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        try:
+            sheet = book.active
+            rows = sheet.iter_rows(values_only=True)
+            headings = next(rows, None)
+            if not headings:
+                return []
+            names = [str(x or "").strip() for x in headings]
+            return [
+                {h: str(v).strip() if v is not None else "" for h, v in zip(names, row)}
+                for row in rows if any(v is not None and str(v).strip() for v in row)
+            ]
+        finally:
+            book.close()
+    if suffix not in (".csv", ".tsv", ".txt"):
+        raise ValueError("Classification source must be .csv, .tsv, .txt or .xlsx")
+    with path.open(encoding="utf-8-sig", newline="") as file:
+        sample = file.read(4096)
+        file.seek(0)
+        dialect = csv.excel_tab if suffix in (".tsv", ".txt") else csv.excel
+        if suffix == ".csv":
+            try:
+                dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
+            except csv.Error:
+                pass
+        return [{str(k or "").strip(): str(v or "").strip() for k, v in row.items()}
+                for row in csv.DictReader(file, dialect=dialect)]
+
+
+def _header(row: dict[str, str], *names: str) -> str:
+    """Find one column, ignoring punctuation/whitespace and preserving values."""
+    import re
+    cleaned = {re.sub(r"[^a-z0-9]", "", str(key).lower()): value for key, value in row.items()}
+    for name in names:
+        result = cleaned.get(re.sub(r"[^a-z0-9]", "", name.lower()))
+        if result:
+            return str(result).strip()
+    return ""
+
+
+def _table_entries(path: Path, table: int) -> list[dict[str, str]]:
+    rows = _spreadsheet_rows(path)
+    output: list[dict[str, str]] = []
+    seen = set()
+    for index, row in enumerate(rows, start=2):
+        number = _header(row, "OmniClass Number", "OmniClass Code", "Classification Number",
+                         "Number", "Code")
+        if not number:
+            continue
+        if not re.match(r"^" + str(table) + r"[-\s]", number):
+            raise ValueError(f"{path.name}:{index}: expected OmniClass Table {table}, got {number}")
+        title = _header(row, "Title", "Description", "Classification Title")
+        if not title:
+            # Official CSI spreadsheets may split the hierarchy across several
+            # "Level N Title" columns: use the deepest populated level.
+            levels = []
+            for column, value in row.items():
+                match = re.search(r"level\s*(\d+)\s*title", str(column), re.I)
+                if match and value and str(value).strip():
+                    levels.append((int(match.group(1)), str(value).strip()))
+            if levels:
+                title = max(levels)[1]
+        if not title:
+            raise ValueError(f"{path.name}:{index}: missing title for {number}")
+        code = _code(number, "OmniClass code")
+        if code.casefold() in seen:
+            raise ValueError(f"{path.name}:{index}: duplicate code {code}")
+        seen.add(code.casefold())
+        output.append({"code": code, "title": _code(title, "OmniClass title")})
+    if not output:
+        raise ValueError(f"No Table {table} classification rows found in {path.name}")
+    return output
+
+
+def _assembly_entries(path: Path) -> list[dict[str, str]]:
+    items = []
+    for row in _spreadsheet_rows(path):
+        code = _header(row, "Assembly Code", "UniFormat Code", "Number", "Code")
+        if not code:
+            continue
+        title = _header(row, "Assembly Description", "Description", "Title", "Name")
+        if not title:
+            raise ValueError("Missing UniFormat description for assembly " + code)
+        items.append({"code": _code(code, "Assembly code"),
+                      "title": _code(title, "Assembly title")})
+    return items
+
+
+def _mapping_entries(path: Path) -> list[dict[str, Any]]:
+    entries = []
+    for row in _spreadsheet_rows(path):
+        assembly = _header(row, "assembly_code", "UniFormat Code", "Assembly Code")
+        omni = _header(row, "omniclass_code", "OmniClass Number", "OmniClass Code")
+        if not assembly and not omni:
+            continue
+        confirmed = _header(row, "verified").casefold()
+        if confirmed not in ("true", "yes", "1"):
+            raise ValueError("Every mapping must explicitly specify verified=true")
+        table = _header(row, "table") or "21"
+        if table != "21":
+            raise ValueError("Assembly mappings can only target OmniClass Table 21")
+        source = _header(row, "source", "evidence", "Crosswalk Source")
+        entries.append({"assembly_code": _code(assembly, "Assembly code"),
+                        "omniclass_code": _code(omni, "OmniClass code"),
+                        "source": _code(source, "Crosswalk source"),
+                        "table": 21, "verified": True})
+    return entries
+
+
+def import_authorized_catalog(*, table21: Path, table23: Path, edition: str,
+                              output: Path | None = None,
+                              assembly: Path | None = None,
+                              mapping: Path | None = None) -> dict[str, int]:
+    """Build a private data file from user-provided authorized datasets.
+
+    The generator itself is redistributable; the resulting catalog generally
+    is not. Destination is gitignored by default, never sent to GitHub.
+    """
+    import tempfile
+    destination = output or LOCAL_OMNICLASS
+    data = {
+        "schema": SCHEMA, "edition": _code(edition, "OmniClass edition"),
+        "tables": {"21": _table_entries(table21, 21), "23": _table_entries(table23, 23)},
+        "assemblies": _assembly_entries(assembly) if assembly else [],
+        "assembly_mappings": _mapping_entries(mapping) if mapping else [],
+    }
+    serialized = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    if len(serialized.encode("utf-8")) > MAX_CATALOG_BYTES:
+        raise ValueError("Generated catalog exceeds local safety limit")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    # Check schema, source/target integrity and exact unique verified crosswalks
+    # *before* replacing any existing authorized catalog.
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=destination.parent, suffix=".json",
+            prefix=".spadra-classifications-", delete=False
+        ) as fh:
+            fh.write(serialized)
+            temp_path = Path(fh.name)
+        stat = temp_path.stat()
+        _parse_catalog(str(temp_path.resolve()), stat.st_mtime_ns, stat.st_size)
+        os.replace(temp_path, destination)
+        _parse_catalog.cache_clear()
+    finally:
+        if temp_path and temp_path.exists():
+            temp_path.unlink()
+    return {"table21": len(data["tables"]["21"]), "table23": len(data["tables"]["23"]),
+            "assembly_codes": len(data["assemblies"]),
+            "verified_mappings": len(data["assembly_mappings"])}
+
+
+def _cli() -> None:
+    """Offline conversion of existing authorized files; reuses classifications.py."""
+    import argparse
+    parser = argparse.ArgumentParser(description="Import your licensed OmniClass tables to a PRIVATE local catalog")
+    parser.add_argument("--table21", type=Path, required=True, help="Official/licensed Table 21 CSV/TSV/XLSX")
+    parser.add_argument("--table23", type=Path, required=True, help="Official/licensed Table 23 CSV/TSV/XLSX")
+    parser.add_argument("--edition", required=True, help="Exact licensed edition identifier")
+    parser.add_argument("--assembly", type=Path, help="Optional authorized UniFormat code/title export")
+    parser.add_argument("--mapping", type=Path, help="Optional VERIFIED UniFormat-to-OmniClass T21 CSV")
+    parser.add_argument("--output", type=Path, default=LOCAL_OMNICLASS)
+    parser.add_argument("--authorized", action="store_true",
+                        help="Confirm you have permission for this private software use")
+    args = parser.parse_args()
+    if not args.authorized:
+        parser.error("Import requires --authorized; confirm CSI rights for this use")
+    counts = import_authorized_catalog(
+        table21=args.table21, table23=args.table23, edition=args.edition,
+        assembly=args.assembly, mapping=args.mapping, output=args.output)
+    print("Private OmniClass catalog updated:", args.output, counts)
+
+
 def _csi_key() -> str:
     """A server-only CSI Crosswalk API key; never serialize it in API responses."""
     return os.environ.get("SPADRA_CSI_CROSSWALK_KEY", "").strip()
@@ -464,3 +654,6 @@ def groups_for(meta: Mapping[str, Any], category: str) -> list[dict[str, Any]]:
                     [{"value": v, "label": v} for v in predefined]},
     ]}
     return [omniclass, ifc]
+
+if __name__ == "__main__":
+    _cli()
