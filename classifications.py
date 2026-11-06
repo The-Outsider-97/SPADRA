@@ -82,9 +82,9 @@ def _catalog_path() -> Path:
     override = os.environ.get("SPADRA_OMNICLASS_CATALOG", "").strip()
     return Path(override).expanduser() if override else LOCAL_OMNICLASS
 
-def _code(value: Any, label: str) -> str:
-    if not isinstance(value, str) or not 0 < len(value.strip()) <= 100:
-        raise BadRequest(label + " must be non-empty text of at most 100 characters")
+def _code(value: Any, label: str, max_chars: int = 100) -> str:
+    if not isinstance(value, str) or not 0 < len(value.strip()) <= max_chars:
+        raise BadRequest(label + f" must be non-empty text of at most {max_chars} characters")
     return value.strip()
 
 @lru_cache(maxsize=8)
@@ -110,7 +110,7 @@ def _parse_catalog(path: str, mtime_ns: int, size: int) -> dict[str, Any]:
             if not isinstance(entry, dict):
                 raise BadRequest("OmniClass entries must be objects")
             code = _code(entry.get("code"), "OmniClass code")
-            title = _code(entry.get("title"), "OmniClass title")
+            title = _code(entry.get("title"), "OmniClass title", 300)
             k = code.casefold()
             if k in codes[table]:
                 raise BadRequest("Duplicate OmniClass table " + table + " code: " + code)
@@ -124,7 +124,7 @@ def _parse_catalog(path: str, mtime_ns: int, size: int) -> dict[str, Any]:
             raise BadRequest("Assembly mappings must be objects")
         assembly = _code(entry.get("assembly_code"), "Assembly code")
         omni = _code(entry.get("omniclass_code"), "Mapped OmniClass code")
-        source = _code(entry.get("source"), "Crosswalk evidence")
+        source = _code(entry.get("source"), "Crosswalk evidence", 300)
         if entry.get("table") != 21:
             raise BadRequest("Assembly mapping must target OmniClass Table 21, not Table 23")
         if entry.get("verified") is not True:
@@ -144,7 +144,7 @@ def _parse_catalog(path: str, mtime_ns: int, size: int) -> dict[str, Any]:
         if not isinstance(item, dict):
             raise BadRequest("UniFormat assembly entries must be objects")
         code = _code(item.get("code"), "UniFormat code")
-        title = _code(item.get("title"), "UniFormat title")
+        title = _code(item.get("title"), "UniFormat title", 300)
         if code.casefold() in assembly_codes:
             raise BadRequest("Duplicate UniFormat assembly code: " + code)
         assembly_codes[code.casefold()] = {"code": code, "title": title}
@@ -182,10 +182,15 @@ def _spreadsheet_rows(path: Path) -> list[dict[str, str]]:
         try:
             sheet = book.active
             rows = sheet.iter_rows(values_only=True)
-            headings = next(rows, None)
-            if not headings:
-                return []
-            names = [str(x or "").strip() for x in headings]
+            names = []
+            for headings in rows:
+                names = [str(x or "").strip() for x in headings]
+                norm = {re.sub(r"[^a-z0-9]", "", n.lower()) for n in names}
+                if norm & {"omniclassnumber", "omniclasscode", "classificationnumber",
+                           "number", "code", "assemblycode", "uniformatcode"}:
+                    break
+            else:
+                raise ValueError("No classification code heading found in " + str(path))
             return [
                 {h: str(v).strip() if v is not None else "" for h, v in zip(names, row)}
                 for row in rows if any(v is not None and str(v).strip() for v in row)
@@ -246,7 +251,7 @@ def _table_entries(path: Path, table: int) -> list[dict[str, str]]:
         if code.casefold() in seen:
             raise ValueError(f"{path.name}:{index}: duplicate code {code}")
         seen.add(code.casefold())
-        output.append({"code": code, "title": _code(title, "OmniClass title")})
+        output.append({"code": code, "title": _code(title, "OmniClass title", 300)})
     if not output:
         raise ValueError(f"No Table {table} classification rows found in {path.name}")
     return output
@@ -262,7 +267,7 @@ def _assembly_entries(path: Path) -> list[dict[str, str]]:
         if not title:
             raise ValueError("Missing UniFormat description for assembly " + code)
         items.append({"code": _code(code, "Assembly code"),
-                      "title": _code(title, "Assembly title")})
+                      "title": _code(title, "Assembly title", 300)})
     return items
 
 
@@ -282,7 +287,7 @@ def _mapping_entries(path: Path) -> list[dict[str, Any]]:
         source = _header(row, "source", "evidence", "Crosswalk Source")
         entries.append({"assembly_code": _code(assembly, "Assembly code"),
                         "omniclass_code": _code(omni, "OmniClass code"),
-                        "source": _code(source, "Crosswalk source"),
+                        "source": _code(source, "Crosswalk source", 300),
                         "table": 21, "verified": True})
     return entries
 
