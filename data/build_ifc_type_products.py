@@ -47,7 +47,8 @@ def build(schema: str) -> dict:
     return {"schema": "IFC4X3_ADD2", "version": "4.3.2.0",
             "source": "buildingSMART IFC 4.3 ADD2 EXPRESS schema",
             "source_url": "https://standards.buildingsmart.org/IFC/RELEASE/IFC4_3/",
-            "notes": "Concrete descendants of IfcTypeProduct; EXPRESS enum literals, not invented mappings.",
+            "derived_from": "https://github.com/Autodesk/revit-ifc/blob/master/Source/RevitIFCTools/IFC4X3_ADD2.exp",
+            "notes": "All concrete descendants of IfcTypeProduct in IFC4X3_ADD2; predefined_types are EXPRESS enum literals, not invented mappings.",
             "types": rows}
 
 if __name__ == "__main__":
