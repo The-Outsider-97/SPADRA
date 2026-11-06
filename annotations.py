@@ -18,10 +18,11 @@ from ..tools.errors import BadRequest, NotFound
 from ..tools.validation import text
 from . import elements as E
 from . import sfb as SF
+from . import classifications as CL
 
 LAYER = "Tags"
 KEY_OF, KEY_FIELD, KEY_DETACHED = "spadra:tag_of", "spadra:tag_field", "spadra:detached"
-FIELDS = {"mark": "Mark (schedule number)", "name": "Name", "type": "Type", "size": "Size", "room": "Room name and number", "sfb": "NL-SfB code"}
+FIELDS = {"mark": "Mark (schedule number)", "name": "Name", "type": "Type", "size": "Size", "room": "Room name and number", "sfb": "NL-SfB code", "assembly_code": "Assembly Code", "omniclass_21": "OmniClass Elements", "omniclass_23": "OmniClass Products", "ifc_type": "IFC Type Product"}
 DEFAULT_TEXT_MM = 250.0                      # text height in model millimetres: 2.5 mm on paper at 1:100
 
 
@@ -34,7 +35,7 @@ def fields_for(category: str) -> list[str]:
         out.append("size")
     if category == "room":
         out.append("room")
-    return out + ["sfb"]
+    return out + ["sfb", "assembly_code", "omniclass_21", "omniclass_23", "ifc_type"]
 
 
 def default_field(category: str) -> str:
@@ -69,6 +70,8 @@ def tag_text(project: Any, oid: str, field: str, cache: dict[str, dict[str, str]
         return f"{float(E.m(meta, 'width')) * 1000:.0f} × {float(E.m(meta, 'height')) * 1000:.0f}"
     if field == "sfb":
         return SF.read(meta, "sfb") or "-"
+    if field in ("assembly_code", "omniclass_21", "omniclass_23", "ifc_type"):
+        return CL.read(meta, field) or "-"
     from . import rooms as R
     return f"{obj['name']}\n{R.data(project, oid)['number']}".strip()                    # field == "room"
 
