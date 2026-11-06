@@ -47,7 +47,7 @@ class Types(Case):
     def test_each_type_is_a_closed_channel_with_the_volume_of_its_section(self):
         roof = self.roof("gable")
         for kind in GU.GUTTER_TYPES:
-            r = self.gutters(roof, edges=[0], gutter=kind, downpipe=False)
+            r = self.gutters(roof, edges=[0], gutter=kind, downpipe=False, end_start="open", end_end="open")          # open ends: the plain swept section
             g = r["gutters"][0]
             sec = GU.section(kind, float(self.meta(g)[f"{NS}:width"]), float(self.meta(g)[f"{NS}:depth"]), float(self.meta(g)[f"{NS}:thickness"]))
             self.assertAlmostEqual(self.vol(g), abs(G.signed_area(sec)) * 10.0, places=9)             # section area x the 10 m eave
@@ -56,7 +56,7 @@ class Types(Case):
 
     def test_defaults_are_nominal_sizes_and_everything_can_be_edited_afterwards(self):
         roof = self.roof("gable")
-        g = self.gutters(roof, edges=[0], downpipe=False)["gutters"][0]
+        g = self.gutters(roof, edges=[0], downpipe=False, end_start="open", end_end="open")["gutters"][0]
         self.assertEqual((self.meta(g)[f"{NS}:gutter"], self.meta(g)[f"{NS}:width"], self.meta(g)[f"{NS}:depth"]), ("half_round", 0.125, 0.0625))
         before = self.vol(g)
         for key, value in (("gutter", "box"), ("width", 150), ("depth", 120), ("thickness", 1.5), ("material", "Aluminium"), ("fall", 5), ("fall_to", "start")):
@@ -253,8 +253,8 @@ class Drainage(Case):
         g = self.gutters(roof, edges=[0], downpipe=False)["gutters"][0]
         d = self.p.drainage(roof)["roofs"][0]
         self.assertEqual((d["drained_m2"], d["undrained_m2"]), (30.0, 30.0))
-        self.run_("model.add_downpipe", gutter=g, offset=0.5)
-        self.run_("model.add_downpipe", gutter=g, offset=9.5)
+        self.run_("model.add_downpipe", gutter=g, offset=9.8)
+        self.run_("model.add_downpipe", gutter=g, offset=9.9)
         d = self.p.drainage(roof)["roofs"][0]
         self.assertEqual([p["flow_l_s"] for p in d["gutters"][0]["downpipes"]], [0.45, 0.45])
         self.run_("model.set_property", id=g, key="rainfall", value=0.06)

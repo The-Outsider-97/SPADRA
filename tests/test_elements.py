@@ -361,7 +361,7 @@ class PlanAndTree(ElementCase):
         self.run_("model.add_roof", points=Roofs.RECT, level=self.roof_level, roof="gable")
         self.run_("model.add_beam", start=[0, 0], end=[1000, 0], level=self.l1)
         cats = {c["label"]: len(c["children"]) for c in next(s for s in self.p.tree()["sections"] if s["id"] == "categories")["children"]}
-        self.assertEqual(cats, {"Walls": 1, "Doors": 1, "Windows": 1, "Floors": 1, "Roofs": 1, "Gutters": 0, "Downpipes": 0, "Stairs": 0, "Structural": 1, "Rooms": 0, "Grids": 0, "Generic Models": 0})
+        self.assertEqual(cats, {"Walls": 1, "Doors": 1, "Windows": 1, "Floors": 1, "Roofs": 1, "Gutters": 0, "Downpipes": 0, "Stairs": 0, "Structural": 1, "Rooms": 0, "Grids": 0, "Generic Models": 0, "Extrusions": 0, "Voids": 0, "Sweeps": 0, "Foundations": 0, "Arrays": 0})
 
     def test_scene_draws_every_element(self):
         w = self.wall()

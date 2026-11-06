@@ -224,7 +224,8 @@ export class Store {
     const sel = this.selection;
     if (!sel || sel.kind === "sheet") return;
     if (sel.kind === "model" && this.animation?.animation) return;       // an element the animation hides is not in the picture but is still there; loadProperties drops a really deleted one
-    const live = sel.kind === "drawing" ? this.drawing?.entities.map((e) => e.id) : this.scene?.objects.map((o) => o.id);
+    const listed = (): string[] => flatten(this.tree).map((n) => n.select?.model).filter((id): id is string => !!id);      // elements with no solid (grids, arrays) are not in the 3D scene, but the browser lists them
+    const live = sel.kind === "drawing" ? this.drawing?.entities.map((e) => e.id) : this.scene ? [...this.scene.objects.map((o) => o.id), ...listed()] : undefined;
     if (!live) return;                                   // that view is not the one on screen, so there is nothing to compare with
     const ids = sel.ids.filter((id) => live.includes(id));
     this.selection = ids.length ? { ...sel, ids } as Selection : null;

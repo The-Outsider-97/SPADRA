@@ -68,21 +68,27 @@ export interface PlanSymbol {
 /** A room's plan label: its name and number, its area from the outline (m²) and where the label sits (drawing units). */
 export interface RoomLabel { name: string; number: string; area_m2: number; at: Pt }
 /** A grid line's bubble: its label, where the bubble sits (the line's start) and its radius, in drawing units. */
-export interface GridLabel { name: string; at: Pt; radius: number }
+/** A grid's label: where its bubble(s) are drawn (`bubbles` names the ends that carry one; an older answer without it means the start). */
+export interface GridLabel { name: string; at: Pt; radius: number; bubbles?: Array<"start" | "end"> }
 /** A stair's drawn parts: a line across every tread, and the arrow along its run (labelled UP). */
 export interface StairArrow { from: Pt; to: Pt; label: string }
 export interface PlanWall {
   id: string; category: string; name: string; polygon: Pt[]; symbol?: PlanSymbol; cut?: boolean; label?: RoomLabel | GridLabel;
   lines?: Array<[Pt, Pt]>; arrow?: StairArrow;
   /** Rings cut out of the polygon (a floor or extrusion with voids through it, or the inside of a closed sweep) and a sweep's centre line. */
-  holes?: Pt[][]; path?: Pt[]; closed?: boolean;
+  holes?: Pt[][]; path?: Pt[]; closed?: boolean; /** a void whose cutting is off is drawn dotted and unhatched */ off?: boolean;
   /** A wall's centre line and thickness, in the drawing's unit: what its end grips hold and what the next wall snaps to. */
   axis?: { a: Pt; b: Pt; thickness: number };
+  /** A foundation's kind (poer, strook, plaat...). */
+  kind?: string;
 }
 /** One element as a section or elevation shows it: surfaces facing the viewer (flat triangles), their drawn lines, and the cut. Units are the drawing's. */
-export interface ProjItem { id: string; category: string; name: string; depth: number; tris: number[][]; edges: number[][]; cut: Pt[][] }
+/** `cut_material` (a foundation only): the material of each loop of `cut`, so a build-up is hatched layer by layer. */
+export interface ProjItem { id: string; category: string; name: string; depth: number; tris: number[][]; edges: number[][]; cut: Pt[][]; cut_material?: string[] }
 export interface Projection {
   kind: "section" | "elevation"; items: ProjItem[]; levels: Array<{ name: string; z: number }>; bounds: [Pt, Pt] | null; span?: number; far?: number;
+  /** The grids this picture meets: a vertical line at `x` (along the picture), with its bubble above. */
+  grid_marks?: Array<{ id: string; name: string; x: number }>;
 }
 /** A section's cut line on a plan: its end points, which way it looks (a unit vector) and how far. */
 export interface SectionMark { id: string; name: string; a: Pt; b: Pt; look: Pt; looking: string; depth: number }

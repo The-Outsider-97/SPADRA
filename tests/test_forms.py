@@ -7,6 +7,7 @@ import unittest
 
 from .. import elements as E
 from .. import forms as FX
+from .. import geometry as G
 from ..project import Project
 from ...tools.errors import BadRequest
 from .test_wall_joins import Joints
@@ -98,20 +99,92 @@ class Voids(Base):
         self.p.undo()
         self.assertAlmostEqual(self.vol(f), 5.8, places=9)
 
+    def solid(self, oid):
+        st = E.solid_status(self.p, oid)
+        self.assertEqual(st.state, "solid", st.message)                              # a cut that left an open or invalid shell would show here, not as a volume
+        return st
+
     def test_moving_the_floor_under_a_void_follows(self):
         f = self.floor()
         self.void()
-        self.p.execute("model.move", {"id": f, "dx": 0.0, "dy": 0.0, "dz": 0.0})
-        self.p.execute("model.move", {"id": f, "dx": 1.5, "dy": 0.0, "dz": 0.0})              # the void now crosses the floor's edge: no longer cut
-        self.assertAlmostEqual(self.vol(f), 6.0, places=9)
-        self.assertTrue(any("crosses the edge" in m for m in self.issues()))
+        self.p.execute("model.move", {"id": f, "dx": 1.5, "dy": 0.0, "dz": 0.0})              # the void now crosses the floor's edge: it takes a notch out of it
+        self.assertAlmostEqual(self.vol(f), 6.0 - 0.1, places=9)                              # the 0.5 m x 1 m of the void that is still over the floor, 200 mm thick
+        self.solid(f)
+        self.assertFalse(any("crosses the edge" in m for m in self.issues()))
+        self.p.execute("model.move", {"id": f, "dx": -1.5, "dy": 0.0, "dz": 0.0})             # and back: a hole again
+        self.assertAlmostEqual(self.vol(f), 5.8, places=9)
+        self.assertEqual(E.meta_of(self.p, f)["spadra:cut_outline"], [])
 
-    def test_a_void_across_the_edge_cuts_nothing_and_says_why(self):
+    def test_a_void_across_the_edge_takes_a_notch_out_of_it(self):
         f = self.floor()
         v = self.void([[-500, 1000], [500, 1000], [500, 2000], [-500, 2000]])
+        self.assertAlmostEqual(self.vol(f), 6.0 - 0.1, places=9)
+        self.solid(f)
+        self.assertEqual(FX.report(self.p, v)["cuts"], ["Floor"])
+        item = next(i for i in E.plan_items(self.p, self.level, 1000.0) if i["id"] == f)
+        self.assertNotIn("holes", item)
+        self.assertEqual(len(item["polygon"]), 8)                                       # the rectangle with the notch in its left edge
+        self.assertAlmostEqual(abs(G.signed_area([tuple(q) for q in item["polygon"]])), 29.5e6, places=3)
+        self.p.execute("model.delete", {"id": v})
+        self.assertAlmostEqual(self.vol(f), 6.0, places=9)                                  # the floor is whole again
+        self.p.undo()
+        self.assertAlmostEqual(self.vol(f), 5.9, places=9)
+
+    def test_a_void_lying_along_the_edge_is_a_clean_notch_with_no_sliver(self):
+        f = self.floor()
+        self.void([[0, 1000], [1000, 1000], [1000, 2000], [0, 2000]])                      # its left side is the floor's left edge
+        self.assertAlmostEqual(self.vol(f), 5.8, places=9)
+        item = next(i for i in E.plan_items(self.p, self.level, 1000.0) if i["id"] == f)
+        self.assertEqual(len(item["polygon"]), 8)
+        self.solid(f)
+
+    def test_a_void_is_cut_from_a_solid_extrusion_at_its_edge_too(self):
+        e = self.run_("model.add_extrusion", points=[[0, 0], [3000, 0], [3000, 2000], [0, 2000]], depth=1.0)["id"]
+        self.assertAlmostEqual(self.vol(e), 6.0, places=9)
+        v = self.void([[-500, 500], [1000, 500], [1000, 1500], [-500, 1500]], base=-0.5, depth=3.0)
+        self.assertAlmostEqual(self.vol(e), 6.0 - 1.0, places=9)                             # 1 m wide x 1 m high x 1 m deep
+        self.solid(e)
+        self.assertEqual(len(E.meta_of(self.p, e)["spadra:cut_outline"]), 8)
+        self.assertEqual(FX.report(self.p, v)["cuts"], ["Extrusion"])
+
+    def test_a_void_that_would_split_the_floor_in_two_cuts_nothing_and_says_why(self):
+        f = self.floor()
+        v = self.void([[2000, -100], [3000, -100], [3000, 5100], [2000, 5100]])
         self.assertAlmostEqual(self.vol(f), 6.0, places=9)
         self.assertEqual(FX.report(self.p, v)["cuts"], [])
-        self.assertTrue(any("crosses the edge" in n for n in FX.report(self.p, v)["notes"]))
+        self.assertTrue(any("separate pieces" in n for n in FX.report(self.p, v)["notes"]))
+        self.assertTrue(any("separate pieces" in m for m in self.issues()))
+
+    def test_a_second_void_that_would_split_it_is_left_out_and_the_first_still_cuts(self):
+        f = self.floor()
+        first = self.void()
+        self.void([[3000, -100], [4000, -100], [4000, 5100], [3000, 5100]])
+        self.assertAlmostEqual(self.vol(f), 5.8, places=9)
+        self.assertEqual(FX.report(self.p, first)["cuts"], ["Floor"])
+        self.solid(f)
+
+    def test_voids_that_together_remove_the_whole_floor_leave_the_second_out_and_say_so(self):
+        f = self.floor(w=2000, d=2000)
+        a = self.void([[-100, -100], [1100, -100], [1100, 2100], [-100, 2100]])
+        b = self.void([[900, -100], [2100, -100], [2100, 2100], [900, 2100]])
+        self.assertAlmostEqual(self.vol(f), 0.9 * 2.0 * 0.2, places=9)                    # only the first is cut: it leaves a strip 0.9 m wide
+        self.assertEqual(FX.report(self.p, a)["cuts"], ["Floor"])
+        self.assertEqual(FX.report(self.p, b)["cuts"], [])
+        self.assertTrue(any("leaves nothing of Floor" in n for n in FX.report(self.p, b)["notes"]))
+        self.solid(f)
+
+    def test_a_void_covering_the_whole_floor_is_not_cut_away(self):
+        f = self.floor(w=2000, d=2000)
+        v = self.void([[-100, -100], [2100, -100], [2100, 2100], [-100, 2100]])
+        self.assertAlmostEqual(self.vol(f), 4.0 * 0.2, places=9)
+        self.assertTrue(any("covers all" in n for n in FX.report(self.p, v)["notes"]))
+
+    def test_two_holes_that_touch_at_a_corner_are_not_both_cut_and_the_second_says_why(self):
+        f = self.floor()
+        self.void()
+        v = self.void([[2000, 2000], [3000, 2000], [3000, 3000], [2000, 3000]])             # meets the first at the point (2, 2)
+        self.assertAlmostEqual(self.vol(f), 5.8, places=9)
+        self.assertTrue(any("single point" in n for n in FX.report(self.p, v)["notes"]))
 
     def test_a_void_that_stops_inside_the_slab_cuts_nothing(self):
         f = self.floor()
@@ -119,13 +192,25 @@ class Voids(Base):
         self.assertAlmostEqual(self.vol(f), 6.0, places=9)
         self.assertTrue(any("full thickness" in n for n in FX.report(self.p, v)["notes"]))
 
-    def test_overlapping_voids_in_one_floor_are_refused(self):
-        self.floor()
-        self.void()
-        before = self.p.revision
-        with self.assertRaises(BadRequest):
-            self.void([[1500, 1500], [2500, 1500], [2500, 2500], [1500, 2500]])
-        self.assertEqual(self.p.revision, before)
+    def test_overlapping_voids_in_one_floor_act_as_their_union(self):
+        f = self.floor()
+        a = self.void()
+        b = self.void([[1500, 1500], [2500, 1500], [2500, 2500], [1500, 2500]])
+        self.assertAlmostEqual(self.vol(f), 6.0 - 1.75 * 0.2, places=9)                    # 1 + 1 - 0.25 m² gone, 200 mm thick
+        self.solid(f)
+        self.assertEqual(len(E.meta_of(self.p, f)["spadra:cut"]), 1)                       # one hole, the union's outline
+        self.assertEqual(FX.report(self.p, a)["cuts"], ["Floor"])
+        self.assertEqual(FX.report(self.p, b)["cuts"], ["Floor"])
+        self.p.execute("model.delete", {"id": b})
+        self.assertAlmostEqual(self.vol(f), 5.8, places=9)
+
+    def test_overlapping_voids_that_reach_the_edge_notch_it_once(self):
+        f = self.floor()
+        self.void([[-500, 1000], [1500, 1000], [1500, 2000], [-500, 2000]])
+        self.void([[1000, 1500], [2000, 1500], [2000, 3000], [1000, 3000]])
+        # first: 1.5 x 1 = 1.5 m² over the floor; second: 1 x 1.5 = 1.5 m²; they share 0.5 x 0.5 = 0.25 m²
+        self.assertAlmostEqual(self.vol(f), 6.0 - (1.5 + 1.5 - 0.25) * 0.2, places=9)
+        self.solid(f)
 
     def test_two_separate_voids_make_two_holes(self):
         f = self.floor()
@@ -167,6 +252,20 @@ class Voids(Base):
         self.assertAlmostEqual(self.vol(w), 3.6, places=9)
         self.assertTrue(any("niche" in n for n in FX.report(self.p, niche)["notes"]))
         self.assertTrue(any("not a rectangle" in n for n in FX.report(self.p, slanted)["notes"]))
+
+    def test_an_l_shaped_void_whose_arm_runs_square_through_the_wall_cuts_the_opening_the_arm_makes(self):
+        w = self.wall((0, 0), (6000, 0))
+        v = self.void([[1000, -300], [2000, -300], [2000, 300], [3000, 300], [3000, 800], [1000, 800]], base=0.0, depth=2.1)       # the foot lies clear of the wall
+        self.assertAlmostEqual(self.vol(w), 3.6 - 1.0 * 0.2 * 2.1, places=9)
+        self.assertEqual(FX.report(self.p, v)["cuts"], ["Basic Wall"])
+        self.assertEqual(E.solid_status(self.p, w).state, "solid")
+
+    def test_a_round_void_through_a_wall_is_not_cut_because_its_opening_is_not_a_rectangle(self):
+        w = self.wall((0, 0), (6000, 0))
+        octagon = [[1500 + 400 * math.cos(math.pi / 4 * i), 400 * math.sin(math.pi / 4 * i)] for i in range(8)]
+        v = self.void(octagon, base=0.0, depth=2.1)
+        self.assertAlmostEqual(self.vol(w), 3.6, places=9)
+        self.assertTrue(any("not a rectangle" in n for n in FX.report(self.p, v)["notes"]))
 
     def test_a_void_cuts_a_solid_extrusion_too(self):
         e = self.run_("model.add_extrusion", points=[[0, 0], [4000, 0], [4000, 4000], [0, 4000]], depth=1.0)["id"]

@@ -9,9 +9,9 @@ import {
   pointInPolygon, polygonDistance, polygonsBounds, rotateAbout, roundAngle, segments, snapPoint, textBox, wallBand, type Grip, type Snap,
 } from "./geom2d.js";
 import { cssColor, withAlpha } from "./palette.js";
-import { cutWeight, levelLabel, markArrows, markLabel, projectionAt, snapPolygons, visibleLevels } from "./projection.js";
+import { cutStyle, cutWeight, levelLabel, markArrows, markLabel, projectionAt, snapPolygons, visibleLevels } from "./projection.js";
 import type { Store, Tool } from "./store.js";
-import type { DrawingData, Entity, GridLabel, PlanWall, Projection, Pt, RoomLabel, SectionMark } from "./types.js";
+import type { DrawingData, Entity, GridLabel, PlanWall, ProjItem, Projection, Pt, RoomLabel, SectionMark } from "./types.js";
 
 const MM_PER = { mm: 1, cm: 10, m: 1000 } as const;
 const SNAP_PX = 10;
@@ -21,7 +21,7 @@ const DRAG_PX = 4;
 const TOOL_KINDS: Record<string, readonly string[]> = {
   offset: ["line", "polyline", "circle"], trim: ["line", "polyline"], extend: ["line", "polyline"], fillet: ["line"],
 };
-const PAINT_ORDER = ["floor", "room", "extrusion", "sweep", "generic", "stair", "wall", "structural", "window", "door", "column", "gutter", "downpipe", "void", "grid"];
+const PAINT_ORDER = ["foundation", "floor", "room", "extrusion", "sweep", "generic", "stair", "wall", "structural", "window", "door", "column", "gutter", "downpipe", "void", "grid"];
 const CURVE_TOOLS = new Set<string>(["offset", "trim", "extend", "fillet", "hatch"]);
 
 /** An edit being dragged with a handle: a wall end, a turn of the selection about its centre, or a section's cut line (an end, or all of it). */
@@ -558,7 +558,7 @@ export class DrawingView {
     const ids = this.turnable();
     if (!ids.length) return [];
     const out: Handle[] = [];
-    const wall = ids.length === 1 ? data.model.find((w) => w.id === ids[0] && w.axis) : undefined;
+    const wall = ids.length === 1 ? data.model.find((w) => w.id === ids[0] && w.axis && (w.category === "wall" || w.category === "grid")) : undefined;      // a strip foundation has an axis to snap to, but no ends to stretch
     if (wall?.axis) {
       const axis = wall.axis;
       for (const end of ["a", "b"] as const) out.push({ at: axis[end], shape: "square", edit: (): Edit => ({ kind: "end", id: wall.id, end, axis, from: axis[end], now: axis[end], moved: false }) });
@@ -586,7 +586,8 @@ export class DrawingView {
   /** Send a finished handle drag to the server. */
   private async commitEdit(ed: Edit): Promise<void> {
     if (ed.kind === "end") {
-      await this.store.run("model.set_wall_ends", { id: ed.id, [ed.end === "a" ? "start" : "end"]: ed.now });
+      const grid = this.data?.model.find((w) => w.id === ed.id)?.category === "grid";
+      await this.store.run(grid ? "model.set_grid" : "model.set_wall_ends", { id: ed.id, [ed.end === "a" ? "start" : "end"]: ed.now });
     } else if (ed.kind === "turn") {
       const degrees = (this.turnAngle(ed) * 180) / Math.PI;
       if (Math.abs(degrees) > 1e-9) await this.store.run("model.rotate", { ids: ed.ids, centre: ed.centre, angle: degrees });
@@ -612,9 +613,11 @@ export class DrawingView {
     if (!box) return;
     const unit = this.store.unit;
     const current = Math.round(dist(box.a, box.b) * 1000) / 1000;
-    const length = await numberPrompt({ title: "Wall length", label: "Length", unit, value: current, confirmLabel: "Set length" });
+    const grid = this.data?.model.find((w) => w.id === box.id)?.category === "grid";
+    const length = await numberPrompt({ title: grid ? "Grid length" : "Wall length", label: "Length", unit, value: current, confirmLabel: "Set length" });
     if (length === null || Math.abs(length - current) < 1e-9) return;
-    await this.store.run("model.set_wall_ends", { id: box.id, end: alongFrom(box.a, box.b, length) });
+    if (grid) await this.store.run("model.set_grid", { id: box.id, length });                            // from its start; the angle and the label are in Properties
+    else await this.store.run("model.set_wall_ends", { id: box.id, end: alongFrom(box.a, box.b, length) });
   }
 
   /** The wall under a plan point, ignoring doors, windows, floors and beams. */
@@ -893,7 +896,7 @@ export class DrawingView {
       ctx.beginPath(); ctx.moveTo(x + 4, y - 5.6); ctx.lineTo(x + 4.6, y - 1.2); ctx.lineTo(x + 0.6, y - 3.6); ctx.stroke();
     }
     const ends = list.filter((x) => x.shape === "square");
-    const wall = this.edit?.kind === "end" ? null : ends.length === 2 && !this.markSel ? this.data?.model.find((w) => w.axis && this.allSelectedIds()[0] === w.id) : undefined;
+    const wall = this.edit?.kind === "end" ? null : ends.length === 2 && !this.markSel ? this.data?.model.find((w) => w.axis && (w.category === "wall" || w.category === "grid") && this.allSelectedIds()[0] === w.id) : undefined;
     if (wall?.axis && !this.edit) this.paintLength(wall.axis.a, wall.axis.b, wall.axis.thickness, wall.id, k, true);
   }
 
@@ -924,7 +927,11 @@ export class DrawingView {
     ctx.setLineDash([6, 4]); ctx.lineWidth = 1.5; ctx.strokeStyle = k.select; ctx.fillStyle = withAlpha(k.select, 0.14);
     if (ed.kind === "end") {
       const a = ed.end === "a" ? ed.now : ed.axis.a, b = ed.end === "b" ? ed.now : ed.axis.b;
-      if (dist(a, b) > 1e-9) { ctx.beginPath(); this.tracePolygon(wallBand(a, b, ed.axis.thickness)); ctx.fill(); ctx.stroke(); this.paintLength(a, b, ed.axis.thickness, ed.id, k, false); }
+      if (dist(a, b) > 1e-9) {
+        ctx.beginPath();
+        if (ed.axis.thickness > 0) { this.tracePolygon(wallBand(a, b, ed.axis.thickness)); ctx.fill(); } else this.line(a, b);                       // a grid has no thickness: only its line
+        ctx.stroke(); this.paintLength(a, b, ed.axis.thickness, ed.id, k, false);
+      }
     } else if (ed.kind === "turn") {
       const angle = this.turnAngle(ed);
       for (const w of this.data?.model ?? []) if (ed.ids.includes(w.id)) { ctx.beginPath(); this.tracePolygon(w.polygon.map((p) => rotateAbout(p, ed.centre, angle))); ctx.fill(); ctx.stroke(); }
@@ -964,6 +971,7 @@ export class DrawingView {
         ctx.fillStyle = k.muted; ctx.fillText(levelLabel(l.name, l.z, mmPerUnit), x0 - 6, y - 2);
       }
     }
+    this.paintGridMarks(pr, k);
     const screen = (t: number[]): void => { for (let i = 0; i < t.length; i += 2) { const [x, y] = this.toScreen([t[i] ?? 0, t[i + 1] ?? 0]); if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); } };
     for (const item of pr.items) {
       const picked = sel.has(item.id), hot = item.id === this.hover;
@@ -977,11 +985,55 @@ export class DrawingView {
     for (const item of pr.items) {
       if (!item.cut.length) continue;
       const picked = sel.has(item.id);
+      if (item.cut_material) { this.paintLayers(item, picked, k); continue; }                              // a foundation: each layer in its own material's hatch
       ctx.beginPath();
       for (const loop of item.cut) { loop.forEach((p, i) => { const [x, y] = this.toScreen(p); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); }); ctx.closePath(); }
       ctx.fillStyle = withAlpha(picked ? k.select : k.ink, cutWeight(item.category)); ctx.fill("evenodd");
       ctx.lineWidth = picked ? 2.5 : 1.8; ctx.strokeStyle = picked ? k.select : k.ink; ctx.stroke();
     }
+  }
+
+  /** The grids a section or elevation meets: a dashed vertical line across the picture with its bubble above. */
+  private paintGridMarks(pr: Projection, k: Colors): void {
+    if (!pr.bounds || !pr.grid_marks?.length) return;
+    const ctx = this.ctx;
+    const pad = Math.max((pr.bounds[1][1] - pr.bounds[0][1]) * 0.08, 30 / this.scale);
+    const r = 11;
+    ctx.font = `bold 12px ${getComputedStyle(document.documentElement).getPropertyValue("--font-ui") || "sans-serif"}`;
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    for (const g of pr.grid_marks) {
+      const [x, y0] = this.toScreen([g.x, pr.bounds[0][1] - pad]), [, y1] = this.toScreen([g.x, pr.bounds[1][1] + pad]);
+      ctx.strokeStyle = k.muted; ctx.lineWidth = 1; ctx.setLineDash([16, 4, 2, 4]);
+      ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y1 - r * 2); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = k.paper; ctx.beginPath(); ctx.arc(x, y1 - r, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = k.ink; ctx.fillText(g.name, x, y1 - r + 0.5);
+    }
+    ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+  }
+
+  /** The cut of a build-up (a foundation): every loop is one layer, tinted and hatched by its material, outlined on top. */
+  private paintLayers(item: ProjItem, picked: boolean, k: Colors): void {
+    const ctx = this.ctx;
+    const ink = picked ? k.select : k.ink;
+    item.cut.forEach((loop, n) => {
+      const style = cutStyle(item.cut_material?.[n] ?? "Concrete");
+      const path = (): void => { ctx.beginPath(); loop.forEach((p, i) => { const [x, y] = this.toScreen(p); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); }); ctx.closePath(); };
+      path(); ctx.fillStyle = withAlpha(ink, style.alpha); ctx.fill();
+      const xs = loop.map((p) => this.toScreen(p)[0]), ys = loop.map((p) => this.toScreen(p)[1]);
+      const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+      if (style.hatch !== "none" && x1 - x0 > 2 && y1 - y0 > 2) {
+        ctx.save(); path(); ctx.clip(); ctx.beginPath(); ctx.lineWidth = 0.8; ctx.strokeStyle = ink; ctx.setLineDash([]);
+        const step = 8;
+        if (style.hatch === "dots") { for (let y = Math.floor(y0 / step) * step; y < y1; y += step) for (let x = Math.floor(x0 / step) * step + ((Math.round(y / step) % 2) * step) / 2; x < x1; x += step) { ctx.moveTo(x + 1, y); ctx.arc(x, y, 1, 0, Math.PI * 2); } ctx.fillStyle = ink; ctx.fill(); }
+        else {
+          for (let t = -(y1 - y0); t < x1 - x0; t += step) { ctx.moveTo(x0 + t, y1); ctx.lineTo(x0 + t + (y1 - y0), y0); }
+          if (style.hatch === "cross") for (let t = 0; t < x1 - x0 + (y1 - y0); t += step) { ctx.moveTo(x0 + t, y1); ctx.lineTo(x0 + t - (y1 - y0), y0); }
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+      path(); ctx.lineWidth = picked ? 2.5 : 1.6; ctx.strokeStyle = ink; ctx.stroke();
+    });
   }
 
   /** The cut lines of the sections, on a plan: a dash-dot line, an arrowhead at each end showing which way it looks, and a lettered bubble. */
@@ -1049,6 +1101,10 @@ export class DrawingView {
       ctx.strokeStyle = selected ? color : withAlpha(k.muted, 0.9); ctx.stroke();
       return;
     }
+    if (w.category === "foundation") {                                                                      // below the cut plane, so drawn as hidden outline with a light tint
+      trace(); ctx.setLineDash([9, 4, 2, 4]); ctx.lineWidth = selected ? 2.2 : 1.2; ctx.fillStyle = withAlpha(color, selected ? 0.22 : 0.07); ctx.fill("evenodd"); ctx.stroke(); ctx.setLineDash([]);
+      return;
+    }
     if (w.category === "extrusion" || w.category === "sweep") {
       trace(); ctx.setLineDash([]); ctx.fillStyle = withAlpha(color, selected ? 0.5 : 0.32); ctx.fill("evenodd"); ctx.stroke();
       if (w.path && w.path.length > 1) {                                                                    // the path a sweep follows
@@ -1058,7 +1114,8 @@ export class DrawingView {
       return;
     }
     if (w.category === "void") {
-      trace(); ctx.setLineDash([7, 4]); ctx.fillStyle = withAlpha(color, selected ? 0.16 : 0.06); ctx.fill("evenodd"); ctx.stroke(); ctx.setLineDash([]);
+      trace(); ctx.setLineDash(w.off ? [2, 4] : [7, 4]); ctx.fillStyle = withAlpha(color, selected ? 0.16 : 0.06); ctx.fill("evenodd"); ctx.stroke(); ctx.setLineDash([]);
+      if (w.off) return;                                                                                    // cutting is off: outlined, not hatched
       const xs = w.polygon.map((p) => this.toScreen(p)[0]), ys = w.polygon.map((p) => this.toScreen(p)[1]);
       const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
       ctx.save(); trace(); ctx.clip();                                                                      // hatched, as a cut-out is drawn
@@ -1145,13 +1202,16 @@ export class DrawingView {
     ctx.setLineDash([16, 4, 2, 4]); ctx.lineWidth = selected ? 2 : 1.2; ctx.beginPath(); this.line(a, b); ctx.stroke(); ctx.setLineDash([]);
     const label = w.label as GridLabel | undefined;
     if (!label || !("radius" in label)) return;
-    const dx = a[0] - b[0], dy = a[1] - b[1], len = Math.hypot(dx, dy) || 1;
     const r = Math.max(10, label.radius * this.scale);
-    const [bx, by] = this.toScreen(a);
-    const cx = bx + (dx / len) * r, cy = by - (dy / len) * r;                      // beyond the start, away from the line (screen y points down)
-    ctx.fillStyle = k.paper; ctx.lineWidth = selected ? 2 : 1.2; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-    ctx.fillStyle = selected ? color : k.ink; ctx.font = `bold ${Math.round(r * 1.05)}px ${getComputedStyle(document.documentElement).getPropertyValue("--font-ui") || "sans-serif"}`;
-    ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(label.name, cx, cy + 0.5); ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+    for (const end of label.bubbles ?? ["start"]) {
+      const [from, to] = end === "start" ? [a, b] : [b, a];
+      const dx = from[0] - to[0], dy = from[1] - to[1], len = Math.hypot(dx, dy) || 1;
+      const [bx, by] = this.toScreen(from);
+      const cx = bx + (dx / len) * r, cy = by - (dy / len) * r;                    // beyond the end, away from the line (screen y points down)
+      ctx.fillStyle = k.paper; ctx.lineWidth = selected ? 2 : 1.2; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = selected ? color : k.ink; ctx.font = `bold ${Math.round(r * 1.05)}px ${getComputedStyle(document.documentElement).getPropertyValue("--font-ui") || "sans-serif"}`;
+      ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(label.name, cx, cy + 0.5); ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+    }
   }
 
   /** A model wall as seen in plan: its footprint, filled lightly so it reads as solid and is clearly the model's, not a drawn line. */

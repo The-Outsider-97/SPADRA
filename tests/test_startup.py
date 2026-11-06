@@ -89,9 +89,13 @@ class Client(unittest.TestCase):
         (self.app / "tsconfig.build.json").write_text("{}")
         self.dist = self.app / "dist"
 
-    def build(self) -> None:
-        (self.dist / "js").mkdir(parents=True, exist_ok=True)
+    def build(self, record: bool = True) -> None:
+        """A build as the build script leaves it: the compiled module, index.html and (unless ``record`` is False, an older script) the record of the sources."""
+        (self.dist / "js" / "App" / "src" / "client").mkdir(parents=True, exist_ok=True)
+        (self.dist / "js" / "App" / "src" / "client" / "main.js").write_text("export {};")
         (self.dist / "index.html").write_text("<!doctype html>")
+        if record:
+            (self.dist / ST.BUILD_RECORD).write_text(json.dumps({"format": 1, "files": ST.client_inputs(self.app)}))
         past = time.time() + 5
         os.utime(self.dist / "index.html", (past, past))
 
@@ -99,16 +103,54 @@ class Client(unittest.TestCase):
         f = ST.check_client(self.app, self.dist)
         self.assertEqual(f.status, "error"); self.assertIn("npm run build", f.fix)
 
-    def test_built_is_ok_and_newer_sources_make_it_stale(self) -> None:
+    def test_a_fresh_build_is_ok_whatever_the_file_times_say(self) -> None:
         self.build()
+        self.assertEqual(ST.check_client(self.app, self.dist).status, "ok")
+        later = time.time() + 7200                                   # sources unpacked from an archive made on a machine whose clock runs ahead
+        os.utime(self.app / "src" / "client" / "main.ts", (later, later))
+        os.utime(self.app / "tsconfig.build.json", (later, later))
+        self.assertEqual(ST.check_client(self.app, self.dist).status, "ok")
+
+    def test_an_edit_after_the_build_is_found_by_content_and_named(self) -> None:
+        self.build()
+        (self.app / "src" / "client" / "main.ts").write_text("export const x = 1;")
+        f = ST.check_client(self.app, self.dist)
+        self.assertEqual(f.status, "warn"); self.assertIn("src/client/main.ts", f.detail)
+        (self.app / "src" / "client" / "main.ts").write_text("export {};")             # put back: the content matches the build again
+        self.assertEqual(ST.check_client(self.app, self.dist).status, "ok")
+
+    def test_added_and_removed_sources_count_as_changes(self) -> None:
+        self.build()
+        (self.app / "src" / "client" / "extra.ts").write_text("export {};")
+        self.assertEqual(ST.client_changes(self.app, self.dist), ["App/src/client/extra.ts"])
+        (self.app / "src" / "client" / "extra.ts").unlink(); (self.app / "src" / "client" / "main.ts").unlink()
+        self.assertEqual(ST.client_changes(self.app, self.dist), ["App/src/client/main.ts"])
+
+    def test_compiled_output_that_is_missing_makes_the_build_incomplete(self) -> None:
+        self.build()
+        (self.dist / "js" / "App" / "src" / "client" / "main.js").unlink()
+        f = ST.check_client(self.app, self.dist)
+        self.assertEqual(f.status, "error"); self.assertIn("main.js", f.detail)
+
+    def test_a_build_without_a_record_falls_back_to_file_times(self) -> None:
+        self.build(record=False)
         self.assertEqual(ST.check_client(self.app, self.dist).status, "ok")
         later = time.time() + 60
         os.utime(self.app / "src" / "client" / "main.ts", (later, later))
-        self.assertEqual(ST.check_client(self.app, self.dist).status, "warn")
+        f = ST.check_client(self.app, self.dist)
+        self.assertEqual(f.status, "warn"); self.assertIn("no record", f.detail)
 
     def test_a_dist_without_its_scripts_is_not_a_build(self) -> None:
         self.dist.mkdir(); (self.dist / "index.html").write_text("x")
         self.assertEqual(ST.check_client(self.app, self.dist).status, "error")
+
+    def test_the_build_script_and_the_check_agree_on_the_record(self) -> None:
+        """The real build script's record, made on this tree, is exactly what the check computes (the two are written separately, in JavaScript and Python)."""
+        here = Path(ST.__file__).resolve().parent
+        record = here / "dist" / ST.BUILD_RECORD
+        if not record.is_file():
+            self.skipTest("the client has not been built here")
+        self.assertEqual(ST.client_changes(here, here / "dist"), [], "the built client does not match the sources it was built from; run npm run build")
 
 
 class Build(unittest.TestCase):
