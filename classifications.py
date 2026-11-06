@@ -312,7 +312,8 @@ def _mapping_entries(path: Path) -> list[dict[str, Any]]:
 def import_authorized_catalog(*, table21: Path, table23: Path, edition: str,
                               output: Path | None = None,
                               assembly: Path | None = None,
-                              mapping: Path | None = None) -> dict[str, int]:
+                              mapping: Path | None = None,
+                              other_tables: Mapping[int, Path] | None = None) -> dict[str, int]:
     """Build a private data file from user-provided authorized datasets.
 
     The generator itself is redistributable; the resulting catalog generally
@@ -326,6 +327,10 @@ def import_authorized_catalog(*, table21: Path, table23: Path, edition: str,
         "assemblies": _assembly_entries(assembly) if assembly else [],
         "assembly_mappings": _mapping_entries(mapping) if mapping else [],
     }
+    for table, source_path in (other_tables or {}).items():
+        if table not in OMNICLASS_TABLES or table in (21, 23):
+            raise ValueError("Invalid additional OmniClass table: " + str(table))
+        data["tables"][str(table)] = _table_entries(source_path, table)
     serialized = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
     if len(serialized.encode("utf-8")) > MAX_CATALOG_BYTES:
         raise ValueError("Generated catalog exceeds local safety limit")
@@ -361,15 +366,28 @@ def _cli() -> None:
     parser.add_argument("--edition", required=True, help="Exact licensed edition identifier")
     parser.add_argument("--assembly", type=Path, help="Optional authorized UniFormat code/title export")
     parser.add_argument("--mapping", type=Path, help="Optional VERIFIED UniFormat-to-OmniClass T21 CSV")
+    parser.add_argument("--extra-table", action="append", default=[], metavar="NUMBER=PATH",
+                        help="Import any other licensed OmniClass facet (repeat for Tables 11-14, 22, 31-36, 41, 49)")
     parser.add_argument("--output", type=Path, default=LOCAL_OMNICLASS)
     parser.add_argument("--authorized", action="store_true",
                         help="Confirm you have permission for this private software use")
     args = parser.parse_args()
     if not args.authorized:
         parser.error("Import requires --authorized; confirm CSI rights for this use")
+    extra: dict[int, Path] = {}
+    for arg in args.extra_table:
+        try:
+            number, file = arg.split("=", 1)
+            table = int(number)
+        except (ValueError, TypeError):
+            parser.error("--extra-table must be NUMBER=PATH")
+        if table not in OMNICLASS_TABLES or table in (21, 23) or table in extra:
+            parser.error("Invalid or duplicate extra OmniClass table: " + str(table))
+        extra[table] = Path(file)
     counts = import_authorized_catalog(
         table21=args.table21, table23=args.table23, edition=args.edition,
-        assembly=args.assembly, mapping=args.mapping, output=args.output)
+        assembly=args.assembly, mapping=args.mapping, output=args.output,
+        other_tables=extra)
     print("Private OmniClass catalog updated:", args.output, counts)
 
 
