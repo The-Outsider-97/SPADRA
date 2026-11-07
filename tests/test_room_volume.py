@@ -67,6 +67,19 @@ class RoomVolume(Case):
         self.assertAlmostEqual(d["covered"], 0.5, places=6)
         self.assertAlmostEqual(d["volume"], 10.0 * base + 10.0 * R.DEFAULT_HEIGHT, places=6)
 
+    def test_floor_and_roof_elevation_edits_recompute_volume_from_current_geometry(self):
+        rid = self.room()
+        floor = self.run_("model.add_floor", level=self.l2, points=[[-500, -500], [5500, -500], [5500, 4500], [-500, 4500]], thickness=300)["id"]
+        before = R.data(self.p, rid)["volume"]
+        self.run_("model.move", id=floor, dx=0.0, dy=0.0, dz=0.35)
+        self.assertAlmostEqual(R.data(self.p, rid)["volume"] - before, 20.0 * 0.35, places=6)
+        self.run_("model.delete", id=floor)
+        roof = self.run_("model.add_roof", level=self.roof_level, roof="gable",
+                         points=[[0, 0], [5000, 0], [5000, 4000], [0, 4000]], thickness=200, pitch=30)["id"]
+        before_roof = R.data(self.p, rid)["volume"]
+        self.run_("model.move", id=roof, dx=0.0, dy=0.0, dz=0.25)
+        self.assertAlmostEqual(R.data(self.p, rid)["volume"] - before_roof, 20.0 * 0.25, places=6)
+
     def test_the_plan_label_carries_the_volume(self):
         rid = self.room()
         plan = next(v["id"] for v in self.p.manifest["views"] if v.get("level_id") == self.l1)

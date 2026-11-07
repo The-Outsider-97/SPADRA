@@ -28,6 +28,7 @@ from src.utils import sldc as S
 from ..tools.errors import BadRequest, LimitExceeded, NotFound
 from . import documentation as D
 from . import elements as E
+from . import layers as LY
 from . import reports as RP
 
 Pt3 = tuple[float, float, float]
@@ -86,8 +87,8 @@ def check_camera(azimuth: Any, elevation: Any) -> tuple[float, float]:
 
 def model_view(project: Any, azimuth: float, elevation: float, f: float) -> dict[str, Any]:
     """The model's faces that face the viewer, flattened to the screen in the drawing's unit (``f`` converts metres), far to near. Each face is
-    ``[x1, y1, x2, y2, x3, y3, shade, edges]``; ``edges`` has one bit per side (side i runs from corner i to corner i+1) set where that side is a
-    boundary of the surface or a crease."""
+    ``[x1, y1, x2, y2, x3, y3, shade, edges, colorRGB]``; ``colorRGB`` is an sRGB integer or -1 for an unassigned appearance.
+    ``edges`` has one bit per side (side i runs from corner i to corner i+1) set where that side is a boundary or a crease."""
     key = ("model-view", round(azimuth, 6), round(elevation, 6), f)
     cached = project._cache.get(key)
     if cached is not None:
@@ -101,11 +102,28 @@ def model_view(project: Any, azimuth: float, elevation: float, f: float) -> dict
     faces: list[tuple[float, list[float]]] = []
     for oid in all_ids(project.model, has_geometry=True):
         obj = project.model.get(oid)
-        if str(E.m(obj["metadata"], "category", "generic")) == "void":
+        meta = obj["metadata"]
+        category = str(E.m(meta, "category", "generic"))
+        if category == "void":
             continue
         verts, tris = D.world_mesh(project, oid, matrices)
         if not tris:
             continue
+        # The same material precedence as the 3D viewport: element override,
+        # layer override, project material appearance, built-in fallback. The
+        # layer-face counts come from the actual layered mesh, not from a
+        # guessed bounding-box location or a duplicate material registry.
+        base_color = E.appearance_color(project, meta)
+        face_colors = [int(base_color[1:], 16) if base_color else -1] * len(tris)
+        counts = E.m(meta, "layer_faces") or []
+        if not E.m(meta, "color") and counts and category in LY.LAYERED:
+            layers = LY.stack(project, oid)
+            if len(layers) == len(counts) and sum(counts) == len(tris):
+                face_colors = []
+                for count, layer in zip(counts, layers):
+                    value = (layer.get("color") or project.manifest.get("material_colors", {}).get(layer["material"])
+                             or E.MATERIAL_COLORS.get(layer["material"]))
+                    face_colors.extend([int(value[1:], 16) if value else -1] * int(count))
         normals: list[Pt3 | None] = []
         sides: dict[Any, list[Any]] = {}
         for n, (ia, ib, ic) in enumerate(tris):
@@ -133,7 +151,7 @@ def model_view(project: Any, azimuth: float, elevation: float, f: float) -> dict
             flat = [c for p in pts for c in (round(_dot(p, right) * f, 4), round(_dot(p, up) * f, 4))]
             depth = sum(_dot(p, v) for p in pts) / 3
             shade = round(0.62 + 0.35 * max(0.0, _dot(nrm, light)), 3)
-            faces.append((depth, flat + [shade, drawn[n]]))
+            faces.append((depth, flat + [shade, drawn[n], face_colors[n]]))
             if len(faces) > MODEL_FACE_LIMIT:
                 raise LimitExceeded(f"This 3D view has more than {MODEL_FACE_LIMIT} faces to draw", hint="Place a plan, section or elevation instead, or simplify the model")
     faces.sort(key=lambda item: item[0])                                        # far first, so that nearer faces paint over what they hide

@@ -10,7 +10,7 @@ Every function raises ``GeometryError`` with a sentence a person can act on.
 from __future__ import annotations
 
 import math
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 Point = tuple[float, float]
 EPS = 1e-9
@@ -520,13 +520,17 @@ def _top_at(top: Sequence[tuple[float, float]], x: float) -> float:
 
 
 def wall_mesh(length: float, thickness: float, height: float, openings: Sequence[tuple[float, float, float, float]],
-              ends: WallEnds = SQUARE_ENDS, top: Sequence[tuple[float, float]] | None = None) -> Mesh:
+              ends: WallEnds = SQUARE_ENDS, top: Sequence[tuple[float, float]] | None = None,
+              top_surface: Callable[[float, float], float] | None = None,
+              top_breaks: Sequence[float] = ()) -> Mesh:
     """A wall as a closed mesh, centred on the origin (x along the wall, y through it, z up), with rectangular openings cut through.
     Each opening is (x0, x1, z0, z1) in the same local frame. The result is the exact boundary of the box minus the openings.
     ``ends`` slants the two end faces for a joint: ((start +y face, start -y face), (end +y face, end -y face)), each the distance that
     face reaches past the end of the wall (negative: is cut back). A planar end face stays planar; an opening may not run into one.
     ``top`` is the wall's top edge as a polyline of (x, z) in the same local frame (x along the wall, z up, both from the centre): the top face
-    then follows it, in planar pieces, instead of lying level at ``height``. No opening may reach above it."""
+    then follows it, in planar pieces, instead of lying level at ``height``. No opening may reach above it. ``top_surface`` optionally
+    evaluates the true roof underside at both faces of the wall (local x,y -> local z), removing the wedge caused by extruding the centre-line
+    profile unchanged across the wall thickness. For a single roof facet the top faces are exactly planar."""
     hx, hy, hz = length / 2, thickness / 2, height / 2
     (sl, sr), (el, er) = ends
     start_inner, end_inner = -hx - min(sl, sr), hx + min(el, er)               # the most cut-back point of each end face
@@ -535,15 +539,25 @@ def wall_mesh(length: float, thickness: float, height: float, openings: Sequence
     margin_start, margin_end = (1e-6 if start_inner > -hx else -1e-9), (1e-6 if end_inner < hx else -1e-9)       # an opening may touch a square end
     if any(o[0] < start_inner + margin_start or o[1] > end_inner - margin_end for o in openings):
         raise GeometryError("An opening runs into the angled corner at the end of the wall")
-    kinks = [min(hx, max(-hx, q[0])) for q in top] if top else []
+    # For a face-wise roof attachment, the facet crossings of this particular
+    # layer determine exact cuts. A parent wall's centre-line kink does *not*
+    # necessarily intersect a layer at its own centre, and inserting it as a
+    # separate x partition would split an oblique roof crease in the wrong place.
+    kinks = [min(hx, max(-hx, q[0])) for q in top] if top and top_surface is None else []
+    kinks += [min(hx, max(-hx, float(x))) for x in top_breaks]
     xs = sorted({-hx, hx, *(min(hx, max(-hx, v)) for o in openings for v in (o[0], o[1])), *kinks})
     zs = sorted({-hz, hz, *(min(hz, max(-hz, v)) for o in openings for v in (o[2], o[3]))})
     if top:
         floor_ = min(_top_at(top, x) for x in xs)
+        if top_surface is not None:
+            floor_ = min(floor_, *(top_surface(x, y) for x in xs for y in (-hy, hy)))
         if floor_ < -hz + 1e-6:
             raise GeometryError("The top of the wall comes down to or below its base")
         for o in openings:
             lowest = min(_top_at(top, x) for x in [o[0], o[1], *(q[0] for q in top if o[0] < q[0] < o[1])])
+            if top_surface is not None:
+                positions = [o[0], o[1], *(q[0] for q in top if o[0] < q[0] < o[1])]
+                lowest = min(lowest, *(top_surface(x, y) for x in positions for y in (-hy, hy)))
             if o[3] > lowest - 1e-6:
                 raise GeometryError("An opening reaches the sloping top of the wall: lower it or raise the roof it follows")
         if len(zs) > 2 and floor_ < zs[-2] + 1e-6:
@@ -563,31 +577,74 @@ def wall_mesh(length: float, thickness: float, height: float, openings: Sequence
         return index[key]
 
     faces: list[list[int]] = []
+    roof_top_faces: list[int] = []
+    roof_top_quads: list[tuple[int, int, tuple[int, int, int, int]]] = []
 
     def quad(a: int, b: int, c: int, d: int, flip: bool) -> None:
         q = [a, b, c, d][::-1] if flip else [a, b, c, d]
         faces.extend(([q[0], q[1], q[2]], [q[0], q[2], q[3]]))
 
+    def roof_end(a: int, b: int, c: int, middle: int, e: int, flip: bool) -> None:
+        """A top midpoint keeps the end face conforming to the divided roof cap."""
+        tris = [[a, b, middle], [b, c, middle], [a, middle, e]]
+        faces.extend([list(reversed(t)) if flip else t for t in tris])
+
     for i, k in sorted(occupied):
         x0, x1, z0, z1 = xs[i], xs[i + 1], zs[k], zs[k + 1]
+        roof_cap = top_surface is not None and abs(z1 - zs[-1]) < EPS and (i, k + 1) not in occupied
         quad(v(x0, -hy, z0), v(x1, -hy, z0), v(x1, -hy, z1), v(x0, -hy, z1), False)           # face towards -y
         quad(v(x0, hy, z0), v(x1, hy, z0), v(x1, hy, z1), v(x0, hy, z1), True)                # face towards +y
         if (i - 1, k) not in occupied:
-            quad(v(x0, -hy, z0), v(x0, hy, z0), v(x0, hy, z1), v(x0, -hy, z1), True)          # face towards -x
+            if roof_cap:
+                roof_end(v(x0, -hy, z0), v(x0, hy, z0), v(x0, hy, z1), v(x0, 0.0, z1), v(x0, -hy, z1), True)
+            else:
+                quad(v(x0, -hy, z0), v(x0, hy, z0), v(x0, hy, z1), v(x0, -hy, z1), True)      # face towards -x
         if (i + 1, k) not in occupied:
-            quad(v(x1, -hy, z0), v(x1, hy, z0), v(x1, hy, z1), v(x1, -hy, z1), False)         # face towards +x
+            if roof_cap:
+                roof_end(v(x1, -hy, z0), v(x1, hy, z0), v(x1, hy, z1), v(x1, 0.0, z1), v(x1, -hy, z1), False)
+            else:
+                quad(v(x1, -hy, z0), v(x1, hy, z0), v(x1, hy, z1), v(x1, -hy, z1), False)    # face towards +x
         if (i, k - 1) not in occupied:
             quad(v(x0, -hy, z0), v(x1, -hy, z0), v(x1, hy, z0), v(x0, hy, z0), True)          # face towards -z
         if (i, k + 1) not in occupied:
-            quad(v(x0, -hy, z1), v(x1, -hy, z1), v(x1, hy, z1), v(x0, hy, z1), False)         # face towards +z
-    if top:
-        for p in verts:
-            if p[2] == zs[-1]:                                                 # the top face follows the top edge; nothing else sits above the lowest point of it
-                p[2] = _top_at(top, p[0])
+            y_ranges = ((-hy, 0.0), (0.0, hy)) if roof_cap else ((-hy, hy),)
+            for ya, yb in y_ranges:
+                before = len(faces)
+                corners = (v(x0, ya, z1), v(x1, ya, z1), v(x1, yb, z1), v(x0, yb, z1))
+                quad(*corners, False)                                                     # face towards +z
+                if roof_cap:
+                    roof_top_faces.extend(range(before, len(faces)))
+                    roof_top_quads.append((before, before + 1, corners))
     if ends != SQUARE_ENDS:
         for p in verts:                                                        # shear the end faces: x moves with y only, so they stay planar
             if p[0] == xs[0]:
                 p[0] = -hx - (sl if p[1] > 0 else sr)
             elif p[0] == xs[-1]:
                 p[0] = hx + (el if p[1] > 0 else er)
+    if top:
+        for p in verts:
+            if p[2] == zs[-1]:                                                 # evaluate after end shearing: roof height is tied to actual world position
+                p[2] = top_surface(p[0], p[1]) if top_surface is not None else _top_at(top, p[0])
+    if top_surface is not None:
+        def roof_error(tris: Sequence[Sequence[int]]) -> float:
+            error = 0.0
+            for indices in tris:
+                tri = [verts[idx] for idx in indices]
+                x = sum(v[0] for v in tri) / 3
+                y = sum(v[1] for v in tri) / 3
+                actual = sum(v[2] for v in tri) / 3
+                error = max(error, abs(top_surface(x, y) - actual))
+            return error
+
+        for a, b, (i0, i1, i2, i3) in roof_top_quads:
+            alternate = [[i0, i1, i3], [i1, i2, i3]]
+            if roof_error(alternate) + 1e-9 < roof_error((faces[a], faces[b])):
+                faces[a], faces[b] = alternate
+        for face_index in roof_top_faces:
+            tri = [verts[idx] for idx in faces[face_index]]
+            x = sum(v[0] for v in tri) / 3
+            y = sum(v[1] for v in tri) / 3
+            actual = sum(v[2] for v in tri) / 3
+            if abs(top_surface(x, y) - actual) > 1e-6:
+                raise GeometryError("A roof facet junction crosses this wall obliquely. Its top cannot be represented as a planar face without a split; adjust the join or roof geometry")
     return verts, faces

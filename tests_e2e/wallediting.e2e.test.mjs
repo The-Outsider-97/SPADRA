@@ -4,7 +4,7 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,7 +12,8 @@ import { createServer } from "node:net";
 import { chromium } from "playwright";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const SLAI = resolve(HERE, "..", "..", "..");
+const NESTED_SLAI = resolve(HERE, "..", "..", "..");
+const SLAI = existsSync(join(NESTED_SLAI, "applications")) ? NESTED_SLAI : resolve(HERE, "..", "..");
 const PYTHON = process.env.PYTHON ?? (process.platform === "win32" ? "python" : "python3");
 
 let server, browser, page, url, dataDir;
@@ -70,7 +71,7 @@ const box = async () => canvas().boundingBox();
 
 before(async () => {
   url = await startServer();
-  browser = await chromium.launch({ args: ["--use-gl=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"] });
+  browser = await chromium.launch({ executablePath: process.env.CHROMIUM_EXECUTABLE, args: ["--use-gl=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"] });
   page = await browser.newPage({ viewport: { width: 1672, height: 941 } });
   page.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
   page.on("console", (m) => { if (m.type() === "error") problems.push(`console: ${m.text()} ${m.location().url}`); });
@@ -99,6 +100,37 @@ describe("walls in the plan", () => {
     assert.ok(meta, "the wall has properties");
     const pieces = (await drawing()).model.filter((m) => m.category === "wall");
     assert.equal(pieces.length, 2);
+  });
+
+  it("offers all four wall corner policies directly at the selected join", async () => {
+    await page.keyboard.press("v");
+    const [first] = await walls();
+    await clickAt([(first.a[0] + first.b[0]) / 2, (first.a[1] + first.b[1]) / 2]);
+    const join = page.getByRole("button", { name: /Edit wall corner connection/ }).first();
+    await join.waitFor();
+    await join.focus(); await page.keyboard.press("Enter");
+    for (const option of ["Selected wall passes through", "Other wall passes through", "Stepped / point-contact (open corner)", "Mitered corner"])
+      await page.getByRole("button", { name: new RegExp(option.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) }).waitFor();
+    await page.getByRole("button", { name: /1 · Selected wall passes through/ }).focus();
+    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: /1 · Selected wall passes through/ }).waitFor({ state: "detached" });
+    await join.click();
+    await page.getByRole("button", { name: /4 · Mitered corner/ }).click();
+    await settle();
+    assert.equal((await drawing()).model.filter((m) => m.category === "wall").length, 2);
+  });
+
+  it("accepts an RGB material appearance override and updates only the selected wall", async () => {
+    await page.keyboard.press("v");
+    const [first, second] = await walls();
+    await clickAt([(first.a[0] + first.b[0]) / 2, (first.a[1] + first.b[1]) / 2]);
+    const rgb = page.getByRole("textbox", { name: "Element color override RGB color" });
+    await rgb.waitFor();
+    await rgb.fill("18, 52, 86"); await rgb.press("Tab"); await settle();
+    const scene = (await api("/scene")).objects;
+    assert.equal(scene.find((item) => item.id === first.id).color, "#123456");
+    assert.notEqual(scene.find((item) => item.id === second.id).color, "#123456", "another wall sharing the material is not recolored by an instance override");
+    assert.equal(await page.getByRole("textbox", { name: "Element color override HEX color" }).inputValue(), "#123456");
   });
 
   it("stretches an end by dragging its grip, and the corner follows", async () => {

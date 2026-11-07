@@ -439,6 +439,9 @@ class Project:
         self._touched = {}
         try:
             result = handler(self, params)
+            if key.startswith("drawing:"):
+                E.refresh_opening_profiles_for_drawing(self, key.split(":", 1)[1],
+                                                       MM_PER[self.manifest["unit"]] / 1000.0)
             if key == "model" and op.split(".")[0] not in ("anim", "project", "report", "bim"):
                 FD.reconcile(self)                                      # foundations follow the walls and columns they stand on, and strips re-cut their joints
                 AY.reconcile(self)                                      # linked arrays follow their sources; items a person edited or deleted are let go
@@ -1712,6 +1715,18 @@ class _Commands:
         return {"id": E.add_opening(project, "window", p, MM_PER[project.manifest["unit"]] / 1000.0)}
 
     @staticmethod
+    @command(_model_target("Add opening profile"))
+    def model__add_opening_profile(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Create a real frame around a door/window rough opening; defaults to three sides for doors and four for windows."""
+        return {"id": E.add_opening_profile(project, p, MM_PER[project.manifest["unit"]] / 1000.0)}
+
+    @staticmethod
+    @command(_model_target("Remove opening profile"))
+    def model__remove_opening_profile(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        opening = text(p.get("opening"), "opening", 80)
+        return {"removed": E.remove_opening_profile(project, opening)}
+
+    @staticmethod
     @command(_model_target("Add floor"))
     def model__add_floor(project: Project, p: dict[str, Any]) -> dict[str, Any]:
         """A floor slab whose top is at the level: ``points`` are its corners in drawing units, ``thickness`` in mm."""
@@ -1722,6 +1737,13 @@ class _Commands:
     def model__add_roof(project: Project, p: dict[str, Any]) -> dict[str, Any]:
         """A flat roof over any outline, or a gable/shed roof over a rectangular one (``pitch`` in degrees)."""
         return {"id": E.add_roof(project, p, MM_PER[project.manifest["unit"]] / 1000.0)}
+
+    @staticmethod
+    @command(_model_target("Add roof accessory"))
+    def model__add_roof_accessory(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Add an independently selectable ridge beam, ridge strap or roof-edge member to the selected roof."""
+        ids = E.add_roof_accessory(project, p)
+        return {"ids": ids, "id": ids[0]}
 
     @staticmethod
     @command(_model_target("Add beam"))

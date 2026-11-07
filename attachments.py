@@ -11,9 +11,11 @@ Model
     base) points, present only when the top is not level.
 
 Roof
-    The wall's centre line is clipped to the roof's underside (``elements.roof_facets``): for each stretch the plane of the facet above it gives the height.
-    A wall that is not wholly under the roof is refused with how much sticks out; nothing is guessed. The top is cut along the centre line, so a wall
-    under a sloping roof leaves a small wedge across its own thickness, which is not modelled.
+    The height and longitudinal profile come from the host roof underside (``elements.roof_facets``). A second facet evaluation at every wall and
+    material-layer face produces the actual transverse roof cut, avoiding the wedge left by a centre-line extrusion. A wall whose centreline lies
+    outside the roof is refused. A face that projects just half a wall thickness past an eave receives the adjacent roof plane extrapolation; farther
+    unsupported faces are refused. Oblique roof-facet creases are split across wall/layer width where the evaluated facets meet; unsupported
+    self-intersecting or ambiguous crease geometry is rejected rather than silently stored as a gap or overlap.
 
 Level
     The top is the upper level's elevation plus the offset. Moving the level moves the top.
@@ -24,7 +26,7 @@ Deleting the roof detaches the wall (it keeps the height it had before it was at
 from __future__ import annotations
 
 import math
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from ..tools.errors import BadRequest, NotFound
 from ..tools.validation import number
@@ -73,6 +75,94 @@ def _crossings(poly: Sequence[tuple[float, float]], a: tuple[float, float], b: t
         if -1e-9 <= t <= 1 + 1e-9 and -1e-9 <= u <= 1 + 1e-9:
             out.append(min(1.0, max(0.0, t)))
     return out
+
+
+def _distance_to_outline(poly: Sequence[tuple[float, float]], x: float, y: float) -> float:
+    """Distance in plan to a roof facet, for a wall face straddling an eave.
+
+    A gable or eave wall commonly lies on the roof footprint's boundary while
+    half of its thickness projects outside. For just that half-thickness the
+    roof plane is extrapolated to meet the wall face; more distant geometry is
+    not silently attached to a surface that does not exist.
+    """
+    if _inside(poly, x, y):
+        return 0.0
+    closest = math.inf
+    for a, b in zip(poly, (*poly[1:], poly[0])):
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        d2 = dx * dx + dy * dy
+        t = min(1.0, max(0.0, ((x - a[0]) * dx + (y - a[1]) * dy) / d2)) if d2 else 0.0
+        closest = min(closest, math.hypot(x - a[0] - t * dx, y - a[1] - t * dy))
+    return closest
+
+
+def roof_surface(project: Any, oid: str, frame: Mapping[str, Any] | None = None,
+                 top_to: Mapping[str, Any] | None = None) -> Callable[[float, float], float] | None:
+    """Underside height relative to this wall's base, at local (along, across) metres.
+
+    This is evaluated from the host roof's actual facets on every rebuild, not
+    stored as a second stale representation. It supports both individual wall
+    faces, and each material layer's distinct y interval.
+    """
+    meta = E.meta_of(project, oid)
+    target = top_to or attachment(meta)
+    if not target or target["kind"] != "roof":
+        return None
+    roof_id = str(target["roof"])
+    if not E.alive(project, roof_id):
+        return None                                  # the reconcile pass detaches a lost host
+    facets = E.roof_facets(project, E.meta_of(project, roof_id))
+    if not facets:
+        raise BadRequest("The selected roof has no valid underside facets")
+    fr = E.wall_frame(project, oid) if frame is None else frame
+    cx, cy = fr["mid"]
+    co, si = math.cos(fr["angle"]), math.sin(fr["angle"])
+    base, offset = float(fr["base"]), float(target.get("offset", 0.0))
+    reach = float(fr["thickness"]) / 2 + 1e-6
+
+    def height(x: float, y: float) -> float:
+        wx, wy = cx + co * x - si * y, cy + si * x + co * y
+        located = [(i, plane) for i, (ring, plane) in enumerate(facets) if _inside(ring, wx, wy)]
+        if not located:
+            nearest = min(((_distance_to_outline(ring, wx, wy), i, plane) for i, (ring, plane) in enumerate(facets)), key=lambda q: (q[0], q[1]))
+            if nearest[0] > reach:
+                raise BadRequest("A face of the wall extends beyond the roof footprint; the roof cannot provide a continuous attachment",
+                                 hint="Increase the roof overhang, move the wall under the roof, or choose another attachment face")
+            plane = nearest[2]
+        else:
+            plane = located[0][1]
+        return plane[0] * wx + plane[1] * wy + plane[2] - base + offset
+
+    return height
+
+
+def roof_breaks(project: Any, oid: str, faces: Sequence[float], frame: Mapping[str, Any] | None = None) -> list[float]:
+    """Roof facet boundary locations along given material-layer faces, in wall-local metres.
+
+    Splitting the top mesh at the crossings on both faces exposes any oblique
+    facet crease as a diagonal of a top quad instead of approximating it with
+    one plane. This shares the same roof facets as the height evaluator.
+    """
+    meta = E.meta_of(project, oid)
+    target = attachment(meta)
+    if not target or target["kind"] != "roof":
+        return []
+    roof_id = str(target["roof"])
+    if not E.alive(project, roof_id):
+        return []
+    fr = E.wall_frame(project, oid) if frame is None else frame
+    length = fr["length"]
+    if length < 1e-9:
+        return []
+    start, end = fr["start"], fr["end"]
+    c, s = math.cos(fr["angle"]), math.sin(fr["angle"])
+    facets = E.roof_facets(project, E.meta_of(project, roof_id))
+    out: set[float] = set()
+    for y in faces:
+        a, b = (start[0] - s * y, start[1] + c * y), (end[0] - s * y, end[1] + c * y)
+        for ring, _ in facets:
+            out.update(round(t * length - length / 2, 9) for t in _crossings(ring, a, b) if 1e-9 < t < 1 - 1e-9)
+    return sorted(out)
 
 
 def roof_line(project: Any, start: tuple[float, float], end: tuple[float, float], roof_meta: Mapping[str, Any]) -> list[tuple[float, float]]:
@@ -145,6 +235,24 @@ def derive(project: Any, oid: str, top_to: Mapping[str, Any]) -> tuple[float, li
     start, end = tuple(E.m(meta, "start")), tuple(E.m(meta, "end"))
     pts = _simplified([(s, z - base + offset) for s, z in roof_line(project, start, end, E.meta_of(project, roof))])
     low, high = min(h for _, h in pts), max(h for _, h in pts)
+    # The two exposed faces of a wall can meet the underside at different
+    # heights. Centre-line extrema alone leave a wedge of gap or penetration.
+    fr = E.wall_frame(project, oid)
+    surface = roof_surface(project, oid, fr, top_to)
+    if surface is None:
+        raise BadRequest("The roof attachment target is unavailable")
+    length, half = fr["length"], fr["thickness"] / 2
+    facets = E.roof_facets(project, E.meta_of(project, roof))
+    co, si = math.cos(fr["angle"]), math.sin(fr["angle"])
+    for y in (-half, half):
+        a = (start[0] - si * y, start[1] + co * y)
+        b = (end[0] - si * y, end[1] + co * y)
+        positions = {0.0, 1.0}
+        for ring, _ in facets:
+            positions.update(_crossings(ring, a, b))
+        for t in positions:
+            h = surface(length * (t - 0.5), y)
+            low, high = min(low, h), max(high, h)
     if low < MIN_HEIGHT:
         raise BadRequest(f"The roof comes down to {low + base - offset:.3f} m under this wall, which is {max(low, 0.0) * 1000:.0f} mm above its base: no wall can reach it",
                          hint="Move the roof up, or lower this wall's base")

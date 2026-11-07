@@ -33,7 +33,7 @@ GLASS = 0.03                          # thickness of the drawn glazing panel, m
 ROOF_TYPES = {"flat": "Flat Roof", "shed": "Shed Roof", "gable": "Gable Roof", "hip": "Hip Roof"}      # the four everyday roofs; each can be changed to another later
 OPENINGS = ("door", "window")
 WINDOW_OPERATIONS = ("fixed", "casement")        # a casement has one sash hinged at one jamb; a fixed window does not open
-SPECIAL = ("wall", "door", "window", "floor", "roof", "structural", "room", "stair", "generic", "extrusion", "void", "sweep", "gutter", "downpipe", "foundation")
+SPECIAL = ("wall", "door", "window", "opening_profile", "floor", "roof", "structural", "room", "stair", "generic", "extrusion", "void", "sweep", "gutter", "downpipe", "foundation")
 FORMS = ("extrusion", "void", "sweep")                     # solids made from a profile (see forms.py)
 FLOOR_TYPES = ("Generic Floor", "Structural Slab")
 IDENTITY = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
@@ -186,10 +186,47 @@ def wall_joins(project: Any, oid: str, table: Mapping[str, _WallRow] | None = No
     f = wall_frame(project, oid)
     level = str(m(f["meta"], "level"))
     rows = {k: row for k, row in (table if table is not None else _wall_table(project)).items() if row.level == level}     # walls join on their own level only
-    return join_ends(rows, oid, f["start"], f["end"], f["thickness"])
+    return join_ends(rows, oid, f["start"], f["end"], f["thickness"], corner_modes=project.manifest.get("wall_corners", {}))
 
 
-def join_ends(table: Mapping[str, _WallRow], oid: str, start: tuple[float, float], end: tuple[float, float], t: float) -> dict[str, Any]:
+CORNER_MODES = ("through_selected", "through_other", "stepped_open", "miter")
+
+
+def _corner_key(oid: str, start: bool, other: str, other_start: bool) -> str:
+    """Stable end-to-end key; wall identity and endpoint do not depend on geometry or view."""
+    return "|".join(sorted((f"{oid}:{'start' if start else 'end'}", f"{other}:{'start' if other_start else 'end'}")))
+
+
+def _corner_mode_for(corner_modes: Mapping[str, str], key: str, oid: str) -> str:
+    """Convert canonical first/second wall priority to the wall being evaluated."""
+    saved = corner_modes.get(key, "miter")
+    if saved in ("stepped_open", "miter"):
+        return saved
+    first = key.split("|", 1)[0].rsplit(":", 1)[0]
+    return "through_selected" if (saved == "first_through") == (first == oid) else "through_other"
+
+
+def _far_corner_ends(d: G.Point, t: float, other_d: G.Point, other_t: float) -> tuple[float, float] | None:
+    """Trim a through-wall to the FAR face of the crossing wall (its butt end stops at our near face).
+
+    This is a true end-face plane intersection, not an outline-only extension; unequal widths and non-right-angle corners
+    produce the appropriate slanted end instead of an overlapped square. Values are in the wall's inward local frame.
+    """
+    if abs(G.cross(other_d, d)) < math.sin(G.MIN_BUTT_ANGLE):
+        return None
+    nearest = 1 if G.cross(other_d, d) > 0 else -1
+    far_face = G.mul(G.left(other_d), -nearest * other_t / 2)
+    result = []
+    for face_side in (+1, -1):
+        hit = G.intersect_lines(G.mul(G.left(d), face_side * t / 2), d, far_face, other_d)
+        if hit is None or abs(hit[0]) > G.MITER_LIMIT * max(t, other_t):
+            return None
+        result.append(-hit[0])
+    return result[0], result[1]
+
+
+def join_ends(table: Mapping[str, _WallRow], oid: str, start: tuple[float, float], end: tuple[float, float], t: float,
+              *, corner_modes: Mapping[str, str] | None = None) -> dict[str, Any]:
     """The joint rule for any thick line (a wall, a strip foundation): how the two ends of ``oid`` (from ``start`` to ``end``, ``t`` thick) meet the other
     lines of ``table`` (already limited to one level). See ``wall_joins`` for what is returned."""
     length = math.dist(start, end)
@@ -220,7 +257,22 @@ def join_ends(table: Mapping[str, _WallRow], oid: str, start: tuple[float, float
                         pairs.append((min(aid, bid), max(aid, bid), ad, at))
             if pairs:
                 through = min(pairs, key=lambda pair: (pair[0], pair[1]))
-        if through and oid in through[:2]:
+        style_ends: tuple[float, float] | None = None
+        if len(members) == 2 and corner_modes:
+            other_id, other_d, other_t = members[1]
+            other_row = table[other_id]
+            other_at_start = math.dist(other_row.start, point) <= JOIN_TOLERANCE
+            key = _corner_key(oid, at_start, other_id, other_at_start)
+            if key in corner_modes:
+                mode = _corner_mode_for(corner_modes, key, oid)
+                if mode == "stepped_open" or mode == "through_other":
+                    style_ends = G.butt_ends(d, t, point, other_d, point, other_t)
+                elif mode == "through_selected":
+                    style_ends = _far_corner_ends(d, t, other_d, other_t)
+                # A saved miter uses the ordinary exact miter evaluator.
+        if style_ends is not None:
+            left_right: tuple[float, float] | None = style_ends
+        elif through and oid in through[:2]:
             left_right: tuple[float, float] | None = (0.0, 0.0)
         elif through:
             left_right = G.butt_ends(d, t, point, through[2], point, through[3])
@@ -245,6 +297,65 @@ def join_ends(table: Mapping[str, _WallRow], oid: str, start: tuple[float, float
         # "left" and "right" above are looking along d, into the wall; the wall's own +y face is on the left at its start, the right at its end
         ends.append((left, right) if at_start else (right, left))
     return {"ends": (ends[0], ends[1]), "with": sorted(shaped)}
+
+
+def wall_corner_controls(project: Any, oid: str, scale: float = 1.0,
+                         table: Mapping[str, _WallRow] | None = None) -> list[dict[str, Any]]:
+    """Two-wall, non-collinear endpoint corners, with one contextual control per end.
+
+    T/cross junctions are excluded: those use the multi-wall priority resolver and
+    must not be silently converted into two-wall schematic corner treatments.
+    """
+    fr = wall_frame(project, oid)
+    table = table if table is not None else _wall_table(project)
+    level = str(m(fr["meta"], "level"))
+    styles = project.manifest.get("wall_corners", {})
+    out = []
+    for at_start, point, opposite in ((True, fr["start"], fr["end"]), (False, fr["end"], fr["start"])):
+        d = G.unit(G.sub(opposite, point))
+        matches = []
+        for other, row in table.items():
+            if other == oid or row.level != level:
+                continue
+            for other_at_start, near, far in ((True, row.start, row.end), (False, row.end, row.start)):
+                if math.dist(near, point) <= JOIN_TOLERANCE:
+                    other_d = G.unit(G.sub(far, near))
+                    matches.append((other, other_at_start, other_d))
+                    break
+        if len(matches) != 1:
+            continue
+        other, other_at_start, other_d = matches[0]
+        if abs(G.cross(d, other_d)) < math.sin(G.MIN_BUTT_ANGLE):
+            continue
+        key = _corner_key(oid, at_start, other, other_at_start)
+        out.append({"endpoint": "start" if at_start else "end", "other": other,
+                    "point": [round(point[0] * scale, 9), round(point[1] * scale, 9)],
+                    "mode": _corner_mode_for(styles, key, oid)})
+    return out
+
+
+def set_wall_corner_mode(project: Any, oid: str, other: str, endpoint: str, mode: Any) -> None:
+    """Persist the selected corner policy with stable wall+end references, then rebuild both independent solids."""
+    if mode not in CORNER_MODES:
+        raise BadRequest("Wall corner connection must be through_selected, through_other, stepped_open or miter")
+    if endpoint not in ("start", "end"):
+        raise BadRequest("Wall corner endpoint must be start or end")
+    match = next((c for c in wall_corner_controls(project, oid) if c["other"] == other and c["endpoint"] == endpoint), None)
+    if match is None:
+        raise BadRequest("These walls do not form a two-wall endpoint corner", hint="Select a wall corner in plan; multi-wall junctions use the junction resolver")
+    point = tuple(wall_frame(project, oid)[endpoint])
+    om = wall_frame(project, other)
+    other_at_start = math.dist(om["start"], point) <= JOIN_TOLERANCE
+    key = _corner_key(oid, endpoint == "start", other, other_at_start)
+    first = key.split("|", 1)[0].rsplit(":", 1)[0]
+    canonical = mode if mode in ("stepped_open", "miter") else (
+        "first_through" if (mode == "through_selected") == (oid == first) else "second_through")
+    styles = project.manifest.setdefault("wall_corners", {})
+    if canonical == "miter":
+        styles.pop(key, None)
+    else:
+        styles[key] = canonical
+    regenerate_wall(project, oid)
 
 
 def _foot(point: tuple[float, float], row: _WallRow, axis: tuple[float, float]) -> tuple[float, float]:
@@ -318,6 +429,20 @@ def _build_wall(project: Any, oid: str, table: Mapping[str, _WallRow]) -> None:
     joined = wall_joins(project, oid, table)
     _attach(project, oid, {"ends": [list(joined["ends"][0]), list(joined["ends"][1])], "joins": joined["with"]})
     f = wall_frame(project, oid)
+    # A collinear continuation is a real connection even though its resolved
+    # end offsets are both zero. Layer extension validation therefore needs
+    # endpoint incidence, not merely a non-square miter/butt offset.
+    def connected_at(point: tuple[float, float]) -> bool:
+        for other in joined["with"]:
+            row = table.get(other)
+            if row is None or row.level != str(m(f["meta"], "level")):
+                continue
+            if min(math.dist(point, row.start), math.dist(point, row.end)) <= JOIN_TOLERANCE:
+                return True
+            if _distance_to_segment(point, row.start, row.end)[0] <= row.thickness / 2 + JOIN_TOLERANCE:
+                return True
+        return False
+    f["connected_ends"] = (connected_at(f["start"]), connected_at(f["end"]))
     (sl, sr), (el, er) = f["ends"]
     cut_start, cut_end = max(0.0, -sl, -sr), max(0.0, -el, -er)                # how far each end is cut back by its joint, at the most
     length, height = f["length"], f["height"]
@@ -342,13 +467,17 @@ def _build_wall(project: Any, oid: str, table: Mapping[str, _WallRow]) -> None:
                 raise BadRequest("Two openings in the same wall would overlap" if len(cuts) == 0 else "A void and an opening, or two voids, would overlap in the same wall")
     from . import layers as LY
     LY.prune(project, oid)                                                      # openings that are gone are forgotten by the layers that named them
+    roof_surface = AT.roof_surface(project, oid, f)                            # each wall face has its own underside height
     try:
         if LY.is_layered(meta_of(project, oid)):                                # one shell per layer, each with the openings it inherits
-            _set_mesh(project, oid, LY.wall_mesh(project, oid, f, every), _rot(f["angle"], f["mid"][0], f["mid"][1], f["base"] + height / 2))
+            _set_mesh(project, oid, LY.wall_mesh(project, oid, f, every, top_surface=roof_surface),
+                      _rot(f["angle"], f["mid"][0], f["mid"][1], f["base"] + height / 2))
         elif every or f["ends"] != G.SQUARE_ENDS or f["top"]:
             local = [(x0 - length / 2, x1 - length / 2, z0 - height / 2, z1 - height / 2) for x0, x1, z0, z1, _ in every]
             top = [(s_ - length / 2, h_ - height / 2) for s_, h_ in f["top"]] or None
-            _set_mesh(project, oid, G.wall_mesh(length, f["thickness"], height, local, f["ends"], top),
+            surface = (lambda x, y: roof_surface(x, y) - height / 2) if roof_surface is not None else None
+            breaks = AT.roof_breaks(project, oid, (-f["thickness"] / 2, 0.0, f["thickness"] / 2), f) if surface is not None else ()
+            _set_mesh(project, oid, G.wall_mesh(length, f["thickness"], height, local, f["ends"], top, surface, breaks),
                       _rot(f["angle"], f["mid"][0], f["mid"][1], f["base"] + height / 2))
         else:
             project.model.set_geometry(oid, {"kind": "box", "center": [0.0, 0.0, 0.0], "size": [length, f["thickness"], height]})
@@ -357,6 +486,9 @@ def _build_wall(project: Any, oid: str, table: Mapping[str, _WallRow]) -> None:
         raise BadRequest(str(exc)) from exc
     for hid in (s[4] for s in spans):
         _place_opening(project, hid, f)
+        profile = opening_profile(project, hid)
+        if profile:
+            regenerate_opening_profile(project, profile)
 
 
 def _place_opening(project: Any, oid: str, frame: Mapping[str, Any]) -> None:
@@ -367,6 +499,15 @@ def _place_opening(project: Any, oid: str, frame: Mapping[str, Any]) -> None:
     x0, x1, z0, z1 = opening_span(meta)
     door = m(meta, "category") == "door"
     thickness = DOOR_LEAF if door else GLASS
+    raw_x0, raw_x1 = x0, x1
+    profile = opening_profile(project, oid)
+    if profile:
+        pm = meta_of(project, profile)
+        inset, clearance = float(m(pm, "face_width")), float(m(pm, "clearance", 0.003))
+        x0, x1 = x0 + inset + clearance, x1 - inset - clearance
+        z0, z1 = z0 + (inset if not door else 0.0) + clearance, z1 - inset - clearance
+        if x1 - x0 < MIN_PANEL or z1 - z0 < MIN_PANEL:
+            raise BadRequest("The opening profile leaves insufficient clear space for the panel", hint="Reduce the profile face width or enlarge the rough opening")
     hinge_x = x0 if m(meta, "hinge", "start") == "start" else x1
     face = int(m(meta, "swing", 1)) * frame["thickness"] / 2 if door else 0.0
     c, s = math.cos(frame["angle"]), math.sin(frame["angle"])
@@ -374,6 +515,8 @@ def _place_opening(project: Any, oid: str, frame: Mapping[str, Any]) -> None:
         verts: list[list[float]] = []
         faces: list[list[int]] = []
         for _, px0, px1 in panel_spans(meta):
+            px0 = x0 + (px0 - raw_x0) * (x1 - x0) / (raw_x1 - raw_x0)
+            px1 = x0 + (px1 - raw_x0) * (x1 - x0) / (raw_x1 - raw_x0)
             v, f_ = _box(px0 - x0, px1 - x0, -thickness / 2, thickness / 2, -(z1 - z0) / 2, (z1 - z0) / 2)
             faces += [[a + len(verts), b + len(verts), c_ + len(verts)] for a, b, c_ in f_]
             verts += v
@@ -383,6 +526,191 @@ def _place_opening(project: Any, oid: str, frame: Mapping[str, Any]) -> None:
     project.model.set_geometry(oid, {"kind": "box", "center": [(x0 + x1) / 2 - hinge_x, -face, 0.0], "size": [x1 - x0, thickness, z1 - z0]})
     project.model.set_transform(oid, _rot(frame["angle"], frame["start"][0] + c * hinge_x - s * face, frame["start"][1] + s * hinge_x + c * face, frame["base"] + (z0 + z1) / 2))
     _attach(project, oid, {"level": m(frame["meta"], "level")})
+
+
+def opening_profile(project: Any, opening_id: str) -> str | None:
+    """The independent profile assembly attached to an opening, if assigned."""
+    ids = [oid for oid in all_ids(project.model, metadata={f"{NS}:opening": opening_id})
+           if m(meta_of(project, oid), "category") == "opening_profile"]
+    if len(ids) > 1:
+        raise BadRequest("An opening has more than one frame profile; resolve the duplicate before editing")
+    return ids[0] if ids else None
+
+
+def _opening_section(raw: Any, to_m: float) -> tuple[list[list[float]], float, float]:
+    """Validate a *closed* SDRW section in drawing units, normalized to an inward face-width axis.
+
+    A supported profile is a single simple polygon. Nested holes, arcs and
+    self-intersections are rejected, not silently replaced by a rectangle.
+    Returned points are in metres, with s=0 at the rough-opening edge and
+    the section's depth centred on the host wall.
+    """
+    if not isinstance(raw, (list, tuple)) or not 3 <= len(raw) <= 200:
+        raise BadRequest("An opening profile needs one closed SDRW polygon with 3 to 200 vertices")
+    points: list[tuple[float, float]] = []
+    for q in raw:
+        if not isinstance(q, (list, tuple)) or len(q) != 2:
+            raise BadRequest("Every profile vertex must be [face width, depth]")
+        points.append((number(q[0], "profile x", -1e6, 1e6) * to_m,
+                       number(q[1], "profile y", -1e6, 1e6) * to_m))
+    if math.dist(points[0], points[-1]) < 1e-8:
+        points.pop()
+    if len(points) < 3 or not G.is_simple_polygon(points) or abs(G.signed_area(points)) < 1e-9:
+        raise BadRequest("The SDRW opening profile must have a non-self-intersecting closed contour with nonzero area")
+    min_s, max_s = min(p[0] for p in points), max(p[0] for p in points)
+    min_y, max_y = min(p[1] for p in points), max(p[1] for p in points)
+    width, depth = max_s - min_s, max_y - min_y
+    if not 0.005 <= width <= 0.25 or not 0.005 <= depth <= 5.0:
+        raise BadRequest("An opening profile section must be 5–250 mm across its face and 5–5000 mm deep")
+    return [[s - min_s, y - (min_y + max_y) / 2] for s, y in points], width, depth
+
+
+def _opening_profile_section(project: Any, p: Mapping[str, Any], to_m: float) -> tuple[list[list[float]], float, float, dict[str, Any]] | None:
+    """One authoritative profile section: direct sketch or existing SDRW closed-polyline entity."""
+    raw = p.get("section")
+    source: dict[str, Any] = {}
+    drawing = p.get("profile_drawing")
+    entity = p.get("profile_entity")
+    if drawing is not None or entity is not None:
+        if raw is not None or drawing is None or entity is None:
+            raise BadRequest("Choose either a drawn section or both the SDRW drawing and closed profile entity")
+        doc = project.drawing(str(drawing))
+        try:
+            shape = doc.get(str(entity))
+        except Exception as exc:
+            raise BadRequest("The specified SDRW profile entity does not exist") from exc
+        geom = shape.get("geometry") or {}
+        if shape.get("kind") != "polyline" or not geom.get("closed"):
+            raise BadRequest("An SDRW opening profile must be a closed polyline or rectangle")
+        raw = geom.get("points")
+        source = {"drawing": str(drawing), "entity": str(entity)}
+    if raw is None:
+        return None
+    section, width, depth = _opening_section(raw, to_m)
+    return section, width, depth, source
+
+
+def _section_prism(section: list[list[float]], begin: float, end: float, side: str,
+                   opening: Mapping[str, Any]) -> G.Mesh:
+    """Extrude an SDRW cross-section along one jamb/head/sill, mapping to wall-local XYZ."""
+    x0, x1, z0, z1 = opening_span(opening)
+    verts, faces = G.prism([tuple(q) for q in section], begin, end)
+    if side == "left":
+        mapped = [[x0 + s, y, t] for s, y, t in verts]
+    elif side == "right":
+        mapped = [[x1 - s, y, t] for s, y, t in verts]
+    elif side == "head":
+        mapped = [[t, y, z1 - s] for s, y, t in verts]
+    else:  # window sill
+        mapped = [[t, y, z0 + s] for s, y, t in verts]
+    return _positive_volume((mapped, faces))
+
+
+def regenerate_opening_profile(project: Any, oid: str) -> None:
+    """Rebuild a door/window profile against its *rough* opening and wall.
+
+    The panel is then independently fitted to the resulting clear opening.
+    This keeps the nominal door/window dimensions unchanged in their metadata.
+    """
+    meta = meta_of(project, oid)
+    opid = str(m(meta, "opening", ""))
+    if not alive(project, opid) or category(project, opid) not in OPENINGS:
+        raise BadRequest("The opening profile has lost its host door or window")
+    opening = meta_of(project, opid)
+    frame = wall_frame(project, str(m(opening, "host")))
+    face_width = float(m(meta, "face_width"))
+    clearance = float(m(meta, "clearance", 0.003))
+    x0, x1, z0, z1 = opening_span(opening)
+    if x1 - x0 - 2 * (face_width + clearance) < MIN_PANEL or z1 - z0 - (2 if category(project, opid) == "window" else 1) * face_width - 2 * clearance < MIN_PANEL:
+        raise BadRequest("The opening profile cannot fit within the rough opening", hint="Reduce the frame width or enlarge the door/window")
+    depth = frame["thickness"] if m(meta, "depth_mode", "host") == "host" else float(m(meta, "depth"))
+    if depth <= 0 or depth > 5.0:
+        raise BadRequest("Opening profile depth must be positive and at most 5 m")
+    stored = m(meta, "section")
+    if stored:
+        base_width = max(q[0] for q in stored)
+        base_depth = max(q[1] for q in stored) - min(q[1] for q in stored)
+        section = [[q[0] * face_width / base_width, q[1] * depth / base_depth] for q in stored]
+    else:
+        section = [[0.0, -depth / 2], [face_width, -depth / 2], [face_width, depth / 2], [0.0, depth / 2]]
+    verts: list[list[float]] = []
+    faces: list[list[int]] = []
+    segments = [("left", z0 + (face_width if category(project, opid) == "window" else 0.0), z1 - face_width),
+                ("right", z0 + (face_width if category(project, opid) == "window" else 0.0), z1 - face_width),
+                ("head", x0, x1)]
+    if category(project, opid) == "window":
+        segments.append(("sill", x0, x1))
+    for side, begin, end in segments:
+        vv, ff = _section_prism(section, begin, end, side, opening)
+        at = len(verts)
+        verts.extend([[q[0] - frame["length"] / 2, q[1], q[2] - frame["height"] / 2] for q in vv])
+        faces.extend([[i + at for i in face] for face in ff])
+    _set_mesh(project, oid, _positive_volume((verts, faces)),
+              _rot(frame["angle"], frame["mid"][0], frame["mid"][1], frame["base"] + frame["height"] / 2))
+    _attach(project, oid, {"level": m(frame["meta"], "level"), "wall": m(opening, "host"), "depth": depth})
+
+
+def add_opening_profile(project: Any, p: Mapping[str, Any], to_m: float = 0.001) -> str:
+    opid = text(p.get("opening"), "opening", 80)
+    if not alive(project, opid) or category(project, opid) not in OPENINGS:
+        raise BadRequest("Select a door or window to add an opening profile")
+    existing = opening_profile(project, opid)
+    if existing and not bool(p.get("replace", False)):
+        raise BadRequest("This opening already has a profile; select the existing frame to edit it")
+    source_section = _opening_profile_section(project, p, to_m)
+    width = source_section[1] if source_section else number(p.get("width", 50), "profile face width (mm)", 5, 250) / 1000.0
+    clearance = number(p.get("clearance", 3), "panel clearance (mm)", 0, 100) / 1000.0
+    depth_mode = "fixed" if source_section or p.get("depth") is not None else "host"
+    depth = (source_section[2] if source_section else float(number(p["depth"], "profile depth (mm)", 5, 5000) / 1000.0)) if depth_mode == "fixed" else 0.0
+    material = _choice(p.get("material", "Timber"), MATERIALS, "material")
+    opening = meta_of(project, opid)
+    oid = existing or project.model.add_box(width=1.0, depth=1.0, height=1.0,
+                                          name=text(p.get("name") or ("Door Opening Profile" if category(project, opid) == "door" else "Window Opening Profile"), "name", 80))
+    _attach(project, oid, {"category": "opening_profile", "type": "Opening Profile", "opening": opid,
+                           "wall": m(opening, "host"), "level": m(opening, "level"), "face_width": width,
+                           "clearance": clearance, "depth_mode": depth_mode, "depth": depth, "material": material,
+                           "section": source_section[0] if source_section else None,
+                           "section_source": source_section[3] if source_section else None})
+    regenerate_opening_profile(project, oid)
+    regenerate_wall(project, str(m(opening, "host")))
+    return oid
+
+
+def remove_opening_profile(project: Any, opening_id: str) -> str:
+    profile = opening_profile(project, opening_id)
+    if not profile:
+        raise NotFound("This door or window has no opening profile")
+    remove(project, profile)
+    return profile
+
+
+def refresh_opening_profiles_for_drawing(project: Any, drawing_id: str, to_m: float) -> None:
+    """Synchronize referenced SDRW sections after a drawing edit, in the same undoable transaction.
+
+    References are snapshots of the source *shape*, not its absolute drawing position.
+    Deleting or invalidating a referenced contour is rejected, preserving the last
+    valid model and the drawing. Unchanged sections cause no model recomputation.
+    """
+    for oid in all_ids(project.model):
+        meta = meta_of(project, oid)
+        if m(meta, "category") != "opening_profile":
+            continue
+        source = m(meta, "section_source")
+        if not isinstance(source, Mapping) or source.get("drawing") != drawing_id:
+            continue
+        parsed = _opening_profile_section(project, {"profile_drawing": drawing_id,
+                                                    "profile_entity": source.get("entity")}, to_m)
+        if parsed is None:
+            raise BadRequest("A referenced SDRW opening profile has no valid section")
+        section, width, depth, _ = parsed
+        if m(meta, "section") == section and m(meta, "face_width") == width and m(meta, "depth") == depth:
+            continue
+        project.touch("model")
+        _attach(project, oid, {"section": section, "face_width": width,
+                               "depth": depth, "depth_mode": "fixed"})
+        regenerate_opening_profile(project, oid)
+        opid = str(m(meta, "opening"))
+        regenerate_wall(project, str(m(meta_of(project, opid), "host")))
 
 
 # ------------------------------------------------------------------------------------------------------------------------ door panels
@@ -797,6 +1125,11 @@ def regenerate_roof(project: Any, oid: str) -> None:
         else:
             mesh = _roof_mesh(meta, base, float(m(meta, "thickness")))
         _set_mesh(project, oid, mesh)
+        # Ridge members and edge trims are independently editable SGEO solids;
+        # their placement is derived from the host roof every time it changes.
+        for dependent in element_ids(project):
+            if m(meta_of(project, dependent), "roof_host") == oid:
+                regenerate_roof_accessory(project, dependent)
     except G.GeometryError as exc:
         raise BadRequest(str(exc)) from exc
 
@@ -886,6 +1219,158 @@ def add_beam(project: Any, p: Mapping[str, Any], to_m: float) -> str:
     return oid
 
 
+# ------------------------------------------ roof-hosted members (independent SGEO objects with stable host references)
+ROOF_ACCESSORIES = {"ridge_beam": "Ridge Beam", "ridge_strap": "Ridge Strap", "roof_edge": "Roof Edge"}
+
+
+def _ridge_for_accessory(meta: Mapping[str, Any]) -> tuple[tuple[float, float], tuple[float, float]]:
+    ridge = roof_ridge(meta)
+    if ridge:
+        return ridge
+    if m(meta, "roof") == "hip":
+        centre, along, _, length, width = _rectangle([list(p) for p in m(meta, "boundary")])
+        half = (length - width) / 2
+        if half > 0.025:
+            return ((centre[0] - along[0] * half, centre[1] - along[1] * half),
+                    (centre[0] + along[0] * half, centre[1] + along[1] * half))
+    raise BadRequest("Only a roof with a real ridge can host a ridge beam or strap")
+
+
+def _segment_member(a: tuple[float, float, float], b: tuple[float, float, float], width: float, depth: float) -> G.Mesh:
+    """Closed rectangular solid following a spatial edge, rather than a 2D projected line."""
+    dx, dy, dz = (b[i] - a[i] for i in range(3))
+    length, horizontal = math.sqrt(dx * dx + dy * dy + dz * dz), math.hypot(dx, dy)
+    if length < 1e-7 or horizontal < 1e-7:
+        raise BadRequest("A roof edge segment is too short")
+    tangent = (dx / length, dy / length, dz / length)
+    across = (-dy / horizontal, dx / horizontal, 0.0)
+    section_up = (tangent[1] * across[2] - tangent[2] * across[1],
+                  tangent[2] * across[0] - tangent[0] * across[2],
+                  tangent[0] * across[1] - tangent[1] * across[0])
+    vertices, faces = _box(0.0, length, -width / 2, width / 2, -depth / 2, depth / 2)
+    mapped = [[a[i] + tangent[i] * q[0] + across[i] * q[1] + section_up[i] * q[2] for i in range(3)] for q in vertices]
+    return mapped, faces
+
+
+def _roof_edge_mesh(project: Any, roof: Mapping[str, Any], edge: int, width: float, depth: float, vertical_offset: float, lateral_offset: float) -> G.Mesh:
+    boundary = [tuple(map(float, p)) for p in m(roof, "boundary")]
+    a, b = boundary[edge], boundary[(edge + 1) % len(boundary)]
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length = math.hypot(dx, dy)
+    if length < 1e-7:
+        raise BadRequest("A roof boundary edge is too short")
+    across = (dy / length, -dx / length)
+    facets = roof_facets(project, roof)
+    thickness = float(m(roof, "thickness"))
+    ridge = roof_ridge(roof)
+    ts = [0.0, 1.0]
+    if ridge:
+        line = G.intersect_lines(a, G.sub(b, a), ridge[0], G.sub(ridge[1], ridge[0]))
+        if line and 1e-7 < line[0] < 1 - 1e-7 and -1e-7 <= line[1] <= 1 + 1e-7:
+            ts.insert(1, line[0])
+    def facet_distance_sq(poly: list[tuple[float, float]], x: float, y: float) -> float:
+        return min((lambda dx, dy: dx * dx + dy * dy)(x - (p[0] + t * vx), y - (p[1] + t * vy))
+                   for p, q in zip(poly, poly[1:] + poly[:1])
+                   for vx, vy in [(q[0] - p[0], q[1] - p[1])]
+                   for t in [max(0.0, min(1.0, ((x - p[0]) * vx + (y - p[1]) * vy) / max(1e-16, vx * vx + vy * vy)))])
+    def point(t: float) -> tuple[float, float, float]:
+        x, y = a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t
+        # Use the roof facet actually incident on this *boundary edge*.
+        # Extrapolated planes from a non-incident facet may be far below it.
+        _, plane = min(facets, key=lambda item: facet_distance_sq(item[0], x, y))
+        z = plane[0] * x + plane[1] * y + plane[2] + thickness
+        return x + across[0] * lateral_offset, y + across[1] * lateral_offset, z - depth / 2 + vertical_offset
+    verts: list[list[float]] = []
+    faces: list[list[int]] = []
+    for t0, t1 in zip(ts, ts[1:]):
+        vv, ff = _segment_member(point(t0), point(t1), width, depth)
+        at = len(verts)
+        verts.extend(vv)
+        faces.extend([[k + at for k in face] for face in ff])
+    return _positive_volume((verts, faces))
+
+
+def regenerate_roof_accessory(project: Any, oid: str) -> None:
+    meta = meta_of(project, oid)
+    roof_id = str(m(meta, "roof_host", ""))
+    if not alive(project, roof_id) or category(project, roof_id) != "roof":
+        raise BadRequest("The roof accessory has lost its host roof")
+    roof = meta_of(project, roof_id)
+    kind = m(meta, "accessory_kind")
+    if kind == "roof_edge":
+        edge = int(m(meta, "edge"))
+        boundary = m(roof, "boundary")
+        if edge < 0 or edge >= len(boundary):
+            raise BadRequest("The roof edge reference is no longer valid")
+        _set_mesh(project, oid, _roof_edge_mesh(project, roof, edge, float(m(meta, "width")), float(m(meta, "depth")), float(m(meta, "vertical_offset", 0.0)),
+                                                float(m(meta, "lateral_offset", 0.0))))
+        start, end = boundary[edge], boundary[(edge + 1) % len(boundary)]
+        vx, vy = end[0] - start[0], end[1] - start[1]
+        at = float(m(meta, "lateral_offset", 0.0)) / math.hypot(vx, vy)
+        moved = ((start[0] + vy * at, start[1] - vx * at), (end[0] + vy * at, end[1] - vx * at))
+        _attach(project, oid, {"level": m(roof, "level"), "start": list(moved[0]), "end": list(moved[1]),
+                               "top": float(m(roof, "offset", 0.0)) + roof_rise(roof)})
+        return
+    a, b = _ridge_for_accessory(roof)
+    lateral = float(m(meta, "lateral_offset", 0.0))
+    if kind == "ridge_strap":
+        _, along, across, _, _ = _rectangle([list(p) for p in m(roof, "boundary")])
+        centre = ((a[0] + b[0]) / 2 + along[0] * lateral, (a[1] + b[1]) / 2 + along[1] * lateral)
+        span = float(m(meta, "span", 0.8))
+        a, b = ((centre[0] - across[0] * span / 2, centre[1] - across[1] * span / 2),
+                (centre[0] + across[0] * span / 2, centre[1] + across[1] * span / 2))
+    else:
+        _, _, across, _, _ = _rectangle([list(p) for p in m(roof, "boundary")])
+        a, b = ((a[0] + across[0] * lateral, a[1] + across[1] * lateral),
+                (b[0] + across[0] * lateral, b[1] + across[1] * lateral))
+    top = float(m(roof, "offset", 0.0)) + roof_rise(roof) - float(m(roof, "thickness")) + float(m(meta, "vertical_offset", 0.0))
+    if kind == "ridge_strap":
+        top -= float(m(meta, "span", 0.8)) / 2 * math.tan(math.radians(float(m(roof, "pitch"))))
+    if top < 0.1:
+        raise BadRequest("The roof accessory cannot fit below the roof at this level")
+    _attach(project, oid, {"start": list(a), "end": list(b), "top": top, "level": m(roof, "level")})
+    regenerate_beam(project, oid)
+
+
+def add_roof_accessory(project: Any, p: Mapping[str, Any]) -> list[str]:
+    roof_id = text(p.get("roof"), "roof", 80)
+    if not alive(project, roof_id) or category(project, roof_id) != "roof":
+        raise BadRequest("Select a roof to add a ridge or edge component")
+    kind = _choice(p.get("kind"), tuple(ROOF_ACCESSORIES), "roof accessory")
+    roof = meta_of(project, roof_id)
+    if kind != "roof_edge":
+        _ridge_for_accessory(roof)
+    boundary = m(roof, "boundary")
+    if kind == "roof_edge":
+        requested = str(p.get("edge", "all"))
+        if requested != "all" and (not requested.isdigit() or not 1 <= int(requested) <= len(boundary)):
+            raise BadRequest(f"Choose roof edge 1 through {len(boundary)}, or all")
+        edges = list(range(len(boundary))) if requested == "all" else [int(requested) - 1]
+    else:
+        edges = [-1]
+    existing = {(m(meta_of(project, oid), "accessory_kind"), m(meta_of(project, oid), "edge")): oid for oid in element_ids(project)
+                if m(meta_of(project, oid), "roof_host") == roof_id}
+    created: list[str] = []
+    for edge in edges:
+        if (kind, edge) in existing:
+            continue
+        width = number(p.get("width", 60 if kind == "roof_edge" else 200 if kind == "ridge_beam" else 50), "width", 10, 1000) / 1000.0
+        depth = number(p.get("depth", 180 if kind == "roof_edge" else 300 if kind == "ridge_beam" else 12), "depth", 10, 1000) / 1000.0
+        material = _choice(p.get("material", "Timber" if kind != "ridge_strap" else "Steel"), BEAM_MATERIALS, "material")
+        name = ROOF_ACCESSORIES[kind] + (f" {edge + 1}" if edge >= 0 else "")
+        oid = project.model.add_box(width=1.0, depth=1.0, height=1.0, name=name)
+        _attach(project, oid, {"category": "structural", "type": ROOF_ACCESSORIES[kind], "profile": "rect", "level": m(roof, "level"),
+                               "roof_host": roof_id, "accessory_kind": kind, "edge": edge, "width": width, "depth": depth, "material": material,
+                               "span": number(p.get("span", 800), "span", 200, 3000) / 1000.0,
+                               "vertical_offset": number(p.get("vertical_offset", 0), "vertical offset", -5000, 5000) / 1000.0,
+                               "lateral_offset": number(p.get("lateral_offset", 0), "lateral offset", -5000, 5000) / 1000.0})
+        regenerate_roof_accessory(project, oid)
+        created.append(oid)
+    if not created:
+        raise BadRequest("This roof already has the selected accessory; select its existing element to edit it")
+    return created
+
+
 def is_column(meta: Mapping[str, Any]) -> bool:
     return m(meta, "category") == "structural" and m(meta, "type") == "Column"
 
@@ -944,6 +1429,11 @@ def regenerate(project: Any, oid: str) -> None:
         if host is None or not alive(project, host):
             raise BadRequest(f"This {cat} has lost its wall")
         regenerate_wall(project, host)
+    elif cat == "opening_profile":
+        regenerate_opening_profile(project, oid)
+        opening = str(m(meta, "opening"))
+        if alive(project, opening):
+            regenerate_wall(project, str(m(meta_of(project, opening), "host")))
     elif cat == "floor":
         regenerate_floor(project, oid)
     elif cat == "roof":
@@ -957,7 +1447,10 @@ def regenerate(project: Any, oid: str) -> None:
         from . import gutters as GU
         GU.regenerate_downpipe(project, oid)
     elif cat == "structural":
-        regenerate_column(project, oid) if is_column(meta) else regenerate_beam(project, oid)
+        if m(meta, "roof_host"):
+            regenerate_roof_accessory(project, oid)
+        else:
+            regenerate_column(project, oid) if is_column(meta) else regenerate_beam(project, oid)
     elif cat == "stair":
         from . import stairs as SR
         SR.regenerate(project, oid)
@@ -1032,6 +1525,12 @@ def set_property(project: Any, oid: str, key: str, value: Any) -> None:
     meta = meta_of(project, oid)
     cat = m(meta, "category")
     values: dict[str, Any] = {}
+    if key.startswith("corner_join:"):
+        if cat != "wall":
+            raise BadRequest("Corner join controls apply only to walls")
+        _, other, endpoint = (key.split(":", 2) + [""])[:3]
+        set_wall_corner_mode(project, oid, other, endpoint, value)
+        return
     if key == "color":
         if not m(meta, "material"):
             raise BadRequest("This element has no assignable material appearance")
@@ -1136,6 +1635,22 @@ def set_property(project: Any, oid: str, key: str, value: Any) -> None:
             values["operation"] = _choice(value, WINDOW_OPERATIONS, "operation")
         else:
             raise BadRequest(f"'{key}' is not an editable {cat} property")
+    elif cat == "opening_profile":
+        if key == "face_width":
+            values[key] = _mm(value, "profile face width", 5, 250)
+        elif key == "section":
+            section, width, depth = _opening_section(value, 0.001)
+            values.update({"section": section, "section_source": None, "face_width": width, "depth": depth, "depth_mode": "fixed"})
+        elif key == "clearance":
+            values[key] = _mm(value, "panel clearance", 0, 100)
+        elif key == "depth":
+            values.update({"depth": _mm(value, "profile depth", 5, 5000), "depth_mode": "fixed"})
+        elif key == "depth_mode":
+            values["depth_mode"] = _choice(value, ("host", "fixed"), "depth mode")
+        elif key == "material":
+            values["material"] = _choice(value, MATERIALS, "material")
+        else:
+            raise BadRequest(f"'{key}' is not an editable opening-profile property")
     elif cat in ("floor", "roof"):
         if key == "type" and cat == "floor":
             values["type"] = _choice(value, FLOOR_TYPES, "type")
@@ -1187,7 +1702,13 @@ def set_property(project: Any, oid: str, key: str, value: Any) -> None:
         else:
             raise BadRequest(f"'{key}' is not an editable column property")
     elif cat == "structural":
-        if key in ("profile", "size", "roll") or key.startswith("dim:"):
+        if m(meta, "roof_host") and key in ("vertical_offset", "lateral_offset"):
+            values[key] = _mm(value, key.replace("_", " "), -5000, 5000)
+        elif m(meta, "roof_host") and key == "span" and m(meta, "accessory_kind") == "ridge_strap":
+            values[key] = _mm(value, "strap span", 200, 3000)
+        elif m(meta, "roof_host") and (key in ("top", "level", "start_x", "start_y", "end_x", "end_y", "profile", "size", "roll") or key.startswith("dim:")):
+            raise BadRequest("This roof accessory follows its host geometry: adjust its offsets or edit the roof")
+        elif key in ("profile", "size", "roll") or key.startswith("dim:"):
             values.update(_beam_profile_values(meta, key, value))
         elif key in ("width", "depth") and m(meta, "profile", "rect") != "rect":
             raise BadRequest("A profile beam takes its width and depth from the profile: change the size or the dimensions of the profile")
@@ -1281,8 +1802,25 @@ def move(project: Any, oid: str, dx: float, dy: float, dz: float) -> None:
         x, y = m(meta, "point")
         _attach(project, oid, {"point": [x + dx, y + dy], "base": float(m(meta, "base", 0.0)) + dz, "top": float(m(meta, "top")) + dz})
     elif cat == "structural":
-        s, e = m(meta, "start"), m(meta, "end")
-        _attach(project, oid, {"start": [s[0] + dx, s[1] + dy], "end": [e[0] + dx, e[1] + dy], "top": float(m(meta, "top")) + dz})
+        if m(meta, "roof_host"):
+            kind, roof = m(meta, "accessory_kind"), meta_of(project, m(meta, "roof_host"))
+            if kind == "ridge_beam":
+                axis = _rectangle([list(p) for p in m(roof, "boundary")])[2]
+            elif kind == "ridge_strap":
+                axis = _rectangle([list(p) for p in m(roof, "boundary")])[1]
+            else:
+                s, e = m(meta, "start"), m(meta, "end")
+                vx, vy = e[0] - s[0], e[1] - s[1]
+                length = math.hypot(vx, vy)
+                axis = (vy / length, -vx / length)
+            lateral = dx * axis[0] + dy * axis[1]
+            if math.hypot(dx - lateral * axis[0], dy - lateral * axis[1]) > 1e-5:
+                raise BadRequest("Move this roof accessory laterally or vertically; its other position follows the host roof")
+            _attach(project, oid, {"lateral_offset": float(m(meta, "lateral_offset", 0.0)) + lateral,
+                                   "vertical_offset": float(m(meta, "vertical_offset", 0.0)) + dz})
+        else:
+            s, e = m(meta, "start"), m(meta, "end")
+            _attach(project, oid, {"start": [s[0] + dx, s[1] + dy], "end": [e[0] + dx, e[1] + dy], "top": float(m(meta, "top")) + dz})
     elif cat == "gutter":
         raise BadRequest("A gutter hangs on its roof's eave: move the roof and the gutter goes with it")
     elif cat == "downpipe":
@@ -1340,6 +1878,8 @@ def rotate(project: Any, oid: str, angle: float, centre: tuple[float, float], re
     turn survives regeneration. A door or window turns with its wall, so it is refused on its own."""
     meta = meta_of(project, oid)
     cat = m(meta, "category")
+    if m(meta, "roof_host"):
+        raise BadRequest("This accessory's orientation follows its roof boundary: rotate the roof or edit its offsets")
     if cat in OPENINGS:
         raise BadRequest(f"A {cat} turns with its wall: select the wall to rotate it")
     if cat in ("gutter", "downpipe"):
@@ -1394,19 +1934,43 @@ def remove(project: Any, oid: str) -> None:
         affected = set(m(meta, "joins") or ()) | (_touching(_wall_table(project), oid, str(m(meta, "level")), f["start"], f["end"], f["thickness"])
                                                    if f["length"] > 1e-6 else set())
         for hid in hosted(project, oid):
+            profile = opening_profile(project, hid)
+            if profile:
+                project.model.remove(profile)
             project.model.remove(hid)
         project.model.remove(oid)
+        corners = project.manifest.get("wall_corners", {})
+        if isinstance(corners, dict):
+            # A saved corner override references both participants. Once one
+            # wall is deleted, no stale preference should affect a later join.
+            for key in list(corners):
+                if oid in [side.split(":", 1)[0] for side in str(key).split("|")]:
+                    del corners[key]
         _refresh_walls(project, affected - {oid})                                   # the walls it joined are square-ended again
     elif cat in OPENINGS:
         host = m(meta, "host")
+        profile = opening_profile(project, oid)
+        if profile:
+            project.model.remove(profile)
         project.model.remove(oid)
         if host and alive(project, host):
             regenerate_wall(project, host)
+    elif cat == "opening_profile":
+        opening = str(m(meta, "opening", ""))
+        project.model.remove(oid)
+        if alive(project, opening):
+            host = str(m(meta_of(project, opening), "host", ""))
+            if alive(project, host):
+                regenerate_wall(project, host)
     else:
         from . import gutters as GU
         run = (m(meta, "roof"), GU.run_key(project, oid, meta)) if cat == "gutter" and alive(project, m(meta, "roof")) else None
         for did in GU.dependents(project, oid):                                    # a roof takes its gutters and their downpipes, a gutter its downpipes
             project.model.remove(did)
+        if cat == "roof":
+            for did in element_ids(project):
+                if m(meta_of(project, did), "roof_host") == oid:
+                    project.model.remove(did)
         project.model.remove(oid)
         if run:
             GU.settle_after_delete(project, *run)                                   # its neighbours lose the mitre and get a stop end
@@ -1438,6 +2002,7 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
     can never disagree with the 3D model."""
     out: list[dict[str, Any]] = []
     walls: dict[str, dict[str, Any]] = {}
+    corner_table: dict[str, _WallRow] | None = None
     cut_z = level_elevation(project, level_id) + CUT_HEIGHT if cut_elevation is None else float(cut_elevation)
     level_z = level_elevation(project, level_id)
     top_z = cut_z + 1.5 if top_elevation is None else float(top_elevation)
@@ -1468,6 +2033,7 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
         return True, [[[x * f, y * f] for x, y in loop] for loop in cuts]
 
     wall_cuts: dict[str, float] = {}
+    auto_room_spaces: list[dict[str, Any]] | None = None
     for oid in element_ids(project):
         obj = project.model.get(oid)
         meta = obj["metadata"]
@@ -1520,10 +2086,15 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
             cursor = 0.0
             from . import layers as LY
             layered = LY.is_layered(meta)
+            if corner_table is None:
+                corner_table = _wall_table(project)
+            corner_joins = wall_corner_controls(project, oid, f, corner_table)
             first = True
             for x0, x1 in cuts + [(fr["length"], fr["length"])]:
                 if x0 - cursor > 1e-9:
                     piece = {"id": oid, "category": "wall", "name": obj["name"], "polygon": _wall_piece(fr, cursor, x0, f), "axis": axis}
+                    if corner_joins:
+                        piece["corner_joins"] = corner_joins
                     if show_hatching and not layered:
                         from . import documentation as DOC
                         piece["hatch"] = DOC.hatch_pattern(project, m(meta, "material"))
@@ -1601,8 +2172,18 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
             from . import rooms as R
             poly = R.boundary_of(meta)
             met = R.metrics(poly)
+            valid, warning = True, ""
+            if m(meta, "auto"):
+                from . import autorooms as AR
+                if auto_room_spaces is None:
+                    auto_room_spaces = AR.spaces(AR._walls_on(project, level_id), project=project)
+                state = R.enclosure_status(project, oid, found=auto_room_spaces)
+                valid, warning = bool(state["valid"]), str(state["message"])
             out.append({"id": oid, "category": "room", "name": obj["name"], "polygon": [[q[0] * f, q[1] * f] for q in poly],
-                        "label": {"name": obj["name"], "number": str(m(meta, "number", "")), "area_m2": met["area"], "volume_m3": R.enclosure(project, oid)["volume"],
+                        "label": {"name": obj["name"], "number": str(m(meta, "number", "")),
+                                  "area_m2": met["area"] if valid else None,
+                                  "volume_m3": R.enclosure(project, oid)["volume"] if valid else None,
+                                  "valid": valid, "warning": warning,
                                   "at": [met["centre"][0] * f, met["centre"][1] * f]}})
     from . import datums as DT
     out.extend(DT.grid_item(project, oid, f) for oid in DT.grids(project))                    # grids belong to no level: every plan shows them
@@ -1924,6 +2505,20 @@ def _properties(project: Any, oid: str) -> dict[str, Any]:
             placement += [{"key": "swing", "label": "Swing side", "type": "choice", "value": "left" if int(m(meta, "swing", 1)) > 0 else "right", "choices": _choices(("left", "right"))}]
         out["groups"] = [{"title": "Placement", "rows": placement}, {"title": "Identity", "rows": [name_row]}]
         return out
+    if cat == "opening_profile":
+        opening = str(m(meta, "opening", ""))
+        host_name = project.model.get(opening)["name"] if alive(project, opening) else "(missing opening)"
+        rows = [{"key": "face_width", "label": "Face width", "type": "number", "unit": "mm", "value": round(float(m(meta, "face_width")) * 1000, 6)},
+                {"key": "clearance", "label": "Panel clearance", "type": "number", "unit": "mm", "value": round(float(m(meta, "clearance", 0.003)) * 1000, 6)},
+                {"key": "depth_mode", "label": "Profile depth follows", "type": "choice", "value": m(meta, "depth_mode", "host"), "choices": _choices(("host", "fixed"))},
+                {"key": "depth", "label": "Depth", "type": "number", "unit": "mm", "value": round(float(m(meta, "depth")) * 1000, 6)},
+                {"key": "material", "label": "Material", "type": "choice", "value": m(meta, "material"), "choices": _choices(MATERIALS)}]
+        out["groups"] = [{"title": "Opening profile", "rows": [
+            {"label": "Host opening", "type": "readonly", "value": host_name},
+            {"label": "Sides", "type": "readonly", "value": "3 (jambs/head)" if alive(project, opening) and category(project, opening) == "door" else "4 (jambs/head/sill)"},
+            *rows, volume]},
+            {"title": "Identity", "rows": [name_row]}]
+        return out
     if cat in ("floor", "roof"):
         boundary = [tuple(q) for q in m(meta, "boundary")]
         area = abs(G.signed_area(boundary))
@@ -1952,14 +2547,19 @@ def _properties(project: Any, oid: str) -> dict[str, Any]:
     if cat == "room":
         from . import rooms as R
         d = R.data(project, oid)
+        enclosure = R.enclosure_status(project, oid) if m(meta, "auto") else {"valid": True, "message": ""}
+        reliable = bool(enclosure["valid"])
+        unknown = "Unavailable — check room boundary"
         out["top"] = [{"label": "Type", "type": "readonly", "value": "Room"},
                       {"key": "number", "label": "Number", "type": "text", "value": d["number"]},
                       {"key": "level", "label": "Level", "type": "choice", "value": m(meta, "level"), "choices": _levels(project)},
                       {"key": "height", "label": "Height", "type": "number", "unit": "m", "value": d["parameter_height"]}]
-        out["groups"] = [{"title": "Geometry", "rows": [{"label": "Area", "type": "readonly", "value": f"{d['area']:.3f} m²"},
-                                                        {"label": "Perimeter", "type": "readonly", "value": f"{d['perimeter']:.3f} m"},
-                                                        {"label": "Volume", "type": "readonly", "value": f"{d['volume']:.3f} m³ ({R.basis_text(d)})"},
-                                                        {"label": "Mean height", "type": "readonly", "value": f"{d['height']:.3f} m"}]},
+        out["groups"] = [{"title": "Geometry", "rows": [
+                                                        *([{"label": "Boundary", "type": "readonly", "value": enclosure["message"]}] if not reliable else []),
+                                                        {"label": "Area", "type": "readonly", "value": f"{d['area']:.3f} m²" if reliable else unknown},
+                                                        {"label": "Perimeter", "type": "readonly", "value": f"{d['perimeter']:.3f} m" if reliable else unknown},
+                                                        {"label": "Volume", "type": "readonly", "value": f"{d['volume']:.3f} m³ ({R.basis_text(d)})" if reliable else unknown},
+                                                        {"label": "Mean height", "type": "readonly", "value": f"{d['height']:.3f} m" if reliable else unknown}]},
                          {"title": "Related elements", "rows": [{"label": "Bounding walls", "type": "readonly", "value": str(len(d["walls"]))},
                                                                 {"label": "Doors", "type": "readonly", "value": str(len(d["doors"]))},
                                                                 {"label": "Windows", "type": "readonly", "value": str(len(d["windows"]))},
@@ -2009,6 +2609,21 @@ def _properties(project: Any, oid: str) -> dict[str, Any]:
                                                         {"label": "Length", "type": "readonly", "value": f"{math.dist(s, e):.3f} m"}, *section_rows, volume]},
                          {"title": "Constraints", "rows": [{"key": "top", "label": "Top above level", "type": "number", "unit": "m", "value": float(m(meta, "top"))}]},
                          {"title": "Identity", "rows": [name_row]}]
+        roof_host = m(meta, "roof_host")
+        if roof_host:
+            roof_name = project.model.get(roof_host)["name"] if alive(project, roof_host) else "(missing roof)"
+            for row in [*out["top"], *out["groups"][0]["rows"]]:
+                if row.get("key") in ("level", "profile", "start_x", "start_y", "end_x", "end_y"):
+                    row["type"] = "readonly"
+                    row.pop("key", None)
+            controls = [{"label": "Host roof", "type": "readonly", "value": roof_name},
+                        {"key": "vertical_offset", "label": "Vertical offset", "type": "number", "unit": "mm", "value": float(m(meta, "vertical_offset", 0.0)) * 1000},
+                        {"key": "lateral_offset", "label": "Lateral offset", "type": "number", "unit": "mm", "value": float(m(meta, "lateral_offset", 0.0)) * 1000}]
+            if m(meta, "accessory_kind") == "ridge_strap":
+                controls.append({"key": "span", "label": "Strap span", "type": "number", "unit": "mm", "value": float(m(meta, "span", 0.8)) * 1000})
+            if m(meta, "accessory_kind") == "roof_edge":
+                controls.append({"label": "Host boundary edge", "type": "readonly", "value": int(m(meta, "edge", 0)) + 1})
+            out["groups"][1]["rows"] = controls
         return out
     out["top"] = [name_row]
     out["groups"] = [{"title": "Geometry", "rows": [volume]}]
@@ -2030,6 +2645,7 @@ def check(project: Any) -> list[dict[str, str]]:
     """Consistency problems in the parameters (not regulatory checks)."""
     issues: list[dict[str, str]] = []
     level_ids = {l["id"] for l in project.manifest["levels"]}
+    room_spaces: dict[str, list[dict[str, Any]]] = {}
     for oid in element_ids(project):
         obj = project.model.get(oid)
         meta = obj["metadata"]
@@ -2060,6 +2676,12 @@ def check(project: Any) -> list[dict[str, str]]:
                     length, height = wall_frame(project, host)["length"], float(m(hm, "height"))
                     if x0 < -1e-9 or x1 > length + 1e-9 or z1 > height + 1e-9 or z0 < -1e-9:
                         issues.append(issue("error", oid, f"{label} does not fit inside its wall", "hosting"))
+        elif cat == "opening_profile":
+            opening = str(m(meta, "opening", ""))
+            if not alive(project, opening) or category(project, opening) not in OPENINGS:
+                issues.append(issue("error", oid, f"{label} has lost its door/window opening", "hosting"))
+            elif str(m(meta, "wall", "")) != str(m(meta_of(project, opening), "host", "")):
+                issues.append(issue("error", oid, f"{label} no longer references its opening's wall", "consistency"))
         elif cat in ("floor", "roof"):
             if not G.is_simple_polygon([tuple(q) for q in m(meta, "boundary", [])]):
                 issues.append(issue("error", oid, f"{label} has an invalid outline", "parameters"))
@@ -2101,8 +2723,27 @@ def check(project: Any) -> list[dict[str, str]]:
             except BadRequest as exc:
                 issues.append(issue("error", oid, f"{label}: {exc.message}", "parameters"))
             else:
-                if m(meta, "open"):
-                    issues.append(issue("warning", oid, f"{label} is no longer enclosed by walls: its outline is as it was when the walls last closed it", "consistency"))
-                elif not R.bounding_walls(project, oid):
-                    issues.append(issue("warning", oid, f"{label} has no wall along any of its edges, so it is not enclosed", "consistency"))
+                from . import autorooms as AR
+                room_level = str(m(meta, "level"))
+                if room_level not in room_spaces:
+                    room_spaces[room_level] = AR.spaces(AR._walls_on(project, room_level), project=project)
+                enclosure = R.enclosure_status(project, oid, found=room_spaces[room_level])
+                if not enclosure["valid"]:
+                    issues.append(issue("warning", oid, f"{label}: {enclosure['message']}", "consistency"))
+    # The third illustrated corner is deliberately point-contact, unlike a
+    # watertight miter or either face-to-face through/butt termination. Keep
+    # it available as an explicit design choice and report that consequence.
+    for key, mode in (project.manifest.get("wall_corners") or {}).items():
+        if mode != "stepped_open":
+            continue
+        try:
+            a, b = key.split("|", 1)
+            oid, endpoint = a.rsplit(":", 1)
+            other, _ = b.rsplit(":", 1)
+            active = alive(project, oid) and any(c["endpoint"] == endpoint and c["other"] == other and c["mode"] == "stepped_open"
+                                                for c in wall_corner_controls(project, oid))
+        except (ValueError, BadRequest):
+            active = False
+        if active:
+            issues.append(issue("warning", oid, "The stepped/open wall corner intentionally meets at a single point, not a continuous joint; choose a through or miter connection for a watertight corner", "geometry"))
     return issues

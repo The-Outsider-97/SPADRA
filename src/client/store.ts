@@ -1,8 +1,10 @@
 /** Application state and every call to the server. Views render from this and never talk to the network themselves. */
 import { createClient, ApiError, type Client } from "../../../tools/web/src/api.js";
-import { toast } from "../../../tools/web/src/ui.js";
+import { openDialog, openMenu, promptDialog, toast, type MenuEntry } from "../../../tools/web/src/ui.js";
+import { h } from "../../../tools/web/src/dom.js";
 import { Emitter } from "../../../tools/web/src/util.js";
 import { oneLine, present, presentUnexpected } from "./errors.js";
+import { importDialog } from "./interchange.js";
 import type {
   AnimationData, Interop, PoseData, InspectResult, Job, LinkTarget, SyncStatus,
   Bootstrap, CheckResult, CommandResult, DrawingData, Level, OpenRef, ProjectSummary, Properties, ScheduleData, Scene, TreeNode, TreeResponse,
@@ -88,6 +90,100 @@ export class Store {
   family: { id: string; name: string } | null = null;
   /** Opens a dialog the server names (a Project Browser row or a link in Properties). Set by the shell, which owns the dialogs. */
   openDialog: ((name: string, ref?: string) => void) | null = null;
+  /** A sketch started from a door/window context menu. The closed SDRW contour remains editable in its drawing and
+   *  is associated with the opening after the user's next closed polyline command succeeds. */
+  private pendingOpeningSketch: { opening: string; drawing: string; replace: boolean } | null = null;
+
+  /** Model-element commands are shared by the 2D and 3D viewports and Project Browser. The menu belongs to the clicked
+   *  element, not whichever model item happened to be previously selected. The server owns every geometry operation. */
+  openModelContextMenu(id: string, category: string, anchor: HTMLElement): void {
+    const entries: MenuEntry[] = [{ label: "Select element", icon: "select", run: () => { void this.select({ kind: "model", ids: [id] }); } }];
+    if (category === "roof") {
+      entries.push("separator",
+        { label: "Add Ridge Beam", icon: "beam", run: () => { void this.run("model.add_roof_accessory", { roof: id, kind: "ridge_beam" }); } },
+        { label: "Add Ridge Strap", icon: "beam", run: () => { void this.run("model.add_roof_accessory", { roof: id, kind: "ridge_strap" }); } },
+        { label: "Add Roof Edge", icon: "line", run: () => { void (async () => {
+          const value = await promptDialog({ title: "Add roof edge", label: "Boundary edge number (1, 2, …) or all", value: "all", confirmLabel: "Add roof edge",
+            validate: (s) => /^(all|[1-9]\d*)$/i.test(s.trim()) ? null : "Enter an edge number or all." });
+          if (value !== null) await this.run("model.add_roof_accessory", { roof: id, kind: "roof_edge", edge: value.trim().toLowerCase() });
+        })(); } });
+    }
+    if (category === "door" || category === "window") {
+      entries.push("separator", { label: "Add Opening Profile", icon: "rectangle", run: () => { void this.standardOpeningProfile(id, category); } },
+      { label: "Use Existing SDRW Profile…", icon: "polyline", run: () => { void this.chooseOpeningDrawingProfile(id); } },
+      { label: "Sketch New SDRW Profile…", icon: "polyline", run: () => { void this.startOpeningProfileSketch(id); } },
+      { label: "Import SDRW Profile into Drawing…", icon: "folder", run: () => { void this.importOpeningDrawingProfile(); } },
+      "separator",
+      { label: "Replace Opening Profile…", icon: "rectangle", run: () => { void this.standardOpeningProfile(id, category, true); } },
+      { label: "Replace Opening Profile from SDRW…", icon: "polyline", run: () => { void this.chooseOpeningDrawingProfile(id, true); } },
+      { label: "Sketch Replacement Profile…", icon: "polyline", run: () => { void this.startOpeningProfileSketch(id, true); } },
+      { label: "Remove Opening Profile", icon: "close", run: () => { void this.run("model.remove_opening_profile", { opening: id }); } });
+    }
+    openMenu(anchor, entries, { label: `${category} actions` });
+  }
+
+  private async standardOpeningProfile(opening: string, category: string, replace = false): Promise<void> {
+    const width = await promptDialog({ title: `${replace ? "Replace" : "Add"} ${category} opening profile`, label: "Profile face width (mm)", value: "50",
+      confirmLabel: replace ? "Replace profile" : "Add profile",
+      validate: (s) => Number.isFinite(Number(s)) && Number(s) >= 5 && Number(s) <= 250 ? null : "Enter 5–250 mm." });
+    if (width !== null) await this.run("model.add_opening_profile", { opening, width: Number(width), replace });
+  }
+
+  private async importOpeningDrawingProfile(): Promise<void> {
+    const drawing = flatten(this.tree).find((n) => n.open?.id === this.tab?.ref.id && n.open?.kind === "drawing")
+      ?? flatten(this.tree).find((n) => n.open?.kind === "drawing");
+    if (!drawing?.open) { toast("Create an SDRW drawing before importing a profile.", { kind: "info" }); return; }
+    await this.openTab(drawing.open, drawing.label);
+    toast("Import the SDRW file into this drawing, then right-click the opening and choose Use Existing SDRW Profile.", { kind: "info", timeoutMs: 9000 });
+    await importDialog(this, "drawing");
+  }
+
+  /** Enumerate actual closed SDRW polygons, not arbitrary drawing objects: the model command validates the source again. */
+  private async openingProfileSources(): Promise<Array<{ drawing: string; entity: string; label: string }>> {
+    const sources: Array<{ drawing: string; entity: string; label: string }> = [];
+    for (const node of flatten(this.tree)) {
+      if (node.open?.kind !== "drawing") continue;
+      // A referenced drawing may be temporarily unavailable. Keep usable views visible rather than rejecting the entire chooser.
+      let data: DrawingData | null = null;
+      try { data = this.drawing?.view.id === node.open.id ? this.drawing : await this.api.get<DrawingData>(`/drawing/${node.open.id}`); }
+      catch { continue; }
+      if (!data) continue;
+      for (const entity of data.entities) {
+        const geometry = entity.geometry;
+        if (entity.kind !== "polyline" || geometry["closed"] !== true || !Array.isArray(geometry["points"]) || geometry["points"].length < 3) continue;
+        sources.push({ drawing: node.open.id, entity: entity.id, label: `${node.label} · ${entity.layer} · ${entity.id.slice(0, 8)}` });
+      }
+    }
+    return sources;
+  }
+
+  private async chooseOpeningDrawingProfile(opening: string, replace = false): Promise<void> {
+    const sources = await this.openingProfileSources();
+    if (!sources.length) {
+      toast("No closed SDRW polyline is available. Draw a closed profile first, or use Sketch New SDRW Profile.", { kind: "info" });
+      return;
+    }
+    const options = sources.map((source, index) => h("option", { value: String(index), text: source.label }));
+    const select = h("select", { attrs: { "aria-label": "Closed SDRW profile" } }, ...options);
+    const body = h("div", {}, h("label", { text: "Use a closed profile from a drawing" }), select,
+      h("p", { class: "muted", text: "The model stores the drawing and entity reference; edit the source contour to retain a reusable, editable profile." }));
+    const choice = await openDialog<number>({ title: replace ? "Replace opening profile" : "Use SDRW opening profile", size: "normal", body,
+      actions: [{ label: replace ? "Replace profile" : "Add profile", kind: "primary", run: () => Number(select.value) }] }).result;
+    if (choice === null) return;
+    const source = sources[choice];
+    if (source) await this.run("model.add_opening_profile", { opening, profile_drawing: source.drawing, profile_entity: source.entity, replace });
+  }
+
+  private async startOpeningProfileSketch(opening: string, replace = false): Promise<void> {
+    const drawings = flatten(this.tree).filter((n) => n.open?.kind === "drawing");
+    if (!drawings.length) { toast("Create an SDRW drawing before sketching an opening profile.", { kind: "info" }); return; }
+    const selected = drawings.find((n) => n.open?.id === this.tab?.ref.id) ?? drawings[0];
+    if (!selected?.open) return;
+    this.pendingOpeningSketch = { opening, drawing: selected.open.id, replace };
+    await this.openTab(selected.open, selected.label);
+    this.setTool("polyline");
+    toast("Sketch the profile cross-section in SDRW, then press C to close it. Escape cancels the association.", { kind: "info", timeoutMs: 9000 });
+  }
 
   /** Called once at start-up: ask the server what exists. */
   async init(): Promise<void> {
@@ -344,7 +440,12 @@ export class Store {
     await this.activate(next);
   }
 
-  setTool(tool: Tool): void { this.tool = tool; this.changed.emit(); }
+  setTool(tool: Tool): void {
+    if (this.pendingOpeningSketch && this.tool === "polyline" && tool !== "polyline") this.pendingOpeningSketch = null;
+    this.tool = tool;
+    this.changed.emit();
+  }
+  cancelPendingOpeningSketch(): void { this.pendingOpeningSketch = null; }
   setOrbitSelection(on: boolean): void { this.orbitSelection = on; writeFlag("spadra.orbitSelection", on); this.changed.emit(); }
   setSnapGrid(on: boolean): void { this.snapGrid = on; writeFlag("spadra.snapGrid", on); this.changed.emit(); }
 
@@ -369,6 +470,15 @@ export class Store {
       this.selection = left.length ? { ...this.selection, ids: left } : null;
     }
     await this.refresh();
+    if (op === "draw.polyline" && params["closed"] === true && this.pendingOpeningSketch?.drawing === params["drawing"] && typeof out.result["id"] === "string") {
+      const pending = this.pendingOpeningSketch;
+      this.pendingOpeningSketch = null;
+      if (!pending) return out;
+      const linked = await this.run("model.add_opening_profile", {
+        opening: pending.opening, profile_drawing: pending.drawing, profile_entity: out.result["id"], replace: pending.replace,
+      });
+      if (linked) toast("Opening profile attached to the selected door or window.", { kind: "ok" });
+    }
     return out;
   }
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import copy
 import hashlib
 import io
 import tempfile
@@ -443,7 +444,8 @@ def _map_levels(project: Any, source: SGEODocument, warnings: list[str]) -> tupl
 def _merge_native(project: Any, source: SGEODocument, label: str) -> tuple[dict[str, int], list[str], list[str], list[str]]:
     """Bring in an SGEO file. Objects keep their ids where those are free (a clash gets a new id and every reference is rewritten), their
     parameters, hierarchy, transforms, family instances and metadata; the levels they stand on are matched by name. A file that did not come from
-    SPADRA is brought in as plain imported objects. Materials, textures and animation are not brought in, and the report says so."""
+    SPADRA is brought in as plain imported objects. SPADRA material appearance colors are retained; foreign SGEO material/texture assets and
+    animation are not brought in, and the report says so."""
     model = project.model
     lost: list[str] = []
     warnings: list[str] = []
@@ -455,11 +457,43 @@ def _merge_native(project: Any, source: SGEODocument, label: str) -> tuple[dict[
         assumptions.append("The file did not come from SPADRA, so its objects are plain imported objects")
     else:
         levels, created = _map_levels(project, source, warnings)
+        origin = source._model.metadata.get(SCENE_KEY) or {}
+        supplied = origin.get("material_colors") or {}
+        if not isinstance(supplied, Mapping):
+            raise BadRequest("Native SGEO material appearance colors must be a map")
+        colors = {mat: E.color(value) for mat, value in supplied.items() if isinstance(mat, str) and mat}
+        palette = project.manifest.setdefault("material_colors", {})
+        conflicts = {mat: shade for mat, shade in colors.items() if shade and mat in palette and palette[mat] != shade}
+        for mat, shade in colors.items():
+            if shade and mat not in palette:
+                palette[mat] = shade
+        locally_preserved = 0
         taken = set(_page_ids(model))
         mapped_ids = {oid: (oid if oid not in taken else new_id()) for oid in ids}
         renamed = sum(1 for o, n in mapped_ids.items() if o != n)
         if renamed:
             warnings.append(f"{renamed} object id(s) were already in use here and were given new ids; references between them were rewritten")
+        # Corner policies belong to wall *endpoints*, not simply to the pair
+        # of wall names. Their priority is stored relative to the sorted key;
+        # reassigning an id can reverse that order on a second native import.
+        saved_corners = origin.get("wall_corners") or {}
+        if not isinstance(saved_corners, Mapping):
+            raise BadRequest("Native SGEO wall corner connection settings must be a map")
+        remapped_corners: dict[str, str] = {}
+        ignored_corners = 0
+        for key, mode in saved_corners.items():
+            parts = str(key).split("|") if isinstance(key, str) else []
+            roles = [part.rsplit(":", 1) for part in parts]
+            if len(roles) != 2 or parts != sorted(parts) or any(len(part) != 2 or part[0] not in mapped_ids or part[1] not in ("start", "end") for part in roles) or \
+               mode not in ("stepped_open", "first_through", "second_through"):
+                ignored_corners += 1
+                continue
+            prior = sorted(parts)
+            updated = sorted(f"{mapped_ids[oid]}:{end}" for oid, end in roles)
+            remapped_mode = str(mode)
+            if mode in ("first_through", "second_through") and mapped_ids[prior[0].rsplit(":", 1)[0]] != updated[0].rsplit(":", 1)[0]:
+                remapped_mode = "second_through" if mode == "first_through" else "first_through"
+            remapped_corners["|".join(updated)] = remapped_mode
         families: dict[str, str] = {}
         have = {f["id"]: f for f in model.families()}
         for fam in source.families():
@@ -478,6 +512,23 @@ def _merge_native(project: Any, source: SGEODocument, label: str) -> tuple[dict[
         for oid in _hierarchy_order(source, ids):
             obj = source.get(oid)
             meta = dict(obj.get("metadata") or {})
+            # A shared color on import must not unexpectedly recolor existing
+            # destination elements. In case of a conflicting project palette,
+            # preserve the imported appearance as local element/layer overrides.
+            layers = meta.get(f"{E.NS}:layers")
+            if isinstance(layers, list) and layers:
+                layers = copy.deepcopy(layers)
+                for layer in layers:
+                    shade = conflicts.get(layer.get("material")) if isinstance(layer, Mapping) else None
+                    if shade and not layer.get("color"):
+                        layer["color"] = shade
+                        locally_preserved += 1
+                meta[f"{E.NS}:layers"] = layers
+            else:
+                shade = conflicts.get(meta.get(f"{E.NS}:material"))
+                if shade and not meta.get(f"{E.NS}:color"):
+                    meta[f"{E.NS}:color"] = shade
+                    locally_preserved += 1
             for key in LEVEL_KEYS:
                 v = meta.get(f"{E.NS}:{key}")
                 if v is not None:
@@ -486,10 +537,32 @@ def _merge_native(project: Any, source: SGEODocument, label: str) -> tuple[dict[
                         meta.pop(f"{E.NS}:{key}")
                     else:
                         meta[f"{E.NS}:{key}"] = levels[v]
-            if meta.get(f"{E.NS}:host") in mapped_ids:
-                meta[f"{E.NS}:host"] = mapped_ids[meta[f"{E.NS}:host"]]
+            # Re-map every SPADRA model-owned element reference, not only the
+            # legacy door/window host and wall join. A second import otherwise
+            # attaches new profiles/accessories to the *first* copy of a model.
+            for key in ("host", "opening", "wall", "roof_host", "roof", "gutter"):
+                scoped = f"{E.NS}:{key}"
+                ref = meta.get(scoped)
+                if isinstance(ref, str) and ref in mapped_ids:
+                    meta[scoped] = mapped_ids[ref]
             if meta.get(f"{E.NS}:joins"):
                 meta[f"{E.NS}:joins"] = [mapped_ids[j] for j in meta[f"{E.NS}:joins"] if j in mapped_ids]
+            for key in ("support", "room_walls"):
+                scoped = f"{E.NS}:{key}"
+                if isinstance(meta.get(scoped), list):
+                    meta[scoped] = [mapped_ids.get(j, j) for j in meta[scoped]]
+            for layer in meta.get(f"{E.NS}:layers") or []:
+                if isinstance(layer, dict) and isinstance(layer.get("opening_ids"), list):
+                    layer["opening_ids"] = [mapped_ids.get(j, j) for j in layer["opening_ids"]]
+            top_to = meta.get(f"{E.NS}:top_to")
+            if isinstance(top_to, Mapping):
+                top_to = dict(top_to)
+                field = "roof" if top_to.get("kind") == "roof" else "level" if top_to.get("kind") == "level" else None
+                if field == "roof" and top_to.get(field) in mapped_ids:
+                    top_to[field] = mapped_ids[top_to[field]]
+                elif field == "level" and top_to.get(field) in levels:
+                    top_to[field] = levels[top_to[field]]
+                meta[f"{E.NS}:top_to"] = top_to
             options = {"name": obj.get("name") or label, "parent": mapped_ids.get(obj.get("parent")), "transform": obj["transform"], "metadata": meta, "object_id": mapped_ids[oid]}
             if "family_id" in obj:
                 model.instantiate(families[obj["family_id"]], obj.get("parameters") or {}, **options)
@@ -499,8 +572,14 @@ def _merge_native(project: Any, source: SGEODocument, label: str) -> tuple[dict[
                 model.add_object(obj["geometry"], **options)
         if missing_level:
             warnings.append(f"{missing_level} level reference(s) pointed at levels the file does not describe and were removed; those elements need a level")
+        project.manifest.setdefault("wall_corners", {}).update(remapped_corners)
+        if ignored_corners:
+            warnings.append(f"{ignored_corners} invalid or unresolved wall corner setting(s) could not be imported")
+        if conflicts:
+            warnings.append(f"{len(conflicts)} shared material appearance conflict(s): existing project colors kept; {locally_preserved} imported element/layer appearance override(s) added")
         E.regenerate_all(project)                              # the elements' geometry is rebuilt from the parameters they arrived with, here, against this project's levels
-        counts = {"objects": len(ids), "with_geometry": sum(1 for i in ids if source.get(i).get("geometry")), "levels_created": created, "families": len(families)}
+        counts = {"objects": len(ids), "with_geometry": sum(1 for i in ids if source.get(i).get("geometry")), "levels_created": created, "families": len(families),
+                  "material_colors": len(colors), "local_color_overrides": locally_preserved, "wall_corners": len(remapped_corners)}
     if source.materials():
         lost.append(f"{len(source.materials())} material(s) and their textures")
     if any(k.startswith("slai.animation") for k in source._model.metadata):
@@ -527,7 +606,9 @@ def export_model(project: Any, fmt: str, object_ids: list[str] | None = None) ->
             if object_ids is not None:
                 raise BadRequest("A native SGEO export is the whole model; select nothing to export it")
             scene = model.snapshot()
-            scene.metadata[SCENE_KEY] = {"name": project.name, "unit": project.manifest["unit"], "levels": [dict(l) for l in project.manifest["levels"]]}
+            scene.metadata[SCENE_KEY] = {"name": project.name, "unit": project.manifest["unit"], "levels": [dict(l) for l in project.manifest["levels"]],
+                                         "material_colors": dict(project.manifest.get("material_colors", {})),
+                                         "wall_corners": dict(project.manifest.get("wall_corners", {}))}
             doc = SGEODocument.from_scene(scene, copy=False)
             data = doc.dumps()
             adapter: dict[str, Any] = {}
@@ -554,6 +635,9 @@ def export_model(project: Any, fmt: str, object_ids: list[str] | None = None) ->
                 cat = str(E.m(model.get(i)["metadata"], "category", "group"))
                 nogeo[cat] = nogeo.get(cat, 0) + 1
         unsupported = [f"{n} {cat}(s) carry no geometry (levels, rooms and grids are data, not surfaces) and are not in the {fmt.upper()} file" for cat, n in sorted(nogeo.items())]
+        if (project.manifest.get("material_colors") or any(E.m(model.get(i)["metadata"], "color") or
+                any(row.get("color") for row in E.m(model.get(i)["metadata"], "layers", []) or []) for i in ids)):
+            unsupported.append(f"SPADRA shared and local material appearance overrides are not mapped to {fmt.upper()} surfaces")
     return data, conversion_report(direction="export", fmt=fmt, name=project.name, size=len(data), sha256=hashlib.sha256(data).hexdigest(), target="file", adapter=adapter,
                                    converted=counts, unsupported=unsupported, lost=adapter.get("dropped") if fmt != "sgeo" else [])
 

@@ -9,7 +9,7 @@ import {
   pointInPolygon, polygonDistance, polygonsBounds, rotateAbout, roundAngle, segments, snapPoint, textBox, wallBand, type Grip, type Snap,
 } from "./geom2d.js";
 import { cssColor, withAlpha } from "./palette.js";
-import { cutStyle, cutWeight, hatchFill, patternPath, levelLabel, markArrows, markLabel, projectionAt, snapPolygons, visibleLevels } from "./projection.js";
+import { cutStyle, cutWeight, hatchFill, patternPath, levelLabel, markArrows, markLabel, itemContains, projectionAt, snapPolygons, visibleLevels } from "./projection.js";
 import type { Store, Tool } from "./store.js";
 import type { DrawingData, Entity, GridLabel, HatchSpec, PlanSymbol, PlanWall, ProjItem, Projection, Pt, RoomLabel, SectionMark } from "./types.js";
 
@@ -29,6 +29,7 @@ type Edit =
   | { kind: "end"; id: string; end: "a" | "b"; axis: { a: Pt; b: Pt; thickness: number }; from: Pt; now: Pt; moved: boolean }
   | { kind: "outline"; id: string; points: Pt[]; corner: number; edge: number; from: Pt; now: Pt; moved: boolean }
   | { kind: "ridge"; id: string; segment: [Pt, Pt]; across: Pt; offset: number; from: Pt; now: Pt; moved: boolean }
+  | { kind: "ridge_projection"; id: string; transverseDot: number; offsetMm: number; from: Pt; now: Pt; moved: boolean }
   | { kind: "turn"; ids: string[]; centre: Pt; from: Pt; now: Pt; raw: Pt; fine: boolean; moved: boolean }
   | { kind: "mark"; id: string; part: "a" | "b" | "body"; from: Pt; now: Pt; moved: boolean };
 /** A handle drawn on the selection: where it is, its look, and the edit that dragging it starts. */
@@ -52,6 +53,7 @@ export class DrawingView {
   private snap: Snap | null = null;
   private pts: Pt[] = [];                   // points placed so far by the active tool
   private hover: string | null = null;
+  private pickCycle: { at: Pt; ids: string[]; index: number } | null = null;
   private box: { from: Pt; to: Pt } | null = null;
   private drag: { start: Pt; now: Pt; moved: boolean; ids: string[] } | null = null;
   private pan: { x: number; y: number; centre: Pt } | null = null;
@@ -75,6 +77,9 @@ export class DrawingView {
   private lengthBox: { x: number; y: number; w: number; h: number; id: string; a: Pt; b: Pt } | null = null;      // the length of the selected wall, where it can be clicked and typed over
   private readonly wallHud: HTMLElement;
   private readonly layerControls = h("div", { class: "layer-controls", attrs: { "aria-label": "Add a layer to the selected element" } });
+  private readonly junctionControls = h("div", { class: "junction-controls", attrs: { "aria-label": "Wall corner connection controls" } });
+  private openedJoin: { wall: string; other: string; endpoint: "start" | "end" } | null = null;
+  private readonly contextAnchor = h("span", { class: "model-context-anchor", attrs: { "aria-hidden": "true" } });
   private readonly wallFields: { height: HTMLInputElement; thickness: HTMLInputElement };
   private readonly formHuds = new Map<Tool, { el: HTMLElement; sync: () => void }>();      // the option strips of the Extrude, Void and Sweep tools
 
@@ -95,7 +100,7 @@ export class DrawingView {
     this.wallFields = { height, thickness };
     this.wallHud = h("div", { class: "wall-hud", hidden: true }, heightLabel, thicknessLabel, h("span", { class: "muted", text: "Click for each corner. Shift keeps it straight. Double-click or Esc ends." }));
     this.buildFormHuds();
-    this.el = h("div", { class: "canvas-wrap" }, this.canvas, this.layerControls, this.wallHud, ...[...this.formHuds.values()].map((x) => x.el), this.hint);
+    this.el = h("div", { class: "canvas-wrap" }, this.canvas, this.layerControls, this.junctionControls, this.contextAnchor, this.wallHud, ...[...this.formHuds.values()].map((x) => x.el), this.hint);
     new ResizeObserver(() => this.resize()).observe(this.el);
     this.bind();
   }
@@ -250,7 +255,11 @@ export class DrawingView {
   // ---------------------------------------------------------------------------------------------------------- interaction
   private bind(): void {
     const c = this.canvas;
-    c.addEventListener("contextmenu", (e) => { e.preventDefault(); if (this.pts.length) { this.finish(false); } });
+    c.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      if (this.pts.length) { this.finish(false); return; }
+      if (this.store.tool === "select") this.openModelContextMenu(e);
+    });
     c.addEventListener("wheel", (e) => {
       e.preventDefault();
       const [x, y] = this.local(e);
@@ -263,7 +272,13 @@ export class DrawingView {
     c.addEventListener("pointerdown", (e) => this.down(e));
     c.addEventListener("pointermove", (e) => this.move(e));
     c.addEventListener("pointerup", (e) => { void this.up(e); });
-    c.addEventListener("pointerleave", () => { this.cursor = null; this.snap = null; this.hover = null; this.draw(); });
+    c.addEventListener("pointerleave", (e) => {
+      // The corner button is a sibling overlay. Preserve the hover join
+      // while the pointer crosses from the canvas onto its actionable icon.
+      if (e.relatedTarget instanceof Node && this.junctionControls.contains(e.relatedTarget)) return;
+      this.cursor = null; this.snap = null; this.hover = null; this.draw();
+    });
+    this.el.addEventListener("pointerleave", () => { this.cursor = null; this.snap = null; this.hover = null; this.draw(); });
     c.addEventListener("dblclick", (e) => {
       if (this.store.tool === "polyline" || this.store.tool === "floor" || this.store.tool === "room" || this.store.tool === "extrude" || this.store.tool === "void" || this.store.tool === "sweep") { void this.finish(true); return; }
       if (this.store.tool === "wall") { void this.finish(false); return; }
@@ -299,8 +314,14 @@ export class DrawingView {
       this.draw();
       return;
     }
-    const hit = this.pick(raw);
     const selected = this.allSelectedIds();
+    // Once an obscured wall/foundation has been selected through cycling,
+    // dragging that same shared footprint must move the selected element,
+    // not revert to whichever surface is first in the hit stack.
+    const picked = this.pick(raw);
+    const hit = this.store.selection?.kind === "model"
+      ? this.modelCandidates(raw).find((candidate) => selected.includes(candidate.id))?.id ?? picked
+      : picked;
     // Dragging a selected element moves the whole selection; dragging one that is not selected moves just that one, as in Revit.
     if (hit && !e.shiftKey && !this.data.projection) { this.drag = { start: world, now: world, moved: false, ids: selected.includes(hit) ? selected : [hit] }; return; }      // a section is a picture of the model, not a place to move it
     if (hit) { this.drag = null; return; }
@@ -392,7 +413,7 @@ export class DrawingView {
       }
       this.box = null;
       this.markSel = null;
-      const hit = this.pick(this.toWorld(x, y));
+      const hit = e.shiftKey ? this.pick(this.toWorld(x, y)) : this.pickForSelection(this.toWorld(x, y));
       const current = this.allSelectedIds();
       let ids: string[] = hit ? [hit] : [];
       // Shift adds to the selection, but only things of the same kind: drawing entities and model walls are edited by different commands.
@@ -603,7 +624,15 @@ export class DrawingView {
   /** The handles of the selection: the ends of a selected wall, a turn handle above anything that can be turned, or the ends of a selected section line. */
   private handles(): Handle[] {
     const data = this.data;
-    if (!data || data.projection || this.store.tool !== "select") return [];
+    if (!data || this.store.tool !== "select") return [];
+    if (data.projection) {
+      const selected = this.store.selection;
+      if (selected?.kind !== "model" || selected.ids.length !== 1) return [];
+      const ridge = data.projection.items.find((item) => item.id === selected.ids[0] && item.category === "roof")?.ridge_handle;
+      if (!ridge || Math.abs(ridge.transverse_dot) < 0.2) return [];
+      return [{ at: ridge.point, shape: "square", edit: (): Edit => ({ kind: "ridge_projection", id: selected.ids[0] as string,
+        transverseDot: ridge.transverse_dot, offsetMm: ridge.offset_mm, from: ridge.point, now: ridge.point, moved: false }) }];
+    }
     if (this.markSel) {
       const m = data.section_marks.find((x) => x.id === this.markSel);
       return m ? (["a", "b"] as const).map((part) => ({ at: m[part], shape: "square" as const, edit: (): Edit => ({ kind: "mark", id: m.id, part, from: m[part], now: m[part], moved: false }) })) : [];
@@ -659,6 +688,14 @@ export class DrawingView {
       const delta = (ed.now[0] - ed.from[0]) * ed.across[0] + (ed.now[1] - ed.from[1]) * ed.across[1];
       const mmPerUnit = this.store.unit === "m" ? 1000 : this.store.unit === "cm" ? 10 : 1;
       await this.store.run("model.set_property", { id: ed.id, key: "ridge_offset", value: (ed.offset + delta) * mmPerUnit });
+    } else if (ed.kind === "ridge_projection") {
+      // Screen-world X is along the section/elevation's horizontal axis.
+      // Divide by the roof-transverse projection so the value is the same
+      // actual horizontal ridge offset in any oblique valid view.
+      const mmPerUnit = MM_PER[this.store.unit];
+      const deltaMm = (ed.now[0] - ed.from[0]) * mmPerUnit / ed.transverseDot;
+      if (Number.isFinite(deltaMm) && Math.abs(deltaMm) > 1e-7)
+        await this.store.run("model.set_property", { id: ed.id, key: "ridge_offset", value: ed.offsetMm + deltaMm });
     } else if (ed.kind === "turn") {
       const degrees = (this.turnAngle(ed) * 180) / Math.PI;
       if (Math.abs(degrees) > 1e-9) await this.store.run("model.rotate", { ids: ed.ids, centre: ed.centre, angle: degrees });
@@ -730,6 +767,10 @@ export class DrawingView {
 
   /** Finish the active tool: a polyline is committed here (Enter, double click, or C to close it); other tools just stop. */
   private async finish(commit: boolean, closed = false): Promise<void> {
+    // An in-place SDRW opening-profile sketch is explicitly cancelled when
+    // Escape or right-click abandons its polyline. The shared Store owns the
+    // pending target; never allow a later unrelated polyline to attach there.
+    if (!commit && this.store.tool === "polyline") this.store.cancelPendingOpeningSketch();
     const view = this.data?.view.id;
     if (commit && this.store.tool === "polyline" && view) {
       const pts = this.pts.filter((p, i) => i === 0 || dist(p, this.pts[i - 1] ?? p) > 1e-9);
@@ -827,6 +868,68 @@ export class DrawingView {
     return sel?.kind === "drawing" && sel.view === this.data?.view.id ? sel.ids : [];
   }
 
+  /** Every model object genuinely under the pointer, including those hidden by another cut.
+   *  A wall should be selectable even when a foundation's cut fills the same area.
+   *  The original projection depth order is otherwise preserved. */
+  private modelCandidates(world: Pt): Array<{ id: string; category: string }> {
+    const tolerance = PICK_PX / this.scale;
+    const projection = this.data?.projection;
+    if (projection) {
+      const preferred = projectionAt(projection, world, tolerance);
+      const hits = projection.items.filter((item) => itemContains(item, world, tolerance)).reverse();
+      const ordered = [...(preferred ? hits.filter((item) => item.id === preferred) : []), ...hits.filter((item) => item.id !== preferred)];
+      const candidates = ordered.filter((item, index) => ordered.findIndex((a) => a.id === item.id) === index)
+        .map((item) => ({ id: item.id, category: item.category }));
+      // At coincident wall/foundation cuts a foundation must not always mask
+      // the wall. Repeated clicks still expose the foundation for editing.
+      const foundation = candidates.findIndex((item) => item.category === "foundation");
+      const wall = candidates.findIndex((item) => item.category === "wall");
+      if (wall >= 0 && foundation >= 0 && foundation < wall) {
+        const [w] = candidates.splice(wall, 1);
+        if (w) candidates.splice(foundation, 0, w);
+      }
+      return candidates;
+    }
+    const priority = (category: string): number => ({ door: 0, window: 0, wall: 1, structural: 2, column: 2, foundation: 3,
+      gutter: 4, downpipe: 4, floor: 5, roof: 5, room: 6 } as Record<string, number>)[category] ?? 4;
+    const seen = new Set<string>();
+    return (this.data?.model ?? []).map((item, index) => ({ item, index, distance: this.modelDistance(item, world) }))
+      .filter((hit) => hit.distance <= tolerance)
+      .sort((a, b) => priority(a.item.category) - priority(b.item.category) || a.distance - b.distance || b.index - a.index)
+      .filter(({ item }) => { if (seen.has(item.id)) return false; seen.add(item.id); return true; })
+      .map((hit) => ({ id: hit.item.id, category: hit.item.category }));
+  }
+
+  /** Repeated clicks at one place cycle through coincident model elements.
+   *  A small pointer displacement or a different overlap stack starts anew. */
+  private pickForSelection(world: Pt): string | null {
+    const candidates = this.modelCandidates(world);
+    const ids = candidates.map((item) => item.id);
+    if (!ids.length) { this.pickCycle = null; return this.pick(world); }
+    // Drawing annotations retain precedence over model geometry.
+    const drawing = this.pickEntity(world);
+    if (drawing) { this.pickCycle = null; return drawing; }
+    const old = this.pickCycle;
+    const same = old && dist(this.toScreen(old.at), this.toScreen(world)) < PICK_PX * 1.5 &&
+      old.ids.length === ids.length && old.ids.every((id, index) => id === ids[index]);
+    const index = same ? ((old.index + 1) % ids.length) : 0;
+    this.pickCycle = { at: world, ids, index };
+    this.canvas.title = ids.length > 1 ? `${ids.length} overlapping elements. Click again to select the next one.` : "";
+    return ids[index] ?? null;
+  }
+
+  /** Right-click actions are owned by the shared model menu, in both 2D and 3D. */
+  private openModelContextMenu(event: MouseEvent): void {
+    const [x, y] = this.local(event);
+    const candidates = this.modelCandidates(this.toWorld(x, y));
+    const chosen = this.store.selection?.kind === "model" ? candidates.find((item) => this.store.selection?.kind === "model" && this.store.selection.ids.includes(item.id)) : undefined;
+    const target = [chosen, ...candidates].find((item) => item && (item.category === "roof" || item.category === "door" || item.category === "window"));
+    if (!target) return;
+    this.contextAnchor.style.left = `${x}px`;
+    this.contextAnchor.style.top = `${y}px`;
+    this.store.openModelContextMenu(target.id, target.category, this.contextAnchor);
+  }
+
   private pick(world: Pt): string | null {
     let best: string | null = null;
     let bestD = PICK_PX / this.scale;
@@ -836,17 +939,8 @@ export class DrawingView {
       if (d <= bestD) { best = e.id; bestD = d; }
     }
     if (best) return best;                              // drawn entities win over the wall they sit on
-    if (this.data?.projection) return projectionAt(this.data.projection, world, PICK_PX / this.scale);
-    for (const w of this.data?.model ?? []) {
-      if (w.category === "floor" || w.category === "roof" || w.category === "room") continue;
-      const d = this.modelDistance(w, world);
-      if (d <= bestD) { best = w.id; bestD = d; }
-    }
-    if (best) return best;
-    for (const w of this.data?.model ?? []) if ((w.category === "floor" || w.category === "roof") && polygonDistance(world, w.polygon) === 0) best = w.id;
-    if (best) return best;
-    for (const w of this.data?.model ?? []) if (w.category === "room" && polygonDistance(world, w.polygon) === 0) best = w.id;       // a room is picked inside its outline, after the floor
-    if (best) return best;
+    const model = this.modelCandidates(world);
+    if (model.length) return model[0]?.id ?? null;
     for (const e of this.entities()) if (this.visible(e) && e.kind === "hatch" && entityDistance(e, world) === 0) best = e.id;   // a hatch is picked by its fill, last
     return best;
   }
@@ -920,6 +1014,7 @@ export class DrawingView {
     this.paintGrips(k);
     this.paintHandles(k);
     this.syncLayerControls();
+    this.syncJunctionControls();
     this.paintPreview(k);
     if (this.drag?.moved) this.paintMoveGhost(k);
     if (this.edit?.moved) this.paintEditGhost(this.edit, k);
@@ -933,20 +1028,33 @@ export class DrawingView {
     ctx.restore();
   }
 
-  /** The '+' is anchored to the selected wall's two actual faces or to a selected slab on the drawing. */
+  /** The '+' is anchored to the selected host in plans, sections and elevations.
+   *  The projected roof/floor buttons are derived from real cut/surface geometry,
+   *  not from a 2D plan polygon that projections do not have. */
   private syncLayerControls(): void {
     this.layerControls.replaceChildren();
-    if (this.store.tool !== "select" || this.data?.projection || this.store.selection?.kind !== "model" || this.store.selection.ids.length !== 1) return;
+    if (this.store.tool !== "select" || this.store.selection?.kind !== "model" || this.store.selection.ids.length !== 1) return;
     const id = this.store.selection.ids[0];
-    const element = this.data?.model.find((item) => item.id === id && (item.category === "wall" || item.category === "floor" || item.category === "roof"));
-    if (!element) return;
+    const projection = this.data?.projection;
+    const projected = projection?.items.find((item) => item.id === id && (item.category === "floor" || item.category === "roof"));
+    const element = projection ? null : this.data?.model.find((item) => item.id === id && (item.category === "wall" || item.category === "floor" || item.category === "roof"));
+    if (!projected && !element) return;
     let points: Array<{ at: Pt; side: string }> = [];
-    if (element.category === "wall" && element.axis) {
+    if (projected) {
+      const vertices: Pt[] = [...projected.cut.flat(), ...projected.tris.flatMap((tri) =>
+        [[tri[0] ?? 0, tri[1] ?? 0], [tri[2] ?? 0, tri[3] ?? 0], [tri[4] ?? 0, tri[5] ?? 0]] as Pt[]),
+      ...projected.edges.flatMap((edge) => [[edge[0] ?? 0, edge[1] ?? 0], [edge[2] ?? 0, edge[3] ?? 0]] as Pt[])];
+      const bounds = vertices.length ? polygonsBounds([vertices]) : null;
+      if (!bounds) return;
+      const center = (bounds[0][0] + bounds[1][0]) / 2, pad = 24 / this.scale;
+      const labels = projected.category === "roof" ? ["outside", "inside"] : ["top", "bottom"];
+      points = [{ side: labels[0] as string, at: [center, bounds[1][1] + pad] }, { side: labels[1] as string, at: [center, bounds[0][1] - pad] }];
+    } else if (element?.category === "wall" && element.axis) {
       const { a, b, thickness } = element.axis;
       const length = Math.max(dist(a, b), 1e-9), nx = -(b[1] - a[1]) / length, ny = (b[0] - a[0]) / length;
       const center = mid(a, b), offset = thickness / 2 + 20 / this.scale;
       points = [{ side: "left", at: [center[0] + nx * offset, center[1] + ny * offset] }, { side: "right", at: [center[0] - nx * offset, center[1] - ny * offset] }];
-    } else {
+    } else if (element) {
       const bounds = polygonsBounds([element.polygon]);
       if (!bounds) return;
       const center: Pt = [(bounds[0][0] + bounds[1][0]) / 2, (bounds[0][1] + bounds[1][1]) / 2];
@@ -955,10 +1063,68 @@ export class DrawingView {
     }
     for (const { at, side } of points) {
       const [x, y] = this.toScreen(at);
-      const button = h("button", { class: "layer-plus", type: "button", text: "+", attrs: { title: `Add layer on ${side} side`, "aria-label": `Add ${side} ${element.category} layer` },
-        on: { click: (event) => { event.stopPropagation(); void addLayerDialog(this.store, id as string, element.category as "wall" | "floor" | "roof", side); } } });
+      const kind = (projected?.category ?? element?.category) as "wall" | "floor" | "roof";
+      const button = h("button", { class: "layer-plus", type: "button", text: "+", attrs: { title: `Add layer on ${side} side`, "aria-label": `Add ${side} ${kind} layer` },
+        on: { click: (event) => { event.stopPropagation(); void addLayerDialog(this.store, id as string, kind, side); } } });
       button.style.left = `${x}px`; button.style.top = `${y}px`;
       this.layerControls.appendChild(button);
+    }
+  }
+
+  /** Four real wall-corner join policies, offered at the corner itself on hover or selection. */
+  private syncJunctionControls(): void {
+    // Canvas redraws must not discard keyboard focus from a corner control.
+    const focused = this.junctionControls.contains(document.activeElement) ? document.activeElement?.getAttribute("data-focus-key") : null;
+    this.junctionControls.replaceChildren();
+    if (this.store.tool !== "select" || this.data?.projection) return;
+    const chosen = this.store.selection?.kind === "model" ? this.store.selection.ids : [];
+    const seen = new Set<string>();
+    const choices = [
+      { mode: "through_selected", label: "1 · Selected wall passes through", description: "The selected wall continues; the other terminates." },
+      { mode: "through_other", label: "2 · Other wall passes through", description: "The connecting wall continues; the selected one terminates." },
+      { mode: "stepped_open", label: "3 · Stepped / point-contact (open corner)", description: "An intentionally open, point-contact corner; this is not watertight." },
+      { mode: "miter", label: "4 · Mitered corner", description: "Both walls terminate along a diagonal cut." },
+    ] as const;
+    for (const wall of this.data?.model ?? []) {
+      if (wall.category !== "wall" || (wall.id !== this.hover && !chosen.includes(wall.id))) continue;
+      for (const join of wall.corner_joins ?? []) {
+        const key = `${wall.id}:${join.endpoint}:${join.other}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const [x, y] = this.toScreen(join.point);
+        const active = this.openedJoin?.wall === wall.id && this.openedJoin.other === join.other && this.openedJoin.endpoint === join.endpoint;
+        const icon = h("button", { type: "button", class: "junction-button", text: "⋈", attrs: {
+          title: `Wall corner join (${join.mode.replaceAll("_", " ")}). Select one of four connection types.`,
+          "aria-label": `Edit wall corner connection at ${join.endpoint}`,
+          "aria-expanded": active ? "true" : "false", "data-focus-key": `join:${key}` },
+        on: { click: (e) => { e.stopPropagation(); this.openedJoin = active ? null : { wall: wall.id, other: join.other, endpoint: join.endpoint }; this.draw(); } } });
+        icon.style.left = `${x}px`; icon.style.top = `${y}px`;
+        this.junctionControls.appendChild(icon);
+        if (!active) continue;
+        const menu = h("div", { class: "junction-menu", attrs: { role: "group", "aria-label": "Wall corner connection type" } });
+        for (const option of choices) {
+          const selected = join.mode === option.mode;
+          const button = h("button", { type: "button", class: `junction-option${selected ? " active" : ""}`,
+            text: option.label, attrs: { title: option.description, "aria-pressed": selected ? "true" : "false", "data-focus-key": `join:${key}:${option.mode}` },
+            on: { click: (e) => {
+              e.stopPropagation();
+              void (async () => {
+                const changed = await this.store.run("model.set_property", { id: wall.id, key: `corner_join:${join.other}:${join.endpoint}`, value: option.mode });
+                if (changed) { this.openedJoin = null; this.draw(); }
+              })();
+            }, keydown: (e) => {
+              if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); this.openedJoin = null; this.draw(); }
+            } } });
+          menu.appendChild(button);
+        }
+        menu.style.left = `${Math.max(6, Math.min(this.width - 238, x + 18))}px`;
+        menu.style.top = `${Math.max(6, Math.min(this.height - 152, y - 14))}px`;
+        this.junctionControls.appendChild(menu);
+      }
+    }
+    if (focused) {
+      const next = [...this.junctionControls.querySelectorAll<HTMLElement>("[data-focus-key]")].find((node) => node.getAttribute("data-focus-key") === focused);
+      next?.focus({ preventScroll: true });
     }
   }
 
@@ -1057,6 +1223,11 @@ export class DrawingView {
       const a: Pt = [ed.segment[0][0] + ed.across[0] * d, ed.segment[0][1] + ed.across[1] * d];
       const b: Pt = [ed.segment[1][0] + ed.across[0] * d, ed.segment[1][1] + ed.across[1] * d];
       ctx.beginPath(); this.line(a, b); ctx.stroke(); this.paintBadge(`Ridge ${((ed.offset + d) * (this.store.unit === "m" ? 1000 : this.store.unit === "cm" ? 10 : 1)).toFixed(0)} mm`, ed.now, k);
+    } else if (ed.kind === "ridge_projection") {
+      const at: Pt = [ed.now[0], ed.from[1]];
+      ctx.beginPath(); this.line(ed.from, at); ctx.stroke();
+      const targetMm = ed.offsetMm + (ed.now[0] - ed.from[0]) * MM_PER[this.store.unit] / ed.transverseDot;
+      this.paintBadge(`Ridge ${targetMm.toFixed(0)} mm (height fixed)`, at, k);
     } else if (ed.kind === "turn") {
       const angle = this.turnAngle(ed);
       for (const w of this.data?.model ?? []) if (ed.ids.includes(w.id)) { ctx.beginPath(); this.tracePolygon(w.polygon.map((p) => rotateAbout(p, ed.centre, angle))); ctx.fill(); ctx.stroke(); }
@@ -1357,8 +1528,15 @@ export class DrawingView {
     const font = getComputedStyle(document.documentElement).getPropertyValue("--font-ui") || "sans-serif";
     ctx.fillStyle = selected ? color : k.ink; ctx.textAlign = "center"; ctx.textBaseline = "middle";
     ctx.font = `bold 13px ${font}`; ctx.fillText(label.name, x, y - 9);
-    ctx.font = `12px ${font}`; ctx.fillText(`${label.number} · ${label.area_m2.toLocaleString(undefined, { maximumFractionDigits: 2 })} m²`, x, y + 8);
-    if (label.volume_m3 !== undefined) ctx.fillText(`${label.volume_m3.toLocaleString(undefined, { maximumFractionDigits: 2 })} m³`, x, y + 22);       // the enclosed volume, beside the area
+    if (label.valid === false || label.area_m2 === null || !Number.isFinite(label.area_m2)) {
+      ctx.fillStyle = selected ? color : k.accent;
+      ctx.font = `bold 12px ${font}`;
+      ctx.fillText(`${label.number} · Check room boundary`, x, y + 8);
+    } else {
+      ctx.font = `12px ${font}`; ctx.fillText(`${label.number} · ${label.area_m2.toLocaleString(undefined, { maximumFractionDigits: 2 })} m²`, x, y + 8);
+      if (label.volume_m3 !== undefined && label.volume_m3 !== null && Number.isFinite(label.volume_m3))
+        ctx.fillText(`${label.volume_m3.toLocaleString(undefined, { maximumFractionDigits: 2 })} m³`, x, y + 22);
+    }
     ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
   }
 

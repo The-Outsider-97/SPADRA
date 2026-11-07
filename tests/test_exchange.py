@@ -231,6 +231,110 @@ class NativeSgeo(Source):
         out = target.execute("model.import", {"format": "sgeo", "data": b64(data), "name": "origin.sgeo"})["result"]
         return data, report, target, out
 
+    def test_shared_colors_and_local_layer_overrides_survive_native_sgeo_export_import(self):
+        self.p.execute("model.set_property", {"id": self.wall, "key": "material_color", "value": "#102030"})
+        layer = self.p.execute("model.add_layer", {"id": self.floor, "material": "Concrete", "thickness": 80})["result"]["layer"]
+        self.p.execute("model.set_property", {"id": self.floor, "key": f"layer:{layer}:color", "value": "#ABCDEF"})
+        raw, report, target, out = self.roundtrip()
+        self.assertEqual(report["status"], "complete")
+        self.assertEqual(target.manifest["material_colors"]["Masonry"], "#102030")
+        self.assertEqual(target.model.get(self.floor)["metadata"][f"{NS}:layers"][-1]["color"], "#ABCDEF")
+        src_colors = next(o["layer_colors"] for o in self.p.scene_data()["objects"] if o["id"] == self.floor)
+        dst_colors = next(o["layer_colors"] for o in target.scene_data()["objects"] if o["id"] == self.floor)
+        self.assertEqual(src_colors, dst_colors)
+        self.assertEqual(SGEODocument.from_bytes(raw)._model.metadata[IO.SCENE_KEY]["material_colors"]["Masonry"], "#102030")
+
+    def test_reimport_remaps_opening_profiles_roof_accessories_attachments_and_selected_layer_cuts(self):
+        from applications.SPADRA import elements as E
+
+        run = lambda op, **kw: self.p.execute(op, kw)["result"]
+        original_profile = run("model.add_opening_profile", opening=self.door)["id"]
+        # The selected-cut list is a nested element-reference collection.
+        run("model.add_layer", id=self.wall, material="Plasterboard", thickness=45,
+            openings="selected", opening_ids=[self.door])
+        attached = run("model.add_wall", start=[0, 2000], end=[0, 4000],
+                       level=self.l1, thickness=200, height=3.2)["id"]
+        roof = run("model.add_roof", points=[[0, 0], [8000, 0], [8000, 6000], [0, 6000]],
+                   level=self.p.manifest["levels"][1]["id"], roof="gable", pitch=30)["id"]
+        run("model.attach_wall", ids=[attached, roof], to="roof")
+        accessory = run("model.add_roof_accessory", roof=roof, kind="ridge_beam")["id"]
+        raw, _ = IO.export_model(self.p, "sgeo")
+        target = Project.create("Reimport")
+        target.execute("model.import", {"format": "sgeo", "data": b64(raw)})
+        previous = set(E_ids(target))
+        target.execute("model.import", {"format": "sgeo", "data": b64(raw)})
+        added = set(E_ids(target)) - previous
+        self.assertEqual(len(added), len(E_ids(self.p)))
+        names = {i: target.model.get(i)["metadata"] for i in added}
+        second_door = next(i for i, m in names.items() if m.get(f"{NS}:category") == "door" and m.get(f"{NS}:host") != self.wall2)
+        second_profile = next(i for i, m in names.items() if m.get(f"{NS}:category") == "opening_profile")
+        self.assertNotEqual(second_profile, original_profile)
+        self.assertEqual(E.m(names[second_profile], "opening"), second_door)
+        self.assertEqual(E.opening_profile(target, second_door), second_profile)
+        second_wall = E.m(names[second_door], "host")
+        layers = E.m(names[second_wall], "layers")
+        self.assertIn(second_door, layers[-1]["opening_ids"])
+        self.assertNotIn(self.door, layers[-1]["opening_ids"])
+        second_roof = next(i for i, m in names.items() if m.get(f"{NS}:category") == "roof")
+        second_accessory = next(i for i, m in names.items() if m.get(f"{NS}:roof_host"))
+        self.assertNotEqual(second_accessory, accessory)
+        self.assertEqual(E.m(names[second_accessory], "roof_host"), second_roof)
+        second_attached = next(i for i, m in names.items() if m.get(f"{NS}:top_to"))
+        self.assertEqual(E.m(names[second_attached], "top_to")["roof"], second_roof)
+        self.assertTrue(target.check()["ok"], target.check()["issues"])
+
+    def test_native_wall_corner_policies_keep_wall_priorities_across_reimport(self):
+        from applications.SPADRA import elements as E
+
+        # The source already includes two joined walls. Corner priority is
+        # relative to the sorted canonical key; new UUIDs can reverse it.
+        E.set_wall_corner_mode(self.p, self.wall, self.wall2, "end", "through_selected")
+        stored = dict(self.p.manifest["wall_corners"])
+        self.assertEqual(len(stored), 1)
+        raw, _ = IO.export_model(self.p, "sgeo")
+        self.assertEqual(SGEODocument.from_bytes(raw)._model.metadata[IO.SCENE_KEY]["wall_corners"], stored)
+        target = Project.create("Target")
+        target.execute("model.import", {"format": "sgeo", "data": b64(raw)})
+        self.assertEqual(target.manifest["wall_corners"], stored)
+        before = set(E_ids(target))
+        target.execute("model.import", {"format": "sgeo", "data": b64(raw)})
+        added = set(E_ids(target)) - before
+        matched = {tuple(E.m(E.meta_of(target, oid), "start")): oid for oid in added
+                   if E.m(E.meta_of(target, oid), "category") == "wall"}
+        first = matched[tuple(E.m(E.meta_of(self.p, self.wall), "start"))]
+        second = matched[tuple(E.m(E.meta_of(self.p, self.wall2), "start"))]
+        # Two imported copies occupy the same coordinates, so contextual
+        # controls intentionally suppress ambiguous multi-wall junctions.
+        # Check that the persisted policy still names the correct wall as
+        # through regardless of the newly assigned IDs' lexical order.
+        copied_key = E._corner_key(first, False, second, True)
+        self.assertEqual(E._corner_mode_for(target.manifest["wall_corners"], copied_key, first), "through_selected")
+        self.assertEqual(E._corner_mode_for(target.manifest["wall_corners"], copied_key, second), "through_other")
+        self.assertEqual(len(target.manifest["wall_corners"]), 2)
+
+    def test_import_color_conflicts_preserve_existing_palette_and_source_appearance(self):
+        self.p.execute("model.set_property", {"id": self.wall, "key": "material_color", "value": "#AA3344"})
+        self.p.execute("model.set_property", {"id": self.floor, "key": "material_color", "value": "#445566"})
+        self.p.execute("model.add_layer", {"id": self.floor, "material": "Timber", "thickness": 50})
+        target = Project.create("Destination")
+        target.manifest["material_colors"] = {"Masonry": "#114477", "Concrete": "#778899"}
+        _, _, target, imported = self.roundtrip(target)
+        self.assertEqual(target.manifest["material_colors"]["Masonry"], "#114477")
+        self.assertEqual(target.model.get(self.wall)["metadata"][f"{NS}:color"], "#AA3344")
+        self.assertEqual(next(o["color"] for o in target.scene_data()["objects"] if o["id"] == self.wall), "#AA3344")
+        self.assertEqual(target.manifest["material_colors"]["Concrete"], "#778899")
+        src_floor = next(o["layer_colors"] for o in self.p.scene_data()["objects"] if o["id"] == self.floor)
+        dst_floor = next(o["layer_colors"] for o in target.scene_data()["objects"] if o["id"] == self.floor)
+        self.assertEqual(src_floor, dst_floor)  # imported appearance preserved without recoloring destination materials
+        self.assertTrue(any("appearance conflict" in msg for msg in imported["report"]["warnings"]))
+
+    def test_mesh_export_does_not_claim_to_preserve_unmapped_spadra_appearance_colors(self):
+        self.p.execute("model.set_property", {"id": self.wall, "key": "material_color", "value": "#345678"})
+        data, report = IO.export_model(self.p, "obj")
+        self.assertTrue(data)
+        self.assertEqual(report["status"], "partial")
+        self.assertTrue(any("material appearance overrides" in note for note in report["unsupported"]))
+
     def test_the_export_is_complete_and_says_what_it_carried(self):
         data, report = IO.export_model(self.p, "sgeo")
         self.assertEqual((report["status"], report["accuracy_class"], report["lost"], report["unsupported"]), ("complete", "exact", [], []))
