@@ -36,6 +36,16 @@ class Base(unittest.TestCase):
 
 
 class Closing(Base):
+    def test_adding_and_undoing_a_wall_layer_recomputes_room_area(self):
+        walls = self.box(0, 0, 5000, 4000, 200)
+        (rid,) = self.rooms()
+        before = R.metrics(self.outline(rid))["area"]
+        self.p.execute("model.add_layer", {"id": walls[0], "material": "Plasterboard", "thickness": 50, "side": "left"})
+        self.assertEqual(self.rooms(), [rid])
+        self.assertLess(R.metrics(self.outline(rid))["area"], before)
+        self.p.undo()
+        self.assertAlmostEqual(R.metrics(self.outline(rid))["area"], before)
+
     def test_no_room_until_the_last_wall_closes_the_space(self):
         self.wall((0, 0), (5000, 0)); self.wall((5000, 0), (5000, 4000)); self.wall((5000, 4000), (0, 4000))
         self.assertEqual(self.rooms(), [])

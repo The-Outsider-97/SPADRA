@@ -87,6 +87,23 @@ function rowEl(store, p, row) {
     if (row.type === "readonly" || !row.key)
         return h("div", { class: "prop-row" }, h("span", { class: "label", text: row.label }), h("div", { class: "value", text: String(row.value) }));
     const key = row.key;
+    if (row.type === "color") {
+        const initial = String(row.value || row.text || "#BFBFC7");
+        const valid = /^#[0-9A-F]{6}$/i;
+        const picker = h("input", { id, type: "color", value: initial, attrs: { "aria-label": `Choose ${row.label}` } });
+        const hex = h("input", { type: "text", value: String(row.value || ""), placeholder: "Default", attrs: { maxlength: 7, "aria-label": `${row.label} HEX color` } });
+        picker.addEventListener("change", () => { hex.value = picker.value.toUpperCase(); void commit(store, p, key, hex.value, "text"); });
+        hex.addEventListener("change", () => {
+            const value = hex.value.trim().toUpperCase();
+            if (value && !valid.test(value)) {
+                toast("Use a six-digit HEX color, for example #4477AA.", { kind: "error" });
+                return;
+            }
+            void commit(store, p, key, value, "text");
+        });
+        const reset = h("button", { type: "button", class: "iconbtn remove", attrs: { title: `Reset ${row.label}`, "aria-label": `Reset ${row.label}` }, on: { click: () => void commit(store, p, key, "", "text") } }, glyph("close"));
+        return h("div", { class: "prop-row" }, label, h("div", { class: "with-unit" }, picker, hex, reset));
+    }
     if (row.type === "sfb")
         return sfbRow(store, p, row, id, label);
     if (row.type === "catalog")
