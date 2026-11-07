@@ -375,9 +375,14 @@ export class SheetView {
             const l = w.label;
             if (l && "number" in l) {
                 g.appendChild(label([l.at[0], l.at[1] + 1.8 * unitsPerMm], 3 * unitsPerMm, l.name, 700));
-                g.appendChild(label([l.at[0], l.at[1] - 2.2 * unitsPerMm], 2.4 * unitsPerMm, `${l.number} · ${l.area_m2.toLocaleString(undefined, { maximumFractionDigits: 2 })} m²`));
-                if (l.volume_m3 !== undefined)
-                    g.appendChild(label([l.at[0], l.at[1] - 5.6 * unitsPerMm], 2.4 * unitsPerMm, `${l.volume_m3.toLocaleString(undefined, { maximumFractionDigits: 2 })} m³`));
+                if (l.valid === false || l.area_m2 == null) {
+                    g.appendChild(label([l.at[0], l.at[1] - 2.2 * unitsPerMm], 2.4 * unitsPerMm, `${l.number} · Check room boundary`));
+                }
+                else {
+                    g.appendChild(label([l.at[0], l.at[1] - 2.2 * unitsPerMm], 2.4 * unitsPerMm, `${l.number} · ${l.area_m2.toLocaleString(undefined, { maximumFractionDigits: 2 })} m²`));
+                    if (l.volume_m3 != null)
+                        g.appendChild(label([l.at[0], l.at[1] - 5.6 * unitsPerMm], 2.4 * unitsPerMm, `${l.volume_m3.toLocaleString(undefined, { maximumFractionDigits: 2 })} m³`));
+                }
             }
         }
         else if (w.category === "generic") {
@@ -439,7 +444,7 @@ export class SheetView {
                 g.appendChild(s("text", { attrs: { transform: `translate(${gm.x} ${top - r - r * 0.4}) scale(1 -1)`, "font-size": r * 1.1, "text-anchor": "middle", "font-weight": 700, fill: "var(--ink)", stroke: "none" }, text: gm.name }));
             }
         for (const it of pr.items) { // far to near, so nearer elements cover what they hide
-            g.appendChild(s("path", { attrs: { d: surfacePath(it, same), fill: "var(--paper)", "fill-rule": "nonzero", stroke: "none" }, data: { element: it.id } }));
+            g.appendChild(s("path", { attrs: { d: surfacePath(it, same), fill: it.appearance_color || "var(--paper)", "fill-rule": "nonzero", stroke: "none" }, data: { element: it.id } }));
             g.appendChild(s("path", { attrs: { d: edgePath(it, same), fill: "none", "stroke-width": 0.5, ...ink } }));
             if (it.opening) { // opening direction: solid toward the viewer, dashed away from it, per panel
                 for (const part of [it.opening, ...(it.opening.more ?? [])]) {
@@ -455,24 +460,24 @@ export class SheetView {
                 it.cut.forEach((loop, n) => {
                     const style = cutStyle(it.cut_material?.[n] ?? "Concrete");
                     const d = `M${loop.map((p) => `${p[0]} ${p[1]}`).join("L")}Z`;
-                    g.appendChild(s("path", { attrs: { d, fill: "var(--ink)", "fill-opacity": style.alpha, stroke: "none" }, data: { cut: it.id } }));
+                    g.appendChild(s("path", { attrs: { d, fill: it.cut_colors?.[n] || "var(--ink)", "fill-opacity": style.alpha, stroke: "none" }, data: { cut: it.id } }));
                     if (style.hatch !== "none")
                         g.appendChild(s("path", { attrs: { d: hatchPath(loop, style.hatch, 2.2 * unitsPerMm), fill: "none", "stroke-width": 0.35, ...ink } }));
                     g.appendChild(s("path", { attrs: { d, fill: "none", "stroke-width": 0.9, ...ink } }));
                 });
                 continue;
             }
-            if (it.cut_hatches) { // layers: each loop is one layer, filled and hatched by its own material
+            if (it.cut_layers) { // layers: each loop is one layer, filled and hatched by its own material
                 it.cut.forEach((loop, n) => {
                     const hatch = it.cut_hatches?.[n] ?? null;
-                    g.appendChild(s("path", { attrs: { d: cutPath({ ...it, cut: [loop] }, same), fill: "var(--ink)", "fill-opacity": cutWeight(it.category) * hatchFill(hatch), "stroke-width": 0.7, ...ink }, data: { cut: it.id, layer: it.cut_layers?.[n]?.layer ?? "" } }));
+                    g.appendChild(s("path", { attrs: { d: cutPath({ ...it, cut: [loop] }, same), fill: it.cut_colors?.[n] || "var(--ink)", "fill-opacity": cutWeight(it.category) * hatchFill(hatch), "stroke-width": 0.7, ...ink }, data: { cut: it.id, layer: it.cut_layers?.[n]?.layer ?? "" } }));
                     const d = hatch ? patternPath([loop], hatch, hatch.spacing_mm * unitsPerMm) : "";
                     if (d)
                         g.appendChild(s("path", { attrs: { d, fill: "none", "stroke-width": 0.3, ...ink } }));
                 });
                 continue;
             }
-            g.appendChild(s("path", { attrs: { d: cutPath(it, same), fill: "var(--ink)", "fill-opacity": cutWeight(it.category) * hatchFill(it.cut_hatch), "fill-rule": "evenodd", "stroke-width": 0.9, ...ink }, data: { cut: it.id } }));
+            g.appendChild(s("path", { attrs: { d: cutPath(it, same), fill: it.appearance_color || "var(--ink)", "fill-opacity": cutWeight(it.category) * hatchFill(it.cut_hatch), "fill-rule": "evenodd", "stroke-width": 0.9, ...ink }, data: { cut: it.id } }));
             if (it.cut_hatch) { // the material's hatch, spaced on paper
                 const d = patternPath(it.cut, it.cut_hatch, it.cut_hatch.spacing_mm * unitsPerMm);
                 if (d)
@@ -497,9 +502,15 @@ export class SheetView {
      *  neighbouring faces leave no hairline gaps; the sides marked as boundaries or creases get the ink line. */
     solidFaces(g, solid) {
         const grey = (shade) => { const v = Math.round(255 * Math.min(1, Math.max(0, shade))); return `rgb(${v},${v},${v})`; };
+        const materialShade = (rgb, shade) => {
+            if (rgb === undefined || rgb < 0)
+                return grey(shade); // older sheet data / no assigned appearance
+            const intensity = Math.min(1, Math.max(0, shade));
+            return `rgb(${Math.round(((rgb >>> 16) & 255) * intensity)},${Math.round(((rgb >>> 8) & 255) * intensity)},${Math.round((rgb & 255) * intensity)})`;
+        };
         for (const f of solid.faces) {
-            const [x1, y1, x2, y2, x3, y3, shade, edges] = f;
-            const fill = grey(shade);
+            const [x1, y1, x2, y2, x3, y3, shade, edges, rgb] = f;
+            const fill = materialShade(rgb, shade);
             g.appendChild(s("path", { attrs: { d: `M${x1} ${y1}L${x2} ${y2}L${x3} ${y3}Z`, fill, stroke: fill, "stroke-width": 0.6, "vector-effect": "non-scaling-stroke", "stroke-linejoin": "round" } }));
             const pts = [[x1, y1], [x2, y2], [x3, y3]];
             let d = "";

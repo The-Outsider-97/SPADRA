@@ -175,6 +175,43 @@ def bounding_walls(project: Any, oid: str) -> list[dict[str, Any]]:
     return out
 
 
+def enclosure_status(project: Any, oid: str, *, found: Sequence[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Check whether a room has one unambiguous current wall-defined space.
+
+    The room's recorded polygon is not sufficient proof of enclosure. A plan
+    may have a gap at a partition and silently combine two previously separate
+    rooms.  Compare with the independently reconstructed wall graph rather
+    than accepting that stale polygon as a valid spatial measurement.
+
+    ``found`` permits callers checking many rooms on one level to supply one
+    precomputed spatial graph rather than rebuilding it per room.
+    """
+    meta = E.meta_of(project, oid)
+    if E.m(meta, "open"):
+        if E.m(meta, "room_issue") == "merged":
+            return {"valid": False, "state": "ambiguous", "message": "The separate rooms are not enclosed individually: one merged enclosure spans them; inspect the partition before trusting areas or volumes"}
+        return {"valid": False, "state": "open", "message": "The room is no longer enclosed by its walls; its saved boundary is retained pending repair"}
+    if found is None:
+        from . import autorooms as AR
+        found = AR.spaces(AR._walls_on(project, E.m(meta, "level")), project=project)
+    from . import autorooms as AR
+    outline = boundary_of(meta)
+    room_area = metrics(outline)["area"]
+    overlaps = []
+    for i, space in enumerate(found):
+        overlap = AR._overlap_area(outline, space["outline"])
+        if overlap > max(1e-8, room_area * 0.05):
+            overlaps.append((i, overlap, metrics(space["outline"])["area"]))
+    if not overlaps:
+        return {"valid": False, "state": "unbounded", "message": "The room is not enclosed: no current wall-defined space sufficiently overlaps its outline"}
+    if len(overlaps) > 1:
+        return {"valid": False, "state": "ambiguous", "message": "The room boundary covers multiple wall-defined spaces; check partitions before using its area or volume"}
+    _, shared, space_area = overlaps[0]
+    if E.m(meta, "auto") and (shared / room_area < 0.98 or shared / space_area < 0.98):
+        return {"valid": False, "state": "stale", "message": "The automatic room is not enclosed by its recorded boundary; its current enclosing geometry requires recalculation"}
+    return {"valid": True, "state": "enclosed", "message": ""}
+
+
 def related(project: Any, oid: str) -> dict[str, list[dict[str, Any]]]:
     """Doors, windows and columns that belong to the room, and the walls that bound it. Read-only."""
     meta = E.meta_of(project, oid)

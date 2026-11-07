@@ -12,6 +12,7 @@ PyYAML>=6.0           # tested with 6.0.3 : SLAI's configuration repository (src
 numpy>=1.24           # tested with 2.5.3 : STEM, Simulation, Spatial and Optimization agents
 scipy>=1.10           # tested with 1.18.1: STEM Agent integrator, Optimization Agent
 psutil>=5.9           # tested with 7.2.2 : resource monitoring imported by the agents
+openpyxl>=3.1         # optional XLSX classification-table import (data/build_nl_sfb.py and classifications.py)
 #
 # Not on PyPI, part of the SLAI checkout: src/utils (SGEO, SDRW, SLDC, spatial_formats) and src/agents.
 # Optional file exchange (DXF, IFC) is in requirements-interop.txt. SPADRA reports those formats as unavailable without it. There is no PDF writer: sheets print from the browser.

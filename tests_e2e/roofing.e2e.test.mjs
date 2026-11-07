@@ -3,7 +3,7 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +11,9 @@ import { createServer } from "node:net";
 import { chromium } from "playwright";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const SLAI = resolve(HERE, "..", "..", "..");
+const standardSLAI = resolve(HERE, "..", "..", "..");
+const siblingSLAI = resolve(HERE, "..", "..");
+const SLAI = existsSync(join(standardSLAI, "applications", "SPADRA")) ? standardSLAI : siblingSLAI;
 const PYTHON = process.env.PYTHON ?? (process.platform === "win32" ? "python" : "python3");
 
 let server, browser, page, url, dataDir;
@@ -125,6 +127,30 @@ describe("roofs, gutters and profiles in a browser", () => {
     await page.getByLabel("Roof type", { exact: true }).selectOption("hip"); await settle();
     assert.equal((await props(roofId)).top.find((r) => r.key === "roof").value, "hip");
     assert.equal((await ofCategory("roof")).length, 1);
+  });
+
+  it("offers roof-hosted geometry from the keyboard context menu and creates real SGEO members", async () => {
+    await page.getByLabel("Search the project").fill("Gable Roof"); await settle();
+    await page.getByRole("treeitem", { name: /^Gable Roof/ }).first().click(); await settle();
+    await page.getByLabel("Search the project").fill(""); await settle();
+    await overlay().focus();
+    await page.keyboard.press("Shift+F10");
+    assert.ok(await page.getByRole("menuitem", { name: "Add Ridge Beam" }).isVisible());
+    assert.ok(await page.getByRole("menuitem", { name: "Add Ridge Strap" }).isVisible());
+    assert.ok(await page.getByRole("menuitem", { name: "Add Roof Edge" }).isVisible());
+    await page.getByRole("menuitem", { name: "Add Ridge Beam" }).click(); await settle();
+    assert.ok((await ofCategory("structural")).some((x) => x.name === "Ridge Beam"));
+
+    // A real right mouse click on a roof triangle offers exactly the same commands.
+    const roof = (await ofCategory("roof"))[0];
+    const triangle = roof.faces.find((face) => face.length >= 3 && face.every((i) => roof.vertices[i][2] > 3));
+    assert.ok(triangle, "the roof has a pickable pitched surface");
+    const point = [0, 1, 2].map((j) => triangle.slice(0, 3).reduce((sum, i) => sum + roof.vertices[i][j] / 3, 0));
+    const screen = await overlay().evaluate((el, q) => el.spadraView.screenOf(q), point);
+    const bounds = await overlay().boundingBox();
+    await page.mouse.click(bounds.x + screen[0], bounds.y + screen[1], { button: "right" });
+    assert.ok(await page.getByRole("menuitem", { name: "Add Roof Edge" }).isVisible());
+    await page.keyboard.press("Escape");
   });
 
   it("hangs gutters and a downpipe on the roof from the Gutter dialog, and Drainage reports the flow", async () => {

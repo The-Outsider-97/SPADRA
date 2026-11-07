@@ -23,6 +23,7 @@ export class ModelView {
     octx;
     hud;
     layerControls = h("div", { class: "layer-controls", attrs: { "aria-label": "Add layer on selected faces" } });
+    contextAnchor = h("button", { type: "button", attrs: { "aria-hidden": "true", tabindex: "-1" } });
     levelSelect;
     hudGroups = [];
     fields = {};
@@ -92,7 +93,8 @@ export class ModelView {
         this.hud = h("div", { class: "wall-hud", hidden: true }, h("label", {}, "Level", this.levelSelect), ...this.hudGroups);
         const rail = h("div", { class: "view-rail", attrs: { role: "toolbar", "aria-label": "View tools" } }, this.railButton("home", "Home view", () => { this.home(); }), this.railButton("search", "Zoom to selection", () => { this.zoomSelection(); }), this.railButton("pan", "Pan (hold the right mouse button, or toggle here)", (b) => { this.panMode = !this.panMode; b.setAttribute("aria-pressed", String(this.panMode)); }), this.orbitButton = this.railButton("orbit", "Orbit around the selected element (turn off to orbit around the point in the middle of the view)", () => { this.store.setOrbitSelection(!this.store.orbitSelection); }), this.railButton("fit", "Zoom to fit the whole model", () => { this.fit(); }));
         const unavailable = h("div", { class: "view-unavailable", hidden: !!this.gl, text: "3D view needs WebGL 2, which this browser does not provide. The model, properties and exports still work." });
-        this.el = h("div", { class: "canvas-wrap" }, this.canvas, this.overlay, this.layerControls, this.hud, rail, unavailable);
+        this.contextAnchor.style.cssText = "position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;padding:0;border:0";
+        this.el = h("div", { class: "canvas-wrap" }, this.canvas, this.overlay, this.layerControls, this.hud, rail, unavailable, this.contextAnchor);
         if (this.gl)
             this.setup(this.gl);
         new ResizeObserver(() => this.resize()).observe(this.el);
@@ -264,7 +266,21 @@ export class ModelView {
     }
     bind() {
         const c = this.overlay; // the overlay sits on top, so it receives the pointer
-        c.addEventListener("contextmenu", (e) => e.preventDefault());
+        c.addEventListener("contextmenu", (e) => {
+            e.preventDefault();
+            const [x, y] = this.pointer(e);
+            const candidates = this.hitCandidates(x, y);
+            // A wall and its foundation may share a ray. If the user has already
+            // selected one of them, respect that selection for its context actions.
+            const hit = candidates.find((candidate) => this.selectedIds().includes(candidate.id)) ?? candidates[0];
+            if (!hit)
+                return;
+            const category = this.drawables.find((d) => d.id === hit.id)?.category;
+            if (!category)
+                return;
+            this.placeContextAnchor(e.clientX, e.clientY);
+            this.store.openModelContextMenu(hit.id, category, this.contextAnchor);
+        });
         c.addEventListener("wheel", (e) => {
             e.preventDefault();
             const [x, y] = this.pointer(e);
@@ -388,7 +404,15 @@ export class ModelView {
             await this.placeOpening(tool, this.hitAt(x, y, "wall"));
             return;
         }
-        const hit = this.pickAt(x, y);
+        const candidates = this.hitCandidates(x, y);
+        // Alt+click cycles through *every* solid under this ray, including a wall
+        // and its overlapping foundation. Nearest-surface selection is still the
+        // default, but a concealed element remains selectable without hiding one.
+        const current = this.selectedIds()[0];
+        const currentIndex = candidates.findIndex((hit) => hit.id === current);
+        const hit = e.altKey ? candidates[(currentIndex + 1) % candidates.length]?.id ?? null : candidates[0]?.id ?? null;
+        if (candidates.length > 1)
+            this.store.setStatus(`${candidates.length} overlapping elements: Alt+click cycles between them.`);
         if (hit && e.shiftKey) {
             const cur = this.selectedIds();
             const ids = cur.includes(hit) ? cur.filter((i) => i !== hit) : [...cur, hit];
@@ -447,6 +471,16 @@ export class ModelView {
         }
         if (e.key === "Home") {
             this.home();
+            return;
+        }
+        if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
+            const id = this.selectedIds()[0], obj = this.drawables.find((d) => d.id === id);
+            if (id && obj) {
+                e.preventDefault();
+                const box = this.overlay.getBoundingClientRect();
+                this.placeContextAnchor(box.left + box.width / 2, box.top + box.height / 2);
+                this.store.openModelContextMenu(id, obj.category, this.contextAnchor);
+            }
             return;
         }
         if (this.navigate(e))
@@ -585,28 +619,37 @@ export class ModelView {
         }
     }
     pickAt(x, y) { return this.hitAt(x, y)?.id ?? null; }
-    /** The nearest thing under the pointer (optionally only of one category) and the exact point of the ray on it. */
-    hitAt(x, y, only) {
+    placeContextAnchor(clientX, clientY) {
+        const rect = this.el.getBoundingClientRect();
+        this.contextAnchor.style.left = `${clientX - rect.left}px`;
+        this.contextAnchor.style.top = `${clientY - rect.top}px`;
+    }
+    hitCandidates(x, y, only) {
         const ray = this.rayAt(x, y);
         if (!ray)
-            return null;
-        let best = null;
-        let bestT = Infinity;
+            return [];
+        const hits = [];
         for (const d of this.drawables) {
             if (only && d.category !== only)
                 continue;
+            let best = Infinity;
             for (const f of d.faces) {
                 const a = d.verts[f[0] ?? -1], b = d.verts[f[1] ?? -1], c = d.verts[f[2] ?? -1];
                 if (!a || !b || !c)
                     continue;
                 const t = rayTriangle(ray, a, b, c);
-                if (t !== null && t < bestT) {
-                    bestT = t;
-                    best = d.id;
-                }
+                if (t !== null && t < best)
+                    best = t;
             }
+            if (Number.isFinite(best))
+                hits.push({ id: d.id, distance: best,
+                    point: [ray.origin[0] + ray.dir[0] * best, ray.origin[1] + ray.dir[1] * best, ray.origin[2] + ray.dir[2] * best] });
         }
-        return best ? { id: best, point: [ray.origin[0] + ray.dir[0] * bestT, ray.origin[1] + ray.dir[1] * bestT, ray.origin[2] + ray.dir[2] * bestT] } : null;
+        return hits.sort((a, b) => a.distance - b.distance || a.id.localeCompare(b.id));
+    }
+    /** The nearest thing under the pointer (optionally only of one category) and the exact point of the ray on it. */
+    hitAt(x, y, only) {
+        return this.hitCandidates(x, y, only)[0] ?? null;
     }
     // ---------------------------------------------------------------------------------------------------------------- walls
     levelElevation() { return this.store.levels.find((l) => l.id === this.levelSelect.value)?.elevation ?? 0; }

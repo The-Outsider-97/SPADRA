@@ -9,6 +9,7 @@ import zlib
 from pathlib import Path
 
 from applications.SPADRA import sheetviews as SV
+from applications.SPADRA import sheets as SH
 from applications.SPADRA.project import Project
 from applications.tools.errors import BadRequest, Conflict, LimitExceeded
 
@@ -25,7 +26,7 @@ def png(width: int, height: int, colour=(200, 60, 40)) -> bytes:
 class Contents(Case):
     def setUp(self) -> None:
         super().setUp()
-        self.wall()
+        self.first_wall = self.wall()
         self.view3d = next(v["id"] for v in self.p.manifest["views"] if v["kind"] == "3d")
         self.sheet = self.run_("sheet.create", name="Overview")["id"]
 
@@ -38,9 +39,37 @@ class Contents(Case):
         self.assertEqual((shown["kind"], shown["id"], shown["azimuth"], shown["elevation"]), ("model", vp, -45.0, 30.0))
         faces = shown["solid"]["faces"]
         self.assertGreater(len(faces), 0)
-        self.assertTrue(all(len(f) == 8 for f in faces))
+        self.assertTrue(all(len(f) == 9 for f in faces))
         self.assertTrue(0.6 <= min(f[6] for f in faces) and max(f[6] for f in faces) <= 1.0)
         self.assertGreater(shown["solid"]["bounds"][1][0], shown["solid"]["bounds"][0][0])
+
+    def test_shared_and_instance_material_colors_reach_vector_sheets_and_issued_digests(self):
+        self.run_("sheet.place_view", id=self.sheet, view_id=self.view3d)
+        self.run_("sheet.issue", id=self.sheet, description="First issue")
+        before = self.vps()[0]["solid"]["faces"]
+        self.run_("model.set_property", id=self.first_wall, key="material_color", value="#224466")
+        faces = self.vps()[0]["solid"]["faces"]
+        self.assertEqual({f[8] for f in faces}, {0x224466})
+        self.assertNotEqual(faces, before)
+        self.assertEqual(self.p.sheet_data(self.sheet)["status"]["state"], "changed")
+        self.run_("model.set_property", id=self.first_wall, key="color", value="#AABBCC")
+        self.assertEqual({f[8] for f in self.vps()[0]["solid"]["faces"]}, {0xAABBCC})
+
+    def test_individual_layer_colors_are_carried_by_model_sheet_faces(self):
+        additional = self.run_("model.add_layer", id=self.first_wall, material="Timber", thickness=50)["layer"]
+        self.run_("model.set_property", id=self.first_wall, key=f"layer:{additional}:color", value="#EEDDCC")
+        data = SV.model_view(self.p, -45.0, 30.0, 1.0)
+        self.assertIn(0xEEDDCC, {f[8] for f in data["faces"]})
+
+    def test_native_sldc_preserves_the_model_sheets_material_colors_as_editable_data(self):
+        self.run_("sheet.place_view", id=self.sheet, view_id=self.view3d)
+        self.run_("model.set_property", id=self.first_wall, key="color", value="#345678")
+        raw, _ = SH.to_sldc(self.p, self.sheet)
+        restored = SH.read_sldc(raw)
+        faces = restored["sheet"]["viewports"][0]["solid"]["faces"]
+        self.assertTrue(faces)
+        self.assertEqual({f[8] for f in faces}, {0x345678})
+        self.assertTrue(SH.verify_sldc(self.p, raw, self.sheet)["identical"])
 
     def test_a_box_seen_from_a_corner_shows_three_sides(self):
         # a single closed box: from a corner and above only the three faces that face the viewer are drawn, each as two triangles

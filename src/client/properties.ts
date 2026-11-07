@@ -92,16 +92,35 @@ function rowEl(store: Store, p: Properties, row: PropRow): HTMLElement {
   if (row.type === "color") {
     const initial = String(row.value || row.text || "#BFBFC7");
     const valid = /^#[0-9A-F]{6}$/i;
-    const picker = h("input", { id, type: "color", value: initial, attrs: { "aria-label": `Choose ${row.label}` } });
+    const initialHex = valid.test(initial) ? initial.toUpperCase() : "#BFBFC7";
+    const asRgb = (value: string): string => [1, 3, 5].map((i) => String(parseInt(value.slice(i, i + 2), 16))).join(", ");
+    const picker = h("input", { id, type: "color", value: initialHex, attrs: { "aria-label": `Choose ${row.label}` } });
     const hex = h("input", { type: "text", value: String(row.value || ""), placeholder: "Default", attrs: { maxlength: 7, "aria-label": `${row.label} HEX color` } });
-    picker.addEventListener("change", () => { hex.value = picker.value.toUpperCase(); void commit(store, p, key, hex.value, "text"); });
+    const rgb = h("input", { type: "text", value: asRgb(initialHex), placeholder: "R, G, B", attrs: { maxlength: 15, "aria-label": `${row.label} RGB color`, title: "Enter red, green and blue values (0–255), separated by commas" } });
+    const reflect = (value: string): void => { picker.value = value; hex.value = value; rgb.value = asRgb(value); };
+    picker.addEventListener("input", () => { hex.value = picker.value.toUpperCase(); rgb.value = asRgb(picker.value); });
+    picker.addEventListener("change", () => { const value = picker.value.toUpperCase(); reflect(value); void commit(store, p, key, value, "text"); });
     hex.addEventListener("change", () => {
       const value = hex.value.trim().toUpperCase();
       if (value && !valid.test(value)) { toast("Use a six-digit HEX color, for example #4477AA.", { kind: "error" }); return; }
+      if (value) reflect(value);
+      void commit(store, p, key, value, "text");
+    });
+    rgb.addEventListener("change", () => {
+      const match = rgb.value.trim().match(/^(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})$/);
+      const channels = match?.slice(1).map(Number);
+      if (!channels || channels.some((v) => v > 255)) {
+        toast("Enter RGB as three whole numbers from 0 to 255, for example 68, 119, 170.", { kind: "error" });
+        return;
+      }
+      const value = `#${channels.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`.toUpperCase();
+      reflect(value);
       void commit(store, p, key, value, "text");
     });
     const reset = h("button", { type: "button", class: "iconbtn remove", attrs: { title: `Reset ${row.label}`, "aria-label": `Reset ${row.label}` }, on: { click: () => void commit(store, p, key, "", "text") } }, glyph("close"));
-    return h("div", { class: "prop-row" }, label, h("div", { class: "with-unit" }, picker, hex, reset));
+    return h("div", { class: "prop-row" }, label, h("div", { class: "color-controls" },
+      h("div", { class: "color-controls-main" }, picker, hex, reset),
+      rgb));
   }
   if (row.type === "sfb") return sfbRow(store, p, row, id, label);
   if (row.type === "catalog") return catalogRow(store, p, row, id, label);

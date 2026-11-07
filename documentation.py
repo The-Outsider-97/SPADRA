@@ -328,7 +328,8 @@ def project_view(project: Any, view: Mapping[str, Any], f: float) -> dict[str, A
     matrices = project.model._model.world_transforms()                       # one pass for every element (see world_mesh)
     for oid in all_ids(project.model, has_geometry=True):
         obj = project.model.get(oid)
-        category = str(E.m(obj["metadata"], "category", "generic"))
+        meta = obj["metadata"]
+        category = str(E.m(meta, "category", "generic"))
         if category == "void":
             continue                                                         # a void is not drawn in a section or elevation: it is not part of the building
         verts, faces = world_mesh(project, oid, matrices)
@@ -345,9 +346,33 @@ def project_view(project: Any, view: Mapping[str, Any], f: float) -> dict[str, A
                 "tris": [[round(c * f, 4) for p in t for c in p] for t in tris],
                 "edges": [[round(c * f, 4) for p in e for c in p] for e in edges],
                 "cut": [[[round(x * f, 4), round(y * f, 4)] for x, y in loop] for loop in loops]}
+        if category == "roof":
+            ridge = E.roof_ridge(meta)
+            if ridge:
+                # A ridge can only be repositioned horizontally from a 2D
+                # projection that actually resolves its transverse movement.
+                # Views parallel to the ridge expose no meaningful drag axis.
+                transverse = E._rectangle([list(q) for q in E.m(meta, "boundary")])[2]
+                factor = transverse[0] * fr.ux + transverse[1] * fr.uy
+                if abs(factor) >= 0.2:
+                    x, y = ((ridge[0][axis] + ridge[1][axis]) / 2 for axis in (0, 1))
+                    top = (E.level_elevation(project, E.m(meta, "level")) + float(E.m(meta, "offset", 0.0)) + E.roof_rise(meta))
+                    item["ridge_handle"] = {"point": [round(fr.across((x, y, top)) * f, 4), round(top * f, 4)],
+                                            "transverse_dot": round(factor, 10),
+                                            "offset_mm": round(float(E.m(meta, "ridge_offset", 0.0)) * 1000, 4)}
+        palette = project.manifest.get("material_colors", {})
+        # Drawing sheets use their traditional monochrome hatching until the
+        # person explicitly assigns a color; the material override is then
+        # preserved in the section/elevation's native geometric data.
+        appearance = E.m(meta, "color") or palette.get(E.m(meta, "material"))
+        if appearance:
+            item["appearance_color"] = appearance
         if loops and category in LY.LAYERED and LY.is_layered(obj["metadata"]):
             # a stack of layers: every loop of the cut is one layer, named and (unless the view hides hatching) hatched by its own material
             item["cut_layers"] = LY.loop_layers(project, oid, loops, fr)
+            by_id = {lay["id"]: lay for lay in LY.stack(project, oid)}
+            item["cut_colors"] = [E.m(meta, "color") or by_id[row["layer"]].get("color") or palette.get(row["material"])
+                                  for row in item["cut_layers"]]
             if show_hatching:
                 item["cut_hatches"] = [hatch_pattern(project, row["material"]) for row in item["cut_layers"]]
         elif loops and show_hatching and category != "foundation":
@@ -357,6 +382,7 @@ def project_view(project: Any, view: Mapping[str, Any], f: float) -> dict[str, A
         if category == "foundation" and loops and fr.cut:
             from . import foundations as FD
             item["cut_material"] = FD.loop_materials(project, obj["metadata"], loops)           # each layer of a build-up is hatched as its own material
+            item["cut_colors"] = [E.m(meta, "color") or palette.get(mat) for mat in item["cut_material"]]
         items.append(item)
     items.sort(key=lambda i: -i["depth"])                            # far first, so nearer elements paint over what they hide
     xs: list[float] = []
@@ -596,8 +622,17 @@ def schedule_data(project: Any, category: str) -> dict[str, Any]:
         elif category == "room":
             from . import rooms as R
             d = R.data(project, oid)
-            row.update(number=d["number"], area=_r(d["area"]), perimeter=_r(d["perimeter"]), height=_r(d["height"]), volume=_r(d["volume"]),
+            status = R.enclosure_status(project, oid) if E.m(meta, "auto") else {"valid": True}
+            room_valid = bool(status["valid"])
+            # Undefined measurements must be omitted from totals and CSV,
+            # not exported as a stale outline's apparently precise values.
+            row.update(number=d["number"], area=_r(d["area"]) if room_valid else None,
+                       perimeter=_r(d["perimeter"]) if room_valid else None,
+                       height=_r(d["height"]) if room_valid else None,
+                       volume=_r(d["volume"]) if room_valid else None,
                        walls=len(d["walls"]), doors=len(d["doors"]), windows=len(d["windows"]), columns=len(d["columns"]))
+            if not room_valid:
+                row["measurement_warning"] = status["message"]
             order = (order[0], str(d["number"]).zfill(12), 0.0)
         elif category == "gutter":
             from . import gutters as GU
@@ -665,8 +700,17 @@ def schedule_data(project: Any, category: str) -> dict[str, Any]:
         r["no"] = f"{prefix}{n:02d}"
     columns = COLUMNS[category]
     totals = {c["key"]: _r(sum(float(r.get(c["key"], 0) or 0) for r in rows)) for c in columns if c["total"]}
+    if category == "room":
+        for column in columns:
+            key = column["key"]
+            if column["total"] and not any(isinstance(row.get(key), (int, float)) for row in rows):
+                totals[key] = None  # no valid measured space is not a measured zero
+    invalid_rooms = sum(bool(row.get("measurement_warning")) for row in rows) if category == "room" else 0
+    note = "Read from the elements' parameters and exact geometry; numbered by level, then position."
+    if invalid_rooms:
+        note += f" {invalid_rooms} room(s) have unresolved boundaries; their area, volume and height are omitted from totals and CSV."
     return {"category": category, "title": SCHEDULES[category]["title"], "columns": columns, "rows": rows, "totals": totals, "count": len(rows),
-            "note": "Read from the elements' parameters and exact geometry; numbered by level, then position."}
+            "note": note}
 
 
 def schedule_csv(data: Mapping[str, Any]) -> str:

@@ -15,11 +15,13 @@ Opening inheritance
 Layer edges (walls)
     ``start``/``end``/``bottom``/``top`` extend (positive) or trim (negative) a layer beyond the wall's own ends and height, in metres. A layer end that
     would run into a wall joint, past another layer's end it must meet, or leave nothing of the layer, is refused with a message that names the layer.
+    Only an explicit per-layer ``start_joint``/``end_joint`` policy of ``penetrate`` permits a positive extension through a resolved joined face;
+    the default ``flush`` stops at that face. No other layer's boundary is extended on its behalf.
 """
 from __future__ import annotations
 
 import math
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from ..tools.errors import BadRequest
 from ..tools.validation import new_id, number, text
@@ -28,6 +30,7 @@ from . import geometry as G
 
 MAX_LAYERS = 24
 MODES = ("all", "none", "selected")
+JOINT_MODES = ("flush", "penetrate")  # explicit overlap is never the default
 SNAP = 0.005                       # m: a layer edge this close to the wall's own edge is that edge
 LAYERED = ("wall", "floor", "roof")
 EDGES = ("start", "end", "bottom", "top")
@@ -45,9 +48,11 @@ def is_layered(meta: Mapping[str, Any]) -> bool:
 def _full(row: Mapping[str, Any]) -> dict[str, Any]:
     out = {"id": str(row.get("id") or new_id()[:8]), "name": str(row.get("name") or row.get("material") or "Layer"), "material": str(row.get("material") or "Concrete"),
            "thickness": float(row["thickness"]), "openings": str(row.get("openings") or "all"), "opening_ids": [str(i) for i in row.get("opening_ids") or []],
-           "color": E.color(row.get("color"))}
+           "color": E.color(row.get("color")), "start_joint": str(row.get("start_joint", "flush")), "end_joint": str(row.get("end_joint", "flush"))}
     for edge in EDGES:
         out[edge] = float(row.get(edge) or 0.0)
+    if out["start_joint"] not in JOINT_MODES or out["end_joint"] not in JOINT_MODES:
+        raise BadRequest("A wall layer joint must be flush or penetrate")
     return out
 
 
@@ -109,7 +114,10 @@ def add_layer(project: Any, oid: str, p: Mapping[str, Any]) -> str:
     if mode == "selected" and (not isinstance(opening_ids, list) or any(i not in {o["id"] for o in openers(project, oid)} for i in opening_ids)):
         raise BadRequest("Selected openings must belong to the host element")
     row = _full({"name": text(p.get("name") or material, "name", 60), "material": material, "thickness": thickness,
-                 "openings": mode, "opening_ids": opening_ids if mode == "selected" else []})
+                 "openings": mode, "opening_ids": opening_ids if mode == "selected" else [],
+                 "start_joint": p.get("start_joint", "flush"), "end_joint": p.get("end_joint", "flush")})
+    if cat != "wall" and (row["start_joint"] != "flush" or row["end_joint"] != "flush"):
+        raise BadRequest("Junction penetration applies only to wall layers")
     side = p.get("side")
     faces = {"wall": ("left", "right"), "floor": ("top", "bottom"), "roof": ("outside", "inside")}[cat]
     if side is not None and side not in faces:
@@ -205,6 +213,10 @@ def set_field(project: Any, oid: str, key: str, value: Any) -> None:
         if cat != "wall":
             raise BadRequest("Only the layers of a wall can be extended or trimmed")
         row[field] = number(value, f"{field} (mm)", -100000, 100000) / 1000.0
+    elif field in ("start_joint", "end_joint"):
+        if cat != "wall" or value not in JOINT_MODES:
+            raise BadRequest("Wall layer junction mode must be flush or penetrate")
+        row[field] = str(value)
     elif field == "cut" and len(parts) == 4:
         if row["openings"] != "selected":
             raise BadRequest("Set the layer's openings to 'selected' first")
@@ -275,6 +287,7 @@ def edge_conflicts(frame: Mapping[str, Any], layers: Sequence[Mapping[str, Any]]
     problems: list[str] = []
     (sl, sr), (el, er) = frame["ends"]
     cut_start, cut_end = max(0.0, -sl, -sr), max(0.0, -el, -er)
+    connected_start, connected_end = frame.get("connected_ends", ((sl, sr) != (0.0, 0.0), (el, er) != (0.0, 0.0)))
     length, height = frame["length"], frame["height"]
     for lay in layers:
         n = lay["name"]
@@ -282,9 +295,9 @@ def edge_conflicts(frame: Mapping[str, Any], layers: Sequence[Mapping[str, Any]]
             problems.append(f"{n}: trimmed to nothing along the wall")
         if height + lay["top"] + lay["bottom"] < 0.01:
             problems.append(f"{n}: trimmed to nothing in height")
-        if lay["start"] > SNAP and (sl, sr) != (0.0, 0.0):
+        if lay["start"] > SNAP and connected_start and lay["start_joint"] != "penetrate":
             problems.append(f"{n}: cannot extend past the start of the wall, where it is joined to another wall")
-        if lay["end"] > SNAP and (el, er) != (0.0, 0.0):
+        if lay["end"] > SNAP and connected_end and lay["end_joint"] != "penetrate":
             problems.append(f"{n}: cannot extend past the end of the wall, where it is joined to another wall")
         if lay["start"] < -SNAP and -lay["start"] < cut_start - 1e-9:
             problems.append(f"{n}: its start would lie inside the corner joint ({cut_start * 1000:.0f} mm); trim by at least that much, or not at all")
@@ -301,7 +314,8 @@ def snapped(value: float, others: Sequence[float]) -> float:
     return value
 
 
-def wall_mesh(project: Any, oid: str, frame: Mapping[str, Any], every: Sequence[Sequence[Any]]) -> G.Mesh:
+def wall_mesh(project: Any, oid: str, frame: Mapping[str, Any], every: Sequence[Sequence[Any]],
+              top_surface: Callable[[float, float], float] | None = None) -> G.Mesh:
     """The wall as one closed shell per layer, in the wall's own frame (centred on its mid point at mid height, x along it, y through it, z up).
     ``every`` is its openings as (x0, x1, z0, z1, id) from its start and base. Each layer gets the openings it inherits."""
     layers = stack(project, oid)
@@ -322,21 +336,33 @@ def wall_mesh(project: Any, oid: str, frame: Mapping[str, Any], every: Sequence[
         sl_i, sr_i = _faces_shear(frame, y_left)[0], _faces_shear(frame, y_right)[0]
         el_i, er_i = _faces_shear(frame, y_left)[1], _faces_shear(frame, y_right)[1]
         start, end, bottom, top = (snapped(lay[k], []) for k in EDGES)
-        ends = ((sl_i if start == 0.0 else 0.0, sr_i if start == 0.0 else 0.0), (el_i if end == 0.0 else 0.0, er_i if end == 0.0 else 0.0))
-        len_i, h_i = length + start + end, height + top + bottom
-        cx, cz = (end - start) / 2, (top - bottom) / 2
+        if top_surface is not None and top > SNAP:
+            raise BadRequest(f"Layer '{lay['name']}' cannot extend up into its attached roof; reduce the top extension or detach the wall")
+        penetration_start = start > 0.0 and lay.get("start_joint") == "penetrate"
+        penetration_end = end > 0.0 and lay.get("end_joint") == "penetrate"
+        base_start, base_end = (0.0 if penetration_start else start), (0.0 if penetration_end else end)
+        ends = (((sl_i + start, sr_i + start) if penetration_start else (sl_i, sr_i) if base_start == 0 else (0.0, 0.0)),
+                ((el_i + end, er_i + end) if penetration_end else (el_i, er_i) if base_end == 0 else (0.0, 0.0)))
+        len_i, h_i = length + base_start + base_end, height + top + bottom
+        cx, cz = (base_end - base_start) / 2, (top - bottom) / 2
         hits = set(inherited(lay, ids))
         local = []
         for x0, x1, z0, z1, oid_ in every:
             if str(oid_) not in hits:
                 continue
-            a0, a1 = max(x0, -start) - length / 2 - cx, min(x1, length + end) - length / 2 - cx          # an opening is clipped to what this layer covers
+            a0, a1 = max(x0, -base_start) - length / 2 - cx, min(x1, length + base_end) - length / 2 - cx       # opening respects chosen joint policy
             b0, b1 = max(z0, -bottom) - height / 2 - cz, min(z1, height + top) - height / 2 - cz
             if a1 - a0 > 1e-9 and b1 - b0 > 1e-9:
                 local.append((a0, a1, b0, b1))
         try:
             top_i = [(s_ - length / 2 - cx, h_ + top - height / 2 - cz) for s_, h_ in frame["top"]] or None        # the roof line, lifted by the layer's own top edge
-            v, f = G.wall_mesh(len_i, t, h_i, local, ends, top_i)
+            surface_i = (lambda x, y: top_surface(x + cx, y + y_left - t / 2) + top - height / 2 - cz) if top_surface is not None else None
+            if surface_i is not None:
+                from . import attachments as AT
+                breaks = [x - cx for x in AT.roof_breaks(project, oid, (y_left, (y_left + y_right) / 2, y_right), frame)]
+            else:
+                breaks = []
+            v, f = G.wall_mesh(len_i, t, h_i, local, ends, top_i, surface_i, breaks)
         except G.GeometryError as exc:
             raise BadRequest(f"Layer '{lay['name']}': {exc}") from exc
         base = len(verts)
@@ -382,6 +408,7 @@ def plan_bands(project: Any, oid: str, frame: Mapping[str, Any], cut_openings: S
     layers = stack(project, oid)
     if len(layers) < 2:
         return []
+    from . import planar as P
     ids = [o["id"] for o in cut_openings]
     c, s = math.cos(frame["angle"]), math.sin(frame["angle"])
     thick, length = frame["thickness"], frame["length"]
@@ -391,17 +418,28 @@ def plan_bands(project: Any, oid: str, frame: Mapping[str, Any], cut_openings: S
         y_right = y_left - lay["thickness"]
         hit = set(inherited(lay, ids))
         spans = sorted((o["x0"], o["x1"]) for o in cut_openings if o["id"] in hit)
-        x_lo, x_hi = -lay["start"], length + lay["end"]
-        pieces: list[tuple[float, float]] = []
-        cursor = x_lo
-        for x0, x1 in spans + [(x_hi, x_hi)]:
-            if x0 - cursor > 1e-9:
-                pieces.append((cursor, min(x0, x_hi)))
-            cursor = max(cursor, x1)
+        sl_i, sr_i = _faces_shear(frame, y_left)[0], _faces_shear(frame, y_right)[0]
+        el_i, er_i = _faces_shear(frame, y_left)[1], _faces_shear(frame, y_right)[1]
+        start, end = snapped(lay["start"], []), snapped(lay["end"], [])
+        # Match the actual layer shell rather than showing square plan bands
+        # over mitered/slanted joints. Positive penetration is measured from
+        # the resolved joint face, independently for the two layer boundaries.
+        xsl = -start if start < 0 else -sl_i - start
+        xsr = -start if start < 0 else -sr_i - start
+        xel = length + end if end < 0 else length + el_i + end
+        xer = length + end if end < 0 else length + er_i + end
+        polygon = [[xsl, y_left], [xel, y_left], [xer, y_right], [xsr, y_right]]
+        pad = max(thick, lay["thickness"])
+        clips = [[[x0, y_left + pad], [x1, y_left + pad], [x1, y_right - pad], [x0, y_right - pad]] for x0, x1 in spans]
+        try:
+            regions = P.difference(polygon, clips) if clips else [(polygon, [])]
+        except P.PlanarError as exc:
+            raise BadRequest(f"Layer '{lay['name']}' has an invalid plan boundary at this junction: {exc}") from exc
         polys = []
-        for a, b in pieces:
-            corners = [(a, y_left), (b, y_left), (b, y_right), (a, y_right)]
-            polys.append([[(frame["start"][0] + c * x - s * y) * f, (frame["start"][1] + s * x + c * y) * f] for x, y in corners])
+        for outer, holes in regions:
+            if holes:
+                raise BadRequest(f"Layer '{lay['name']}' has an unsupported enclosed plan opening")
+            polys.append([[(frame["start"][0] + c * x - s * y) * f, (frame["start"][1] + s * x + c * y) * f] for x, y in outer])
         out.append({"layer": lay["id"], "name": lay["name"], "material": lay["material"], "polygons": polys})
         y_left = y_right
     return out
@@ -461,6 +499,9 @@ def rows(project: Any, oid: str) -> dict[str, Any] | None:
                            "choices": [{"value": "yes", "label": "Cut"}, {"value": "no", "label": "Not cut"}]} for o in every]
         if cat == "wall" and len(layers) > 1:
             block += [{"key": key(e), "label": f"{n}. {e.title()} edge", "type": "number", "unit": "mm", "value": round(lay[e] * 1000, 6)} for e in EDGES]
+            modes = [{"value": "flush", "label": "Stop at joined face"}, {"value": "penetrate", "label": "Allow deliberate penetration"}]
+            block += [{"key": key(e), "label": f"{n}. {label} junction", "type": "choice", "value": lay[e], "choices": modes}
+                      for e, label in (("start_joint", "Start"), ("end_joint", "End"))]
         out += block
     out.append({"label": "Total thickness", "type": "readonly", "value": f"{total(layers) * 1000:g} mm"})
     return {"title": f"Layers ({len(layers)})", "rows": out}

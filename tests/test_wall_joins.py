@@ -24,6 +24,24 @@ def inside(poly, p):
     return hit
 
 
+def shared_segment_length(a, b):
+    """Length of coincident boundary portions, including T cases whose line ends inside an edge."""
+    best = 0.0
+    for p, q in zip(a, a[1:] + a[:1]):
+        d = G.sub(q, p)
+        n = math.dist(p, q)
+        if n < 1e-9:
+            continue
+        u = G.mul(d, 1 / n)
+        for r, s in zip(b, b[1:] + b[:1]):
+            v = G.sub(s, r)
+            if abs(G.cross(d, v)) > 1e-7 * n * max(math.dist(r, s), 1.0) or abs(G.cross(d, G.sub(r, p))) > 1e-7 * n:
+                continue
+            t0, t1 = G.dot(G.sub(r, p), u), G.dot(G.sub(s, p), u)
+            best = max(best, max(0.0, min(n, max(t0, t1)) - max(0.0, min(t0, t1))))
+    return best
+
+
 class Joints(unittest.TestCase):
     def setUp(self) -> None:
         self.p = Project.create("Joints")                         # drawing unit mm
@@ -115,6 +133,102 @@ class Corners(Joints):
         total = sum(area(self.plan(w)[0]) for w in ws)
         self.assertAlmostEqual(total, 6250 * 4250 - 5750 * 3750, places=3)         # outer rectangle minus inner rectangle, nothing counted twice
         self.assertAlmostEqual(sum(self.p.model.volume(w, unit="m") for w in ws), total * 3 / 1e6, places=6)      # 3 m high
+
+
+class CornerConnectionPolicies(Joints):
+    def test_four_illustrated_connection_styles_are_distinct_real_solid_end_shapes(self):
+        a = self.wall((0, 0), (4000, 0), 200)
+        b = self.wall((4000, 0), (4000, 3000), 200)
+        baseline = (self.ends(a), self.ends(b))
+        self.assertEqual(E.wall_corner_controls(self.p, a)[0]["mode"], "miter")
+        expected = {
+            "through_selected": ((0.1, 0.1), (-0.1, -0.1)),
+            "through_other": ((-0.1, -0.1), (0.1, 0.1)),
+            "stepped_open": ((-0.1, -0.1), (-0.1, -0.1)),
+        }
+        shapes = set()
+        for mode in (*expected, "miter"):
+            with self.subTest(mode=mode):
+                self.p.execute("model.set_property", {"id": a, "key": f"corner_join:{b}:end", "value": mode})
+                shaped = (self.ends(a), self.ends(b))
+                shapes.add(str(shaped))
+                if mode != "miter":
+                    self.assertEqual((shaped[0][1], shaped[1][0]), expected[mode])
+                else:
+                    self.assertEqual(shaped, baseline)
+                self.assertEqual(E.wall_corner_controls(self.p, a)[0]["mode"], mode)
+                self.assertEqual(E.wall_corner_controls(self.p, b)[0]["mode"],
+                                 "through_other" if mode == "through_selected" else "through_selected" if mode == "through_other" else mode)
+                self.assert_plan_matches_solid(a)
+                self.assert_plan_matches_solid(b)
+                pa, pb = self.plan(a)[0], self.plan(b)[0]
+                shared = {tuple(round(c, 6) for c in p) for p in pa} & {tuple(round(c, 6) for c in p) for p in pb}
+                # The third PDF schematic explicitly has two square-ended
+                # arms touching at their single outer/inner corner point.
+                # The other three share a full face line; the through-wall's
+                # midpoint of that line need not be a mesh vertex.
+                if mode == "stepped_open":
+                    self.assertEqual(len(shared), 1)
+                    self.assertLess(shared_segment_length(pa, pb), 1e-7)
+                else:
+                    self.assertGreater(shared_segment_length(pa, pb), 100.0)
+                warnings = [i for i in self.p.check()["issues"] if i["severity"] == "warning" and "stepped/open" in i["message"]]
+                self.assertEqual(len(warnings), 1 if mode == "stepped_open" else 0)
+                for x in range(3800, 4200, 20):
+                    for y in range(-200, 200, 20):
+                        self.assertFalse(inside(pa, (x + 0.2, y + 0.2)) and inside(pb, (x + 0.2, y + 0.2)))
+        self.assertEqual(len(shapes), 4)
+
+    def test_corner_mode_is_contextual_persistent_undoable_and_keeps_identity(self):
+        import tempfile
+        from pathlib import Path
+        a = self.wall((0, 0), (4000, 0))
+        b = self.wall((4000, 0), (4000, 3000))
+        base = (self.ends(a), self.ends(b))
+        original_revision = self.p.revision
+        self.p.execute("model.set_property", {"id": b, "key": f"corner_join:{a}:start", "value": "through_selected"})
+        chosen = (self.ends(a), self.ends(b))
+        self.assertNotEqual(chosen, base)
+        self.assertEqual((self.p.model.get(a)["id"], self.p.model.get(b)["id"]), (a, b))
+        self.assertGreater(self.p.revision, original_revision)
+        self.p.undo()
+        self.assertEqual((self.ends(a), self.ends(b)), base)
+        self.p.redo()
+        self.assertEqual((self.ends(a), self.ends(b)), chosen)
+        self.p.execute("model.move", {"id": b, "dx": 1, "dy": 0, "dz": 0})
+        self.assertEqual(self.ends(a), G.SQUARE_ENDS)
+        self.p.execute("model.move", {"id": b, "dx": -1, "dy": 0, "dz": 0})
+        self.assertEqual((self.ends(a), self.ends(b)), chosen)
+        plan = next(i for i in E.plan_items(self.p, self.level, 1000.0) if i["id"] == a and i["category"] == "wall")
+        self.assertEqual(plan["corner_joins"], [{"endpoint": "end", "other": b, "point": [4000.0, 0.0], "mode": "through_other"}])
+        with tempfile.TemporaryDirectory() as tmp:
+            file = Path(tmp) / "corner.spadra"
+            self.p.save(file)
+            loaded = Project.open(file)
+            self.assertEqual((E.wall_frame(loaded, a)["ends"], E.wall_frame(loaded, b)["ends"]), chosen)
+            self.assertEqual(E.wall_corner_controls(loaded, b)[0]["mode"], "through_selected")
+
+    def test_nonorthogonal_unequal_width_corner_modes_remain_valid_no_overlap(self):
+        a = self.wall((0, 0), (3500, 0), 280)
+        b = self.wall((3500, 0), (5200, 3500), 120)
+        for mode in ("through_selected", "through_other", "stepped_open", "miter"):
+            with self.subTest(mode=mode):
+                self.p.execute("model.set_property", {"id": a, "key": f"corner_join:{b}:end", "value": mode})
+                pa, pb = self.plan(a)[0], self.plan(b)[0]
+                self.assertTrue(G.is_simple_polygon([tuple(x) for x in pa]))
+                self.assertTrue(G.is_simple_polygon([tuple(x) for x in pb]))
+                for x in range(3300, 3700, 20):
+                    for y in range(-250, 250, 20):
+                        self.assertFalse(inside(pa, (x + .25, y + .25)) and inside(pb, (x + .25, y + .25)))
+                self.assert_plan_matches_solid(a)
+                self.assert_plan_matches_solid(b)
+
+    def test_multi_wall_junction_does_not_offer_two_wall_corner_styles(self):
+        a, b, c = self.wall((0, 0), (4000, 0)), self.wall((4000, 0), (4000, 3000)), self.wall((4000, 0), (6000, 0))
+        self.assertEqual(E.wall_corner_controls(self.p, b), [])
+        with self.assertRaises(BadRequest):
+            self.p.execute("model.set_property", {"id": a, "key": f"corner_join:{b}:end", "value": "stepped_open"})
+        self.assertTrue(c)
 
 
 class Tees(Joints):

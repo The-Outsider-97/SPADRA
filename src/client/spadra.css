@@ -66,6 +66,13 @@ button { font: inherit; }
 .ridge-grip { position: absolute; transform: translate(-50%, -50%); width: 30px; height: 30px; border-radius: 9px; border: 2px solid var(--select); background: var(--panel); color: var(--select); font-size: 18px; cursor: grab; touch-action: none; pointer-events: auto; box-shadow: 0 2px 7px #0004; }
 .ridge-grip:active { cursor: grabbing; }
 .layer-plus:hover, .layer-plus:focus-visible { background: var(--accent-soft); outline: 2px solid var(--select); outline-offset: 2px; }
+.model-context-anchor { position: absolute; width: 1px; height: 1px; pointer-events: none; }
+.junction-controls { position: absolute; inset: 0; z-index: 5; pointer-events: none; }
+.junction-button { position: absolute; transform: translate(-50%, -50%); width: 25px; height: 25px; padding: 0; border: 2px solid var(--select); border-radius: 8px; background: var(--panel); color: var(--select); font-size: 19px; line-height: 1; cursor: pointer; pointer-events: auto; box-shadow: 0 2px 8px #0005; }
+.junction-button:hover, .junction-button:focus-visible, .junction-button[aria-expanded="true"] { background: var(--accent-soft); outline: 2px solid var(--select); outline-offset: 1px; }
+.junction-menu { position: absolute; width: 220px; padding: 5px; display: grid; gap: 3px; border: 1px solid var(--border); border-radius: 9px; background: var(--panel); color: var(--text); box-shadow: 0 8px 22px #0006; pointer-events: auto; }
+.junction-option { width: 100%; padding: 7px 9px; text-align: left; border: 1px solid transparent; border-radius: 6px; background: transparent; color: inherit; font-size: 12px; cursor: pointer; }
+.junction-option:hover, .junction-option:focus-visible, .junction-option.active { border-color: var(--accent); background: var(--accent-soft); outline: none; }
 .panel-head { display: flex; align-items: center; justify-content: space-between; padding: .7rem .9rem .4rem; font-weight: 700; }
 .panel-body { overflow: auto; padding: .2rem .5rem .8rem; min-height: 0; flex: 1; }
 .search { position: relative; margin: .2rem .7rem .4rem; }
@@ -324,3 +331,8 @@ table.schedule tfoot td { font-weight: 700; border-top: 2px solid var(--ink); bo
 .prop-row .sfb-name { color: var(--muted); font-size: .85em; overflow-wrap: anywhere; min-height: 1.1em; }
 .prop-row .with-unit .remove { position: absolute; right: .25rem; top: 50%; transform: translateY(-50%); }
 .prop-row .sfb-field .with-unit input { padding-right: 2rem; }
+.prop-row .color-controls { min-width: 0; display: grid; gap: .25rem; }
+.prop-row .color-controls-main { display: grid; grid-template-columns: 2.2rem minmax(0, 1fr) 1.75rem; align-items: center; gap: .25rem; min-width: 0; }
+.prop-row .color-controls-main input[type="color"] { padding: .15rem; height: 2rem; cursor: pointer; }
+.prop-row .color-controls-main .remove { position: static; width: 1.75rem; height: 1.75rem; }
+.prop-row .color-controls > input { font-variant-numeric: tabular-nums; }
