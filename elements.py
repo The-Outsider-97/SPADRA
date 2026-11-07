@@ -1480,8 +1480,11 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
             except BadRequest:
                 pass                                                                     # a downpipe without its gutter is reported by the model check, not drawn
             continue
-        if cat == "grid" or cat in OPENINGS:
-            continue  # datums are level-independent; doors/windows are emitted with their host wall below
+        if cat in ("grid", "array") or cat in OPENINGS:
+            # Grids are level-independent, openings are emitted with their
+            # host wall, and an array controller has no mesh of its own.
+            # Its individual geometric members are processed separately.
+            continue
         if cat == "wall":
             frame = wall_frame(project, oid)
             relative_cut = cut_z - frame["base"]
@@ -1489,6 +1492,11 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
                 continue
             wall_cuts[oid] = relative_cut
         elif cat not in ("room", "gutter"):
+            # Imported/legacy metadata groups can also be non-geometric.
+            # They are not drawable, but must not make a sheet digest or the
+            # entire Project Browser fail. Geometry validation is separate.
+            if obj.get("geometry") is None:
+                continue
             visible, cut_polygons = visible_geometry(oid, m(meta, "level") == level_id)
             if not visible:
                 continue
