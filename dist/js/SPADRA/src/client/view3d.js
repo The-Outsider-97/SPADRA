@@ -90,6 +90,14 @@ export class ModelView {
             input?.addEventListener("input", () => { const n = Number(input.value); if (n > 0)
                 this.store.wallOptions[option] = n; });
         }
+        const roof = this.store.roofOptions;
+        const roofKind = this.fields["roof.kind"];
+        roofKind?.addEventListener("change", () => { roof.kind = roofKind.value; });
+        for (const [key, field] of [["roof.pitch", "pitch"], ["roof.thickness", "thickness"]]) {
+            const input = this.fields[key];
+            input?.addEventListener("input", () => { const n = Number(input.value); if (Number.isFinite(n) && n > 0)
+                roof[field] = n; });
+        }
         this.hud = h("div", { class: "wall-hud", hidden: true }, h("label", {}, "Level", this.levelSelect), ...this.hudGroups);
         const rail = h("div", { class: "view-rail", attrs: { role: "toolbar", "aria-label": "View tools" } }, this.railButton("home", "Home view", () => { this.home(); }), this.railButton("search", "Zoom to selection", () => { this.zoomSelection(); }), this.railButton("pan", "Pan (hold the right mouse button, or toggle here)", (b) => { this.panMode = !this.panMode; b.setAttribute("aria-pressed", String(this.panMode)); }), this.orbitButton = this.railButton("orbit", "Orbit around the selected element (turn off to orbit around the point in the middle of the view)", () => { this.store.setOrbitSelection(!this.store.orbitSelection); }), this.railButton("fit", "Zoom to fit the whole model", () => { this.fit(); }));
         const unavailable = h("div", { class: "view-unavailable", hidden: !!this.gl, text: "3D view needs WebGL 2, which this browser does not provide. The model, properties and exports still work." });
@@ -826,7 +834,7 @@ export class ModelView {
         const level = this.levelSelect.value;
         const out = tool === "floor"
             ? await this.store.run("model.add_floor", { points, level, thickness: this.num("floor.thickness") })
-            : await this.store.run("model.add_roof", { points, level, roof: this.fields["roof.kind"]?.value, pitch: this.num("roof.pitch"), thickness: this.num("roof.thickness") });
+            : await this.store.run("model.add_roof", { points, level, roof: this.store.roofOptions.kind, pitch: this.store.roofOptions.pitch, thickness: this.store.roofOptions.thickness });
         if (out)
             this.polyPts = [];
         this.draw();
@@ -864,6 +872,12 @@ export class ModelView {
                 const input = this.fields[key];
                 if (input && document.activeElement !== input && Number(input.value) !== this.store.wallOptions[option])
                     input.value = String(this.store.wallOptions[option]);
+            }
+        if (tool === "roof")
+            for (const [key, value] of [["roof.kind", this.store.roofOptions.kind], ["roof.pitch", this.store.roofOptions.pitch], ["roof.thickness", this.store.roofOptions.thickness]]) {
+                const input = this.fields[key];
+                if (input && document.activeElement !== input && input.value !== String(value))
+                    input.value = String(value);
             }
         if (tool !== this.pendingTool) {
             this.wallStart = null;

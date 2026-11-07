@@ -42,6 +42,8 @@ export class Store {
     orbitSelection = readFlag("spadra.orbitSelection", true);
     /** What the next wall will be: height in metres, thickness in millimetres. Shared by the 2D and 3D wall tools. */
     wallOptions = { height: 3.2, thickness: 250 };
+    /** One roof creation specification shared by plan and 3D modeling tools. */
+    roofOptions = { kind: "flat", pitch: 30, thickness: 200 };
     /** What the Extrude, Void and Sweep tools make: depth and base in metres above the level, the sweep's profile in millimetres. */
     formOptions = { depth: 1, base: 0, voidDepth: 4, voidBase: -0.5, sweepWidth: 200, sweepHeight: 200, sweepShape: "rectangle", sweepBase: 0,
         sweepPolygon: null, sweepPivot: "center", sweepAngle: 0, sweepOffset: [0, 0, 0], sweepMirror: false, sweepRadius: 0 };

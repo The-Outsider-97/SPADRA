@@ -272,6 +272,40 @@ def _segment_params(project: Any, ids: Sequence[str]) -> dict[int, dict[str, Any
     return out
 
 
+def _roof_edge_clearance(project: Any, roof_id: str, roof: Mapping[str, Any], run_edges: Sequence[int], requested: float) -> float:
+    """Place a gutter run outside its roof-edge members, regardless of creation order.
+
+    The explicit gutter gap remains the user's minimum offset. The effective
+    gap is derived from the actual 3D edge profiles (including an adjacent
+    gable-end mitre), so adding, resizing or deleting a trim can never leave
+    a gutter inside it. Every segment of a connected gutter run shares the
+    same gap; its existing mitred corner and downpipe relationships survive.
+    """
+    trims = [E.meta_of(project, oid) for oid in E.element_ids(project)
+             if E.m(E.meta_of(project, oid), "roof_host") == roof_id
+             and E.m(E.meta_of(project, oid), "accessory_kind") == "roof_edge"]
+    if not trims:
+        return requested
+    boundary = [tuple(q) for q in E.m(roof, "boundary")]
+    bounds = []
+    for e in run_edges:
+        a, b = boundary[e], boundary[(e + 1) % len(boundary)]
+        length = math.dist(a, b)
+        u = ((b[0] - a[0]) / length, (b[1] - a[1]) / length)
+        bounds.append((a, u, _outward(boundary, u), length))
+    clearance = requested
+    for trim in trims:
+        vertices, _ = E._roof_edge_mesh(project, roof, int(E.m(trim, "edge")), float(E.m(trim, "width")),
+                                        float(E.m(trim, "depth")), float(E.m(trim, "vertical_offset", 0.0)),
+                                        float(E.m(trim, "lateral_offset", 0.0)))
+        for a, u, n, length in bounds:
+            for x, y, _ in vertices:
+                along = (x - a[0]) * u[0] + (y - a[1]) * u[1]
+                if -0.25 <= along <= length + 0.25:
+                    clearance = max(clearance, (x - a[0]) * n[0] + (y - a[1]) * n[1] + 0.005)
+    return clearance
+
+
 def frame(project: Any, oid: str) -> dict[str, Any]:
     """Where a gutter lies, in metres: the eave edge it hangs on (a to b), the unit vectors along it and out from the roof, the height of its high rim,
     and the chain of connected gutters it belongs to (``chain``, with this gutter's own entry as ``seg`` and the ids of the whole chain as ``ids``)."""
@@ -285,7 +319,8 @@ def frame(project: Any, oid: str) -> dict[str, Any]:
     boundary = [tuple(q) for q in E.m(rmeta, "boundary")]
     members = {int(E.m(E.meta_of(project, g), "edge")): g for g in run_members(project, rid, run_key(project, oid, meta))}
     order, closed = next((o, c) for o, c in order_edges(len(boundary), list(members)) if edge in o)
-    width, gap = float(E.m(meta, "width")), float(E.m(meta, "gap", 0.0))
+    width, requested_gap = float(E.m(meta, "width")), float(E.m(meta, "gap", 0.0))
+    gap = _roof_edge_clearance(project, rid, rmeta, order, requested_gap)
     chain = layout(boundary, order, closed, width=width, gap=gap, fall_to=E.m(meta, "fall_to", "end"), segments=_segment_params(project, [members[e] for e in order]))
     seg = next(s for s in chain["segments"] if s["edge"] == edge)
     eave = E.level_elevation(project, E.m(rmeta, "level")) + float(E.m(rmeta, "offset", 0.0))

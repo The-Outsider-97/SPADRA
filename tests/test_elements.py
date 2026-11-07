@@ -79,6 +79,41 @@ class RoofAccessoryConnections(ElementCase):
         self.run_("model.delete", id=roof)
         self.assertFalse(any(E.alive(self.p, oid) for oid in [beam, strap, *edges]))
 
+    def test_gable_end_roof_edges_have_one_watertight_ridge_mitre_and_flush_corner_seams(self):
+        """A gable tip cannot be two overlapping square-ended beams; the neighbouring roof edges share mitred section corners."""
+        roof = self.roof()
+        ids = self.run_("model.add_roof_accessory", roof=roof, kind="roof_edge", edge="all")["ids"]
+        scene = {o["id"]: o for o in self.p.scene_data()["objects"]}
+        meshes = [scene[oid] for oid in ids]                               # use world coordinates: SGEO stores local vertices + transforms
+        from collections import Counter
+        for index in (1, 3):
+            mesh = meshes[index]
+            self.assertEqual(len(mesh["vertices"]), 12)                   # one continuous strip through the ridge, with no doubled end caps
+            incidence = Counter(tuple(sorted((face[i], face[(i + 1) % 3]))) for face in mesh["faces"] for i in range(3))
+            self.assertTrue(incidence)
+            self.assertEqual(set(incidence.values()), {2})                # closed manifold, including its miter at the gable peak
+        for index in range(4):
+            outgoing = {tuple(round(c, 6) for c in v) for v in meshes[index]["vertices"][-4:]}
+            incoming = {tuple(round(c, 6) for c in v) for v in meshes[(index + 1) % 4]["vertices"][:4]}
+            self.assertEqual(outgoing, incoming)                          # same four world-space seam points, no overlap or corner gap
+
+    def test_flat_shed_and_hip_roof_edges_share_their_corner_mitre_without_overlapping_end_caps(self):
+        from collections import Counter
+
+        for kind in ("flat", "shed", "hip"):
+            with self.subTest(roof=kind):
+                roof = self.run_("model.add_roof", points=[[15000, 0], [23000, 0], [23000, 6000], [15000, 6000]],
+                                 level=self.l2, roof=kind, pitch=30, thickness=200)["id"]
+                ids = self.run_("model.add_roof_accessory", roof=roof, kind="roof_edge", edge="all")["ids"]
+                scene = {o["id"]: o for o in self.p.scene_data()["objects"]}
+                for index, oid in enumerate(ids):
+                    mesh = scene[oid]
+                    incidence = Counter(tuple(sorted((face[i], face[(i + 1) % 3]))) for face in mesh["faces"] for i in range(3))
+                    self.assertEqual(set(incidence.values()), {2}, f"{kind} edge {index} must be a closed solid")
+                    outgoing = {tuple(round(c, 6) for c in v) for v in mesh["vertices"][-4:]}
+                    adjacent = {tuple(round(c, 6) for c in v) for v in scene[ids[(index + 1) % 4]]["vertices"][:4]}
+                    self.assertEqual(outgoing, adjacent, f"{kind} adjacent edge {index} must meet at one shared mitre")
+
 
 class Appearance(ElementCase):
     def test_shared_and_instance_colors_are_independent_and_undoable(self):
@@ -289,6 +324,27 @@ class Floors(ElementCase):
 
 class Roofs(ElementCase):
     RECT = [[0, 0], [10000, 0], [10000, 6000], [0, 6000]]
+
+    def test_roof_plan_contains_editable_outline_and_ridge_after_boundary_change(self):
+        roof = self.run_("model.add_roof", points=self.RECT, level=self.roof_level, roof="gable", pitch=30)["id"]
+        view = next(v["id"] for v in self.p.manifest["views"] if v.get("level_id") == self.roof_level)
+        plan = self.p.drawing_data(view)
+        item = next(row for row in plan["model"] if row["id"] == roof)
+        self.assertEqual(item["category"], "roof")
+        self.assertEqual(item["outline"], self.RECT)
+        self.assertEqual(item["ridge"], [[0, 3000], [10000, 3000]])
+        self.assertEqual(len(item["polygon"]), 4)
+
+        # The same command used by an on-canvas roof corner/edge grip changes
+        # the actual SGEO roof, not just its plan outline or drawing overlay.
+        modified = [[0, 0], [11000, 0], [11000, 6000], [0, 6000]]
+        self.run_("model.set_boundary", id=roof, points=modified)
+        changed = next(row for row in self.p.drawing_data(view)["model"] if row["id"] == roof)
+        self.assertEqual(changed["outline"], modified)
+        self.assertEqual(changed["ridge"], [[0, 3000], [11000, 3000]])
+        self.assertAlmostEqual(self.vol(roof), 11 * 6 * 0.2)
+        self.p.undo()
+        self.assertEqual(next(row for row in self.p.drawing_data(view)["model"] if row["id"] == roof)["outline"], self.RECT)
 
     def test_flat_roof_over_any_outline(self):
         r = self.run_("model.add_roof", points=Floors.L, level=self.roof_level, roof="flat", thickness=150)["id"]

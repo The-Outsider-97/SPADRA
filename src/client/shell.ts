@@ -330,7 +330,7 @@ export class Shell {
       ]];
       case "Insert": return [[T("wall", "Wall", "wall", on3dOrPlan, { tool: "wall" }), T("sheet", "New sheet", "page", !!store.project, { run: () => this.newSheet() }),
         T("door", "Door", "door", on3dOrPlan, { tool: "door" }), T("window", "Window", "window", on3dOrPlan, { tool: "window" }),
-        T("floor", "Floor", "floor", on3dOrPlan, { tool: "floor" }), T("roof", "Roof", "roof", kind === "3d", { tool: "roof" }),
+        T("floor", "Floor", "floor", on3dOrPlan, { tool: "floor" }), T("roof", "Roof", "roof", on3dOrPlan, { tool: "roof" }),
           T("gutter", "Gutter", "gutter", !!store.project, { run: () => gutterDialog(store), note: "Select a roof, then hang gutters (and downpipes) on its eaves" }),
           T("downpipe", "Downpipe", "downpipe", !!store.project, { run: () => downpipeDialog(store), note: "Select a gutter, then add a downpipe under it" }),
           T("drainage", "Drainage", "report", !!store.project, { run: () => drainageDialog(store), note: "The rain each roof sends to its gutters and downpipes" }),
@@ -412,7 +412,7 @@ export class Shell {
       T("rotate", "Rotate", "rotate", onPlan, { tool: "rotate", note: "Turn the selected walls, columns, floors, rooms … about a point you pick" }),
       T("array", "Array", "array", !!store.project, { run: () => arrayDialog(store), note: "Repeat the selection along X, Y, Z or round a point, and keep the pattern editable" }), T("releasearray", "Release array", "array", !!store.project, { run: () => releaseArray(store), note: "Keep the copies of the selected array as ordinary elements and drop the pattern" })],
       [T("dimension", "Dimension", "dimension", kind === "drawing", { tool: "dimension" }), T("text", "Text", "text", kind === "drawing", { tool: "text" })],
-      [T("wall", "Wall", "wall", onPlan, { tool: "wall" }), T("door", "Door", "door", onPlan, { tool: "door" }), T("window", "Window", "window", onPlan, { tool: "window" }), T("floor", "Floor", "floor", onPlan, { tool: "floor" })],
+      [T("wall", "Wall", "wall", onPlan, { tool: "wall" }), T("door", "Door", "door", onPlan, { tool: "door" }), T("window", "Window", "window", onPlan, { tool: "window" }), T("floor", "Floor", "floor", onPlan, { tool: "floor" }), T("roof", "Roof", "roof", onPlan, { tool: "roof" })],
       [T("extrude", "Extrude", "extrude", onPlan, { tool: "extrude" }), T("void", "Void", "void", onPlan, { tool: "void" }), T("sweep", "Sweep", "sweep", onPlan, { tool: "sweep" }),
         T("makevoid", "Make void", "void", !!store.project, { run: () => this.makeVoid(), note: "Turn the selected extrusions into voids that cut" })],
       [T("section", "Section", "section", onPlan, { tool: "section" }), T("elevation", "Elevation", "elevation", true, { run: () => this.elevationMenu(this.ribbon) }), T("schedule", "Schedule", "table", true, { run: () => this.scheduleMenu(this.ribbon) }),
