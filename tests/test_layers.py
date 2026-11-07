@@ -351,6 +351,19 @@ class Floors(Case):
         self.run_("model.set_property", id=self.f, key=f"layer:{lid}:openings", value="none")
         self.assertAlmostEqual(self.vol(self.f), full - 1.0 * 0.2, places=5)      # the insulation now runs across the hole
 
+    def test_floor_properties_with_voids_list_openings_before_and_after_layering(self):
+        """A floor SlabCut must not be indexed like a five-field wall opening span."""
+        void = self.run_("model.add_extrusion", void=True, level=self.l1,
+                         points=[[1000, 1000], [2000, 1000], [2000, 2000], [1000, 2000]],
+                         base=-0.5, depth=0.7)["id"]
+        self.assertEqual({row["id"] for row in LY.openers(self.p, self.f)}, {void})
+        self.assertTrue(self.p.properties({"model": self.f}, relations=True)["groups"])
+        layer = self.add(material="EPS", thickness=100)
+        self.assertEqual({row["id"] for row in LY.openers(self.p, self.f)}, {void})
+        self.assertTrue(self.p.properties({"model": self.f}, relations=True)["groups"])
+        self.run_("model.set_property", id=self.f, key=f"layer:{layer}:openings", value="selected")
+        self.assertEqual(LY.stack(self.p, self.f)[1]["opening_ids"], [void])
+
     def test_a_void_that_reaches_only_the_upper_layer_is_a_partial_depth_cut(self):
         self.add(material="EPS", thickness=100)
         full = self.vol(self.f)

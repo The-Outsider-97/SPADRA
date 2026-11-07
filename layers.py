@@ -178,7 +178,17 @@ def openers(project: Any, oid: str) -> list[dict[str, str]]:
             cuts = FX._cuts(project, oid, vs)[2]
         except BadRequest:
             cuts = []
-        ids = {c[4] if isinstance(c, (list, tuple)) else c["id"] for c in (cuts if cat == "wall" else list(cuts))}
+        if cat == "wall":
+            # Wall cuts are five-field opening spans; do not treat a floor's
+            # list-backed SlabCut as an opening span.
+            ids = {c[4] for c in cuts if isinstance(c, (tuple, list)) and len(c) >= 5}
+        else:
+            # An unlayered floor returns one SlabCut (a list of void records).
+            # A layered floor returns a list of SlabCuts, one per material
+            # layer. Flatten those records, not their numeric positions.
+            slabs = cuts if isinstance(cuts, list) and not isinstance(cuts, FX.SlabCut) else [cuts]
+            ids = {v["id"] for slab in slabs if isinstance(slab, FX.SlabCut)
+                   for v in slab if isinstance(v, dict) and "id" in v}
         out.extend({"id": v["id"], "name": v["name"], "kind": "void"} for v in vs if v["id"] in ids)
     return out
 
