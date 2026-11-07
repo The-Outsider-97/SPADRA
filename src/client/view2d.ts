@@ -28,6 +28,7 @@ const CURVE_TOOLS = new Set<string>(["offset", "trim", "extend", "fillet", "hatc
 type Edit =
   | { kind: "end"; id: string; end: "a" | "b"; axis: { a: Pt; b: Pt; thickness: number }; from: Pt; now: Pt; moved: boolean }
   | { kind: "outline"; id: string; points: Pt[]; corner: number; edge: number; from: Pt; now: Pt; moved: boolean }
+  | { kind: "ridge"; id: string; segment: [Pt, Pt]; across: Pt; offset: number; from: Pt; now: Pt; moved: boolean }
   | { kind: "turn"; ids: string[]; centre: Pt; from: Pt; now: Pt; raw: Pt; fine: boolean; moved: boolean }
   | { kind: "mark"; id: string; part: "a" | "b" | "body"; from: Pt; now: Pt; moved: boolean };
 /** A handle drawn on the selection: where it is, its look, and the edit that dragging it starts. */
@@ -620,6 +621,11 @@ export class DrawingView {
       const pts = floor.outline;
       pts.forEach((at, i) => out.push({ at, shape: "square", edit: (): Edit => ({ kind: "outline", id: floor.id, points: pts, corner: i, edge: -1, from: at, now: at, moved: false }) }));       // a corner moves freely
       pts.forEach((a, i) => { const at = mid(a, pts[(i + 1) % pts.length] as Pt); out.push({ at, shape: "square", edit: (): Edit => ({ kind: "outline", id: floor.id, points: pts, corner: -1, edge: i, from: at, now: at, moved: false }) }); });       // an edge moves across itself
+      if (floor.ridge && floor.ridge_across) {
+        const at = mid(floor.ridge[0], floor.ridge[1]);
+        out.push({ at, shape: "square", edit: (): Edit => ({ kind: "ridge", id: floor.id, segment: floor.ridge as [Pt, Pt], across: floor.ridge_across as Pt,
+          offset: floor.ridge_offset ?? 0, from: at, now: at, moved: false }) });
+      }
     }
     const box = polygonsBounds(data.model.filter((w) => ids.includes(w.id)).map((w) => w.polygon));
     if (box) {
@@ -649,6 +655,10 @@ export class DrawingView {
     } else if (ed.kind === "outline") {
       const next = this.outlineAfter(ed);
       if (next) await this.store.run("model.set_boundary", { id: ed.id, points: next });
+    } else if (ed.kind === "ridge") {
+      const delta = (ed.now[0] - ed.from[0]) * ed.across[0] + (ed.now[1] - ed.from[1]) * ed.across[1];
+      const mmPerUnit = this.store.unit === "m" ? 1000 : this.store.unit === "cm" ? 10 : 1;
+      await this.store.run("model.set_property", { id: ed.id, key: "ridge_offset", value: (ed.offset + delta) * mmPerUnit });
     } else if (ed.kind === "turn") {
       const degrees = (this.turnAngle(ed) * 180) / Math.PI;
       if (Math.abs(degrees) > 1e-9) await this.store.run("model.rotate", { ids: ed.ids, centre: ed.centre, angle: degrees });
@@ -1042,6 +1052,11 @@ export class DrawingView {
     } else if (ed.kind === "outline") {
       const next = this.outlineAfter(ed);
       if (next) { ctx.beginPath(); this.tracePolygon(next); ctx.fill(); ctx.stroke(); }
+    } else if (ed.kind === "ridge") {
+      const d = (ed.now[0] - ed.from[0]) * ed.across[0] + (ed.now[1] - ed.from[1]) * ed.across[1];
+      const a: Pt = [ed.segment[0][0] + ed.across[0] * d, ed.segment[0][1] + ed.across[1] * d];
+      const b: Pt = [ed.segment[1][0] + ed.across[0] * d, ed.segment[1][1] + ed.across[1] * d];
+      ctx.beginPath(); this.line(a, b); ctx.stroke(); this.paintBadge(`Ridge ${((ed.offset + d) * (this.store.unit === "m" ? 1000 : this.store.unit === "cm" ? 10 : 1)).toFixed(0)} mm`, ed.now, k);
     } else if (ed.kind === "turn") {
       const angle = this.turnAngle(ed);
       for (const w of this.data?.model ?? []) if (ed.ids.includes(w.id)) { ctx.beginPath(); this.tracePolygon(w.polygon.map((p) => rotateAbout(p, ed.centre, angle))); ctx.fill(); ctx.stroke(); }
@@ -1249,6 +1264,7 @@ export class DrawingView {
     if (w.category === "floor" || w.category === "roof") {
       trace(); ctx.setLineDash([]); ctx.lineWidth = selected ? 2 : 1; ctx.fillStyle = withAlpha(color, selected ? 0.18 : 0.06); ctx.fill("evenodd");
       ctx.strokeStyle = selected ? color : withAlpha(k.muted, 0.9); ctx.stroke();
+      if (w.ridge) { ctx.beginPath(); this.line(w.ridge[0], w.ridge[1]); ctx.setLineDash([5, 3]); ctx.strokeStyle = selected ? k.select : color; ctx.stroke(); ctx.setLineDash([]); }
       for (const poly of w.cut_polygons ?? []) {
         ctx.beginPath(); poly.forEach((p, i) => { const [x, y] = this.toScreen(p); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); }); ctx.closePath();
         ctx.fillStyle = withAlpha(color, selected ? 0.35 : 0.2); ctx.fill(); ctx.strokeStyle = color; ctx.stroke();

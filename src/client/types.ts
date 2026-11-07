@@ -89,6 +89,8 @@ export interface PlanWall {
   axis?: { a: Pt; b: Pt; thickness: number };
   /** A floor's outline (its corner points, in the drawing's unit): what its corner and edge grips hold. */
   outline?: Pt[];
+  /** A gable roof's selectable ridge line and its transverse offset, in drawing units. */
+  ridge?: [Pt, Pt]; ridge_offset?: number; ridge_across?: Pt;
   /** A foundation's kind (poer, strook, plaat...). */
   kind?: string;
 }
@@ -124,7 +126,7 @@ export interface ScheduleData {
   totals: Record<string, number>; count: number; note: string;
 }
 
-export interface SceneObject { id: string; name: string; category: string; material: string | null; vertices: Pt3[]; faces: number[][]; layer_points?: Array<{ side: string; point: Pt3 }> }
+export interface SceneObject { id: string; name: string; category: string; material: string | null; color?: string | null; layer_colors?: Array<{ count: number; color: string | null }>; ridge_handle?: { point: Pt3; across: Pt; offset_mm: number } | null; vertices: Pt3[]; faces: number[][]; layer_points?: Array<{ side: string; point: Pt3 }> }
 export interface Scene { unit: "m"; revision: number; objects: SceneObject[]; bounds: [Pt3, Pt3] | null; time?: number }
 
 /** The model's animation as the SLAI Animation Agent holds it in the SGEO scene. Times are seconds. ``lanes`` is the same tracks in the units
@@ -153,7 +155,7 @@ export interface Choice { value: string; label: string }
 /** Where a ``link`` row leads: select an element (or a drawing entity), open a view or sheet, or open a dialog. */
 export interface LinkTarget { select?: { model?: string; drawing?: string; entity?: string }; open?: OpenRef; dialog?: string }
 export interface PropRow {
-  key?: string; label: string; type: "text" | "number" | "choice" | "readonly" | "link" | "sfb" | "catalog"; value: string | number; unit?: string; choices?: Choice[];
+  key?: string; label: string; type: "text" | "number" | "choice" | "readonly" | "link" | "sfb" | "catalog" | "color"; value: string | number; unit?: string; choices?: Choice[];
   /** A custom property or a note can be taken away. */
   removable?: boolean; target?: LinkTarget;
   /** An NL-SfB code: the table the picker searches, the name of the code that is set, and the codes usually given to this kind of element. */

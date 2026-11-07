@@ -12,6 +12,26 @@ RECT = [[0, 0], [6000, 0], [6000, 4000], [0, 4000]]
 
 
 class Attachments(Case):
+    def test_offset_ridge_preserves_peak_elevation_and_updates_attached_gable_wall(self):
+        w, r = self.gable_wall(), self.roof()
+        self.run_("model.attach_wall", ids=[w, r], to="roof")
+        before = self.top(w)
+        self.run_("model.set_property", id=r, key="ridge_offset", value=600)
+        self.assertAlmostEqual(self.top(w), before, places=6)
+        prof = self.meta(w)["spadra:top_profile"]
+        self.assertEqual([round(s, 6) for s, _ in prof], [0.0, 2.6, 4.0])
+        self.assertNotAlmostEqual(prof[1][0] - prof[0][0], prof[2][0] - prof[1][0])
+        plan = next(v["id"] for v in self.p.manifest["views"] if v.get("level_id") == self.roof_level and v["kind"] == "plan")
+        ridge = next(q["ridge"] for q in self.p.plan_overlay(plan) if q["id"] == r)
+        self.assertAlmostEqual((ridge[0][0] + ridge[1][0]) / 2, 3000.0)
+        self.assertAlmostEqual((ridge[0][1] + ridge[1][1]) / 2, 2600.0)
+        handle = next(q["ridge_handle"] for q in self.p.scene_data()["objects"] if q["id"] == r)
+        self.assertAlmostEqual(handle["offset_mm"], 600)
+        self.assertAlmostEqual(handle["point"][2], self.elevation(self.roof_level) + 2 * math.tan(math.radians(30)))
+        self.assertAlmostEqual(self.vol(w), .25 * (4 * (self.elevation(self.roof_level) - .1) + 2 * math.tan(math.radians(30)) * 2), places=5)
+        self.p.undo()
+        self.assertEqual([round(s, 6) for s, _ in self.meta(w)["spadra:top_profile"]], [0.0, 2.0, 4.0])
+
     def elevation(self, level):
         return self.p.level(level)["elevation"]
 

@@ -44,7 +44,8 @@ def is_layered(meta: Mapping[str, Any]) -> bool:
 
 def _full(row: Mapping[str, Any]) -> dict[str, Any]:
     out = {"id": str(row.get("id") or new_id()[:8]), "name": str(row.get("name") or row.get("material") or "Layer"), "material": str(row.get("material") or "Concrete"),
-           "thickness": float(row["thickness"]), "openings": str(row.get("openings") or "all"), "opening_ids": [str(i) for i in row.get("opening_ids") or []]}
+           "thickness": float(row["thickness"]), "openings": str(row.get("openings") or "all"), "opening_ids": [str(i) for i in row.get("opening_ids") or []],
+           "color": E.color(row.get("color"))}
     for edge in EDGES:
         out[edge] = float(row.get(edge) or 0.0)
     return out
@@ -190,6 +191,8 @@ def set_field(project: Any, oid: str, key: str, value: Any) -> None:
         if value not in materials():
             raise BadRequest(f"material must be one of {', '.join(materials())}")
         row["material"] = str(value)
+    elif field == "color":
+        row["color"] = E.color(value)
     elif field == "thickness":
         row["thickness"] = number(value, "thickness (mm)", 1, 5000) / 1000.0
     elif field == "openings":
@@ -448,6 +451,8 @@ def rows(project: Any, oid: str) -> dict[str, Any] | None:
         block: list[dict[str, Any]] = [
             {"key": key("name"), "label": f"{n}. Name", "type": "text", "value": lay["name"], "removable": len(layers) > 1},
             {"key": key("material"), "label": f"{n}. Material", "type": "choice", "value": lay["material"], "choices": mats},
+            {"key": key("color"), "label": f"{n}. Color override", "type": "color", "value": lay["color"] or "",
+             "text": project.manifest.get("material_colors", {}).get(lay["material"]) or E.MATERIAL_COLORS.get(lay["material"], "#BFBFC7")},
             {"key": key("thickness"), "label": f"{n}. Thickness", "type": "number", "unit": "mm", "value": round(lay["thickness"] * 1000, 6)}]
         if cat != "roof" and every:
             block.append({"key": key("openings"), "label": f"{n}. Openings", "type": "choice", "value": lay["openings"], "choices": modes})

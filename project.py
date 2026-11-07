@@ -647,8 +647,22 @@ class Project:
                 raise LimitExceeded(f"The model has more than {max_vertices} vertices to draw", hint="Hide or simplify objects")
             meta = obj["metadata"]
             category = meta.get(f"{NS}:category", "generic")
+            counts = E.m(meta, "layer_faces") or []
+            layers = LY.stack(self, oid) if counts and category in LY.LAYERED else []
+            layer_colors = ([{"count": int(n), "color": E.m(meta, "color") or lay.get("color") or
+                             self.manifest.get("material_colors", {}).get(lay["material"]) or E.MATERIAL_COLORS.get(lay["material"])}
+                            for n, lay in zip(counts, layers)] if len(counts) == len(layers) and sum(counts) == len(mesh["faces"]) else [])
+            ridge = E.roof_ridge(meta) if category == "roof" else None
+            ridge_handle = None
+            if ridge:
+                mid = [(ridge[0][i] + ridge[1][i]) / 2 for i in range(2)]
+                across = E._rectangle([list(q) for q in E.m(meta, "boundary")])[2]
+                z = E.level_elevation(self, E.m(meta, "level")) + float(E.m(meta, "offset", 0.0)) + E.roof_rise(meta)
+                ridge_handle = {"point": [*mid, z], "across": list(across), "offset_mm": float(E.m(meta, "ridge_offset", 0.0)) * 1000}
             objects.append({"id": oid, "name": obj["name"], "category": category,
-                            "material": meta.get(f"{NS}:material"), "vertices": verts, "faces": mesh["faces"],
+                            "material": meta.get(f"{NS}:material"), "color": E.appearance_color(self, meta), "vertices": verts, "faces": mesh["faces"],
+                            "layer_colors": layer_colors,
+                            "ridge_handle": ridge_handle,
                             "layer_points": self._layer_points(category, meta, verts, mesh["faces"])})
         all_bounds = raw.bounds_by_object()
         wb = [all_bounds[o["id"]] for o in objects]
@@ -715,7 +729,7 @@ class Project:
                 raise LimitExceeded(f"The model has more than {max_vertices} vertices to draw", hint="Hide or simplify objects")
             meta = obj["metadata"]
             objects.append({"id": oid, "name": obj["name"], "category": meta.get(f"{NS}:category", "generic"),
-                            "material": meta.get(f"{NS}:material"), "vertices": verts, "faces": mesh["faces"]})
+                            "material": meta.get(f"{NS}:material"), "color": E.appearance_color(self, meta), "vertices": verts, "faces": mesh["faces"]})
         bounds = None
         if objects:
             lo = [min(v[i] for o in objects for v in o["vertices"]) for i in range(3)]

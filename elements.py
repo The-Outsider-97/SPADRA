@@ -12,6 +12,7 @@ anything that would no longer fit (a wall shortened past a door, two openings ov
 from __future__ import annotations
 
 import math
+import re
 from typing import Any, Mapping, NamedTuple
 
 from ..tools.errors import BadRequest, NotFound
@@ -24,6 +25,7 @@ from . import classifications as CL
 
 NS = "spadra"
 MATERIALS = ("Concrete", "Timber", "Glass", "Masonry", "Steel", "Plasterboard")
+MATERIAL_COLORS = {"Concrete": "#B8BABF", "Timber": "#B3804D", "Glass": "#8CBFE0", "Masonry": "#B86B57", "Steel": "#808FA3", "Plasterboard": "#EBE8E0"}
 BEAM_MATERIALS = ("Steel", "Concrete", "Timber")
 CUT_HEIGHT = 1.5                      # default cut plane, relative to the associated level (metres)
 DOOR_LEAF = 0.05                      # thickness of the drawn door leaf, m
@@ -51,6 +53,21 @@ def category(project: Any, oid: str) -> str:
 
 def m(meta: Mapping[str, Any], key: str, default: Any = None) -> Any:
     return meta.get(f"{NS}:{key}", default)
+
+
+def color(value: Any) -> str | None:
+    """A normalized sRGB color, or None to remove an appearance override."""
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or re.fullmatch(r"#[0-9a-fA-F]{6}", value) is None:
+        raise BadRequest("A material color must be a six-digit HEX value such as #4477AA, or empty to reset")
+    return value.upper()
+
+
+def appearance_color(project: Any, meta: Mapping[str, Any]) -> str | None:
+    """Instance override takes precedence over a project-level material appearance."""
+    material = m(meta, "material")
+    return m(meta, "color") or project.manifest.get("material_colors", {}).get(material) or MATERIAL_COLORS.get(material)
 
 
 def all_ids(doc: Any, **query: Any) -> list[str]:
@@ -189,7 +206,26 @@ def join_ends(table: Mapping[str, _WallRow], oid: str, start: tuple[float, float
                     members.append((xid, G.unit(G.sub(far, near)), row.thickness))
                     shaped.add(xid)
                     break
-        left_right: tuple[float, float] | None = G.miter_node(members)[oid] if len(members) > 1 else None
+        # At a T (or a cross) whose centre-line consists of two collinear,
+        # equally thick walls, those two walls form the uninterrupted run.
+        # The other arms butt against its faces.  A radial mitre of all three
+        # arms leaves a small triangular void at the node and interrupts the
+        # continuous run even though the walls have separate identities.
+        through: tuple[str, str, tuple[float, float], float] | None = None
+        if len(members) >= 3:
+            pairs = []
+            for i, (aid, ad, at) in enumerate(members):
+                for bid, bd, bt in members[i + 1:]:
+                    if abs(G.cross(ad, bd)) <= 1e-7 and G.dot(ad, bd) < -1 + 1e-7 and abs(at - bt) <= 1e-7:
+                        pairs.append((min(aid, bid), max(aid, bid), ad, at))
+            if pairs:
+                through = min(pairs, key=lambda pair: (pair[0], pair[1]))
+        if through and oid in through[:2]:
+            left_right: tuple[float, float] | None = (0.0, 0.0)
+        elif through:
+            left_right = G.butt_ends(d, t, point, through[2], point, through[3])
+        else:
+            left_right = G.miter_node(members)[oid] if len(members) > 1 else None
         if left_right is None:                                                 # no wall ends here: does this end touch the side of one?
             best: tuple[float, str] | None = None
             for xid, row in table.items():
@@ -619,6 +655,16 @@ def roof_rise(meta: Mapping[str, Any]) -> float:
     return (width if kind == "shed" else width / 2) * math.tan(math.radians(float(m(meta, "pitch"))))
 
 
+def roof_ridge(meta: Mapping[str, Any]) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    """Gable ridge endpoints in plan (metres), respecting its transverse offset."""
+    if m(meta, "roof") != "gable":
+        return None
+    centre, along, across, length, _ = _rectangle([list(q) for q in m(meta, "boundary")])
+    shift = float(m(meta, "ridge_offset", 0.0))
+    return tuple((centre[0] + across[0] * shift + along[0] * t,
+                  centre[1] + across[1] * shift + along[1] * t) for t in (-length / 2, length / 2))  # type: ignore[return-value]
+
+
 Facet = tuple[list[tuple[float, float]], tuple[float, float, float]]
 
 
@@ -652,8 +698,11 @@ def roof_facets(project: Any, meta: Mapping[str, Any]) -> list[Facet]:
         shapes = [[(-width / 2, -length / 2, 0.0), (width / 2, -length / 2, width * rise), (width / 2, length / 2, width * rise), (-width / 2, length / 2, 0.0)]]
     elif kind == "gable":
         r = width / 2 * rise
-        shapes = [[(-width / 2, -length / 2, 0.0), (0.0, -length / 2, r), (0.0, length / 2, r), (-width / 2, length / 2, 0.0)],
-                  [(0.0, -length / 2, r), (width / 2, -length / 2, 0.0), (width / 2, length / 2, 0.0), (0.0, length / 2, r)]]
+        ridge = float(m(meta, "ridge_offset", 0.0))
+        if abs(ridge) >= width / 2 - 0.05:
+            raise BadRequest("The ridge must remain at least 50 mm inside both eaves")
+        shapes = [[(-width / 2, -length / 2, 0.0), (ridge, -length / 2, r), (ridge, length / 2, r), (-width / 2, length / 2, 0.0)],
+                  [(ridge, -length / 2, r), (width / 2, -length / 2, 0.0), (width / 2, length / 2, 0.0), (ridge, length / 2, r)]]
     else:                                                                              # hip
         ridge, top = (length - width) / 2, width / 2 * rise
         pts = [(-width / 2, -length / 2, 0.0), (width / 2, -length / 2, 0.0), (width / 2, length / 2, 0.0), (-width / 2, length / 2, 0.0), (0.0, -ridge, top), (0.0, ridge, top)]
@@ -712,7 +761,10 @@ def _roof_mesh(meta: Mapping[str, Any], base: float, thickness: float) -> G.Mesh
         return _positive_volume(_hip_mesh(centre, along, across, length, width, rise_angle, thickness, base))
     if kind == "gable":
         r = width / 2 * rise_angle
-        profile = [(-width / 2, -thickness), (0.0, r - thickness), (width / 2, -thickness), (width / 2, 0.0), (0.0, r), (-width / 2, 0.0)]
+        ridge = float(m(meta, "ridge_offset", 0.0))
+        if abs(ridge) >= width / 2 - 0.05:
+            raise BadRequest("The ridge must remain at least 50 mm inside both eaves")
+        profile = [(-width / 2, -thickness), (ridge, r - thickness), (width / 2, -thickness), (width / 2, 0.0), (ridge, r), (-width / 2, 0.0)]
     else:
         r = width * rise_angle
         profile = [(-width / 2, -thickness), (width / 2, r - thickness), (width / 2, r), (-width / 2, 0.0)]
@@ -758,9 +810,12 @@ def add_roof(project: Any, p: Mapping[str, Any], to_m: float) -> str:
     material = _choice(p.get("material", "Timber"), MATERIALS, "material")
     if kind != "flat":
         _rectangle(boundary)
+    ridge_offset = number(p.get("ridge_offset", 0.0), "ridge offset (mm)", -1e6, 1e6) / 1000.0 if kind == "gable" else 0.0
+    if kind == "gable" and abs(ridge_offset) >= _rectangle(boundary)[4] / 2 - 0.05:
+        raise BadRequest("The ridge must remain at least 50 mm inside both eaves")
     oid = project.model.add_box(width=1.0, depth=1.0, height=1.0, name=text(p.get("name") or ROOF_TYPES[kind], "name", 80))
     _attach(project, oid, {"category": "roof", "type": ROOF_TYPES[kind], "roof": kind, "level": level["id"], "boundary": boundary, "thickness": thickness,
-                           "pitch": pitch, "offset": 0.0, "material": material})
+                           "pitch": pitch, "offset": 0.0, "ridge_offset": ridge_offset, "material": material})
     regenerate_roof(project, oid)
     return oid
 
@@ -977,6 +1032,22 @@ def set_property(project: Any, oid: str, key: str, value: Any) -> None:
     meta = meta_of(project, oid)
     cat = m(meta, "category")
     values: dict[str, Any] = {}
+    if key == "color":
+        if not m(meta, "material"):
+            raise BadRequest("This element has no assignable material appearance")
+        _attach(project, oid, {"color": color(value)})
+        return
+    if key == "material_color":
+        material = m(meta, "material")
+        if not material:
+            raise BadRequest("This element has no assignable material appearance")
+        chosen = color(value)
+        palette = project.manifest.setdefault("material_colors", {})
+        if chosen is None:
+            palette.pop(material, None)
+        else:
+            palette[material] = chosen
+        return
     if key.startswith("custom:"):
         from . import relations as RL
         RL.set_custom(project, oid, key[7:], RL.parse_custom(value))
@@ -1080,7 +1151,13 @@ def set_property(project: Any, oid: str, key: str, value: Any) -> None:
             kind = _choice(value, tuple(ROOF_TYPES), "roof type")
             if kind != "flat":
                 _rectangle([list(q) for q in m(meta, "boundary")])
-            values.update({"roof": kind, "type": ROOF_TYPES[kind]})
+            values.update({"roof": kind, "type": ROOF_TYPES[kind], "ridge_offset": float(m(meta, "ridge_offset", 0.0)) if kind == "gable" else 0.0})
+        elif key == "ridge_offset" and cat == "roof" and m(meta, "roof") == "gable":
+            half_width = _rectangle([list(q) for q in m(meta, "boundary")])[4] / 2
+            shift = _mm(value, "ridge offset", -100000, 100000)
+            if abs(shift) >= half_width - 0.05:
+                raise BadRequest("The ridge must remain at least 50 mm inside both eaves")
+            values["ridge_offset"] = shift
         elif key == "pitch" and cat == "roof" and m(meta, "roof") != "flat":
             values["pitch"] = number(value, "pitch", 1, 80)
         elif key == "slope" and cat == "roof" and m(meta, "roof") != "flat":      # the same pitch, as a percentage rise over run
@@ -1470,6 +1547,11 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
             boundary = [[q[0] * f, q[1] * f] for q in m(meta, "boundary")]
             item = {"id": oid, "category": "roof", "name": obj["name"], "polygon": boundary, "outline": boundary,
                     **({"cut_polygons": cut_polygons} if cut_polygons else {})}
+            ridge = roof_ridge(meta)
+            if ridge:
+                item["ridge"] = [[p[0] * f, p[1] * f] for p in ridge]
+                item["ridge_offset"] = float(m(meta, "ridge_offset", 0.0)) * f
+                item["ridge_across"] = list(_rectangle([list(q) for q in m(meta, "boundary")])[2])
             if cut_polygons and show_hatching:
                 from . import documentation as DOC
                 item["hatch"] = DOC.hatch_pattern(project, m(meta, "material"))
@@ -1634,6 +1716,15 @@ def properties(project: Any, oid: str, relations: bool = False) -> dict[str, Any
     from . import layers as LY
     from . import relations as RL
     out = _properties(project, oid)
+    meta = meta_of(project, oid)
+    material = m(meta, "material")
+    if out.get("kind") == "model" and material:
+        shared = project.manifest.get("material_colors", {}).get(material) or MATERIAL_COLORS.get(material, "#BFBFC7")
+        at = next((i for i, g in enumerate(out["groups"]) if g["title"] == "Identity"), len(out["groups"]))
+        out["groups"].insert(at, {"title": "Appearance", "rows": [
+            {"key": "color", "label": "Element color override", "type": "color", "value": m(meta, "color") or "", "text": shared},
+            {"key": "material_color", "label": f"Shared {material} color", "type": "color", "value": shared},
+        ]})
     group = LY.rows(project, oid) if out.get("kind") == "model" else None
     if group and len(LY.stack(project, oid)) > 1:                               # with several layers the totals are derived: shown, not edited
         for row in out["top"] + [r for g in out["groups"] for r in g["rows"]]:
@@ -1840,6 +1931,8 @@ def _properties(project: Any, oid: str) -> dict[str, Any]:
             pitch = float(m(meta, "pitch"))
             out["top"] += [{"key": "pitch", "label": "Pitch", "type": "number", "unit": "°", "value": round(pitch, 6)},
                            {"key": "slope", "label": "Slope", "type": "number", "unit": "%", "value": round(math.tan(math.radians(pitch)) * 100, 6)}]
+            if m(meta, "roof") == "gable":
+                out["top"].append({"key": "ridge_offset", "label": "Ridge offset", "type": "number", "unit": "mm", "value": round(float(m(meta, "ridge_offset", 0.0)) * 1000, 6)})
         extra = []
         if cat == "roof" and m(meta, "roof") != "flat":
             extra = [{"label": "Rise to ridge", "type": "readonly", "value": f"{roof_rise(meta):.3f} m"}]

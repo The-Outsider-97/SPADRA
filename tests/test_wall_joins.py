@@ -118,6 +118,44 @@ class Corners(Joints):
 
 
 class Tees(Joints):
+    def test_added_branch_layer_does_not_penetrate_through_wall_core(self):
+        through = self.wall((0, 0), (6000, 0), 300)
+        branch = self.wall((3000, 0), (3000, 3000), 100)
+        self.p.execute("model.add_layer", {"id": branch, "material": "Plasterboard", "thickness": 50, "side": "left"})
+        self.assertEqual(self.ends(branch)[0], (-0.15, -0.15))
+        self.assertEqual(self.ends(through), G.SQUARE_ENDS)
+        self.assertAlmostEqual(self.p.model.volume(branch, unit="m"), (3.0 - .15) * .15 * 3, places=6)
+        for x in range(2900, 3101, 10):
+            for y in range(-180, 270, 10):
+                a, b = self.plan(through)[0], self.plan(branch)[0]
+                self.assertFalse(inside(a, (x + .25, y + .25)) and inside(b, (x + .25, y + .25)), (x, y))
+
+    def test_two_collinear_walls_at_a_three_way_node_remain_continuous(self):
+        left = self.wall((-3000, 0), (0, 0))
+        right = self.wall((0, 0), (3000, 0))
+        branch = self.wall((0, 0), (0, 3000))
+        self.assertEqual(self.ends(left), G.SQUARE_ENDS)
+        self.assertEqual(self.ends(right), G.SQUARE_ENDS)
+        self.assertEqual(self.ends(branch)[0], (-0.1, -0.1))
+        for x in range(-150, 151, 10):
+            for y in range(-150, 151, 10):
+                hits = sum(inside(self.plan(w)[0], (x + .25, y + .25)) for w in (left, right, branch))
+                self.assertEqual(hits, 1 if -100 < y + .25 < 100 or (-100 < x + .25 < 100 and y + .25 > 100) else 0)
+        self.p.execute("model.delete", {"id": right})
+        self.assertEqual(self.meta(left)["spadra:joins"], [branch])
+        self.p.undo()
+        self.assertEqual(self.ends(right), G.SQUARE_ENDS)
+
+    def test_four_way_cross_has_no_void_or_double_occupied_area(self):
+        ids = [self.wall(a, b) for a, b in (((-3000, 0), (0, 0)), ((0, 0), (3000, 0)),
+                                             ((0, -3000), (0, 0)), ((0, 0), (0, 3000)))]
+        polygons = [self.plan(w)[0] for w in ids]
+        for x in range(-180, 181, 10):
+            for y in range(-180, 181, 10):
+                occupied = sum(inside(poly, (x + .25, y + .25)) for poly in polygons)
+                expected = int(abs(x + .25) < 100 or abs(y + .25) < 100)
+                self.assertEqual(occupied, expected, (x, y))
+
     def test_a_wall_that_ends_on_another_is_cut_flush_to_its_face(self):
         through, branch = self.wall((0, 0), (6000, 0)), self.wall((3000, 0), (3000, 3000))
         (sl, sr), _ = self.ends(branch)

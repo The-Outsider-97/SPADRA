@@ -187,6 +187,13 @@ class Supports(Case):
 
 
 class Strips(Case):
+    def test_three_strips_at_one_node_keep_the_collinear_run_solid(self):
+        walls = [self.wall(a, b) for a, b in [([-3000, 0], [0, 0]), ([0, 0], [3000, 0]), ([0, 0], [0, 4000])]]
+        strips = [self.found(kind="strook", support=[w], width=600, height=500) for w in walls]
+        self.assertAlmostEqual(sum(self.vol(s) for s in strips), (6.0 + 4.0 - .3) * .6 * .5, places=6)
+        self.assertEqual(self.meta(strips[0])[f"{NS}:ends"], [[0.0, 0.0], [0.0, 0.0]])
+        self.assertEqual(self.meta(strips[1])[f"{NS}:ends"], [[0.0, 0.0], [0.0, 0.0]])
+
     def test_strips_under_walls_that_meet_are_mitred_so_the_corner_is_solid_once(self):
         w1, w2 = self.wall([0, 0], [6000, 0]), self.wall([6000, 0], [6000, 5000])
         a, b = self.found(kind="strook", support=[w1], width=600, height=500), self.found(kind="strook", support=[w2], width=600, height=500)
@@ -457,7 +464,7 @@ class Commands(Case):
         pad = self.found(kind="poer", support=[c], height=500, bars=[{"diameter": 12, "spacing": 150, "role": "x"}])
         panel = self.p.properties({"model": pad})
         titles = [g["title"] for g in panel["groups"]]
-        self.assertEqual(titles[:5], ["Geometry", "Constraints", "Concrete and reinforcement", "Quantities", "Identity"][:5])
+        self.assertEqual(titles[:6], ["Geometry", "Constraints", "Concrete and reinforcement", "Quantities", "Appearance", "Identity"])
         rf = next(g for g in panel["groups"] if g["title"] == "Concrete and reinforcement")["rows"]
         self.assertTrue(any("Declared, not designed or verified" in str(r["value"]) for r in rf))
         self.run_("model.set_property", id=pad, key="height", value=700)

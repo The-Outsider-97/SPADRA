@@ -23,7 +23,8 @@ const VOID_ALPHA = 0.3;
 const PITCH_LIMIT = Math.PI / 2 - 0.02;
 
 interface Drawable {
-  id: string; name: string; material: string | null; category: string;
+  id: string; name: string; material: string | null; color: string | null; layerColors: Array<{ count: number; color: string | null }>; category: string;
+  ridgeHandle: { point: Pt3; across: [number, number]; offset_mm: number } | null;
   tri: WebGLBuffer; triCount: number; edge: WebGLBuffer; edgeCount: number;
   verts: Pt3[]; faces: number[][]; layerPoints: Array<{ side: string; point: Pt3 }>;
 }
@@ -185,7 +186,7 @@ export class ModelView {
         if (!tri || !edge) continue;
         gl.bindBuffer(gl.ARRAY_BUFFER, tri); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(pos), gl.STATIC_DRAW);
         gl.bindBuffer(gl.ARRAY_BUFFER, edge); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(edges), gl.STATIC_DRAW);
-        this.drawables.push({ id: o.id, name: o.name, material: o.material, category: o.category, tri, triCount: pos.length / 6, edge, edgeCount: edges.length / 3, verts: o.vertices, faces: o.faces, layerPoints: o.layer_points ?? [] });
+        this.drawables.push({ id: o.id, name: o.name, material: o.material, color: o.color ?? null, layerColors: o.layer_colors ?? [], ridgeHandle: o.ridge_handle ?? null, category: o.category, tri, triCount: pos.length / 6, edge, edgeCount: edges.length / 3, verts: o.vertices, faces: o.faces, layerPoints: o.layer_points ?? [] });
       }
     }
     this.buildGrid();
@@ -687,6 +688,34 @@ export class ModelView {
       button.style.left = `${pos[0]}px`; button.style.top = `${pos[1]}px`;
       this.layerControls.appendChild(button);
     }
+    if (item.ridgeHandle) {
+      const { point, across, offset_mm } = item.ridgeHandle;
+      const pos = this.project(point);
+      const transverse = this.project([point[0] + across[0], point[1] + across[1], point[2]]);
+      if (pos && transverse && pos[0] >= 8 && pos[1] >= 8 && pos[0] <= this.width - 8 && pos[1] <= this.height - 8) {
+        const vx = transverse[0] - pos[0], vy = transverse[1] - pos[1];
+        const norm2 = vx * vx + vy * vy;
+        const grip = h("button", { class: "ridge-grip", type: "button", text: "◆",
+          attrs: { title: "Drag the gable ridge sideways without changing its elevation", "aria-label": "Move roof ridge" } });
+        grip.style.left = `${pos[0]}px`; grip.style.top = `${pos[1]}px`;
+        let origin: [number, number] | null = null;
+        let delta = 0;
+        grip.addEventListener("pointerdown", e => { if (e.button !== 0) return; e.preventDefault(); e.stopPropagation(); grip.setPointerCapture(e.pointerId); origin = [e.clientX, e.clientY]; });
+        grip.addEventListener("pointermove", e => {
+          if (!origin || norm2 < 1e-8) return;
+          delta = ((e.clientX - origin[0]) * vx + (e.clientY - origin[1]) * vy) / norm2;
+          grip.style.left = `${pos[0] + vx * delta}px`; grip.style.top = `${pos[1] + vy * delta}px`;
+          grip.title = `Ridge offset ${(offset_mm + delta * 1000).toFixed(0)} mm (release to apply)`;
+        });
+        grip.addEventListener("pointerup", e => {
+          if (!origin) return;
+          origin = null; grip.releasePointerCapture(e.pointerId);
+          if (Math.abs(delta) > 1e-5) void this.store.run("model.set_property", { id, key: "ridge_offset", value: offset_mm + delta * 1000 });
+        });
+        grip.addEventListener("pointercancel", () => { origin = null; delta = 0; grip.style.left = `${pos[0]}px`; grip.style.top = `${pos[1]}px`; });
+        this.layerControls.appendChild(grip);
+      }
+    }
   }
 
   private parseColor(value: string): [number, number, number, number] { return rgba(value); }
@@ -719,15 +748,24 @@ export class ModelView {
     const paintSolids = (voids: boolean): void => {
       for (const d of this.drawables) {
         if ((d.category === "void") !== voids) continue;
-        const base = voids ? VOID_COLOR : MATERIAL_COLOR[d.material ?? ""] ?? FALLBACK_COLOR;
-        gl.uniform3f(gl.getUniformLocation(mesh, "u_color"), base[0], base[1], base[2]);
         gl.uniform3f(gl.getUniformLocation(mesh, "u_tint"), select[0], select[1], select[2]);
         gl.uniform1f(gl.getUniformLocation(mesh, "u_tintAmount"), ids.has(d.id) ? 0.45 : d.id === hover ? 0.18 : 0);
         gl.uniform1f(gl.getUniformLocation(mesh, "u_alpha"), voids ? VOID_ALPHA : 1);
         gl.bindBuffer(gl.ARRAY_BUFFER, d.tri);
         gl.enableVertexAttribArray(mPos); gl.vertexAttribPointer(mPos, 3, gl.FLOAT, false, 24, 0);
         gl.enableVertexAttribArray(mNor); gl.vertexAttribPointer(mNor, 3, gl.FLOAT, false, 24, 12);
-        gl.drawArrays(gl.TRIANGLES, 0, d.triCount);
+        const parts = d.layerColors.length && d.layerColors.reduce((n, x) => n + x.count * 3, 0) === d.triCount
+          ? d.layerColors.map(x => ({ count: x.count * 3, color: x.color })) : [{ count: d.triCount, color: d.color }];
+        let at = 0;
+        for (const part of parts) {
+          const hex = part.color && /^#[0-9a-f]{6}$/i.test(part.color) ? part.color : null;
+          const base: [number, number, number] = voids ? VOID_COLOR : hex
+            ? [parseInt(hex.slice(1, 3), 16) / 255, parseInt(hex.slice(3, 5), 16) / 255, parseInt(hex.slice(5, 7), 16) / 255]
+            : MATERIAL_COLOR[d.material ?? ""] ?? FALLBACK_COLOR;
+          gl.uniform3f(gl.getUniformLocation(mesh, "u_color"), base[0], base[1], base[2]);
+          gl.drawArrays(gl.TRIANGLES, at, part.count);
+          at += part.count;
+        }
       }
     };
     paintSolids(false);

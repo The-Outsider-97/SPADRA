@@ -803,6 +803,11 @@ export class DrawingView {
             const pts = floor.outline;
             pts.forEach((at, i) => out.push({ at, shape: "square", edit: () => ({ kind: "outline", id: floor.id, points: pts, corner: i, edge: -1, from: at, now: at, moved: false }) })); // a corner moves freely
             pts.forEach((a, i) => { const at = mid(a, pts[(i + 1) % pts.length]); out.push({ at, shape: "square", edit: () => ({ kind: "outline", id: floor.id, points: pts, corner: -1, edge: i, from: at, now: at, moved: false }) }); }); // an edge moves across itself
+            if (floor.ridge && floor.ridge_across) {
+                const at = mid(floor.ridge[0], floor.ridge[1]);
+                out.push({ at, shape: "square", edit: () => ({ kind: "ridge", id: floor.id, segment: floor.ridge, across: floor.ridge_across,
+                        offset: floor.ridge_offset ?? 0, from: at, now: at, moved: false }) });
+            }
         }
         const box = polygonsBounds(data.model.filter((w) => ids.includes(w.id)).map((w) => w.polygon));
         if (box) {
@@ -837,6 +842,11 @@ export class DrawingView {
             const next = this.outlineAfter(ed);
             if (next)
                 await this.store.run("model.set_boundary", { id: ed.id, points: next });
+        }
+        else if (ed.kind === "ridge") {
+            const delta = (ed.now[0] - ed.from[0]) * ed.across[0] + (ed.now[1] - ed.from[1]) * ed.across[1];
+            const mmPerUnit = this.store.unit === "m" ? 1000 : this.store.unit === "cm" ? 10 : 1;
+            await this.store.run("model.set_property", { id: ed.id, key: "ridge_offset", value: (ed.offset + delta) * mmPerUnit });
         }
         else if (ed.kind === "turn") {
             const degrees = (this.turnAngle(ed) * 180) / Math.PI;
@@ -1403,6 +1413,15 @@ export class DrawingView {
                 ctx.stroke();
             }
         }
+        else if (ed.kind === "ridge") {
+            const d = (ed.now[0] - ed.from[0]) * ed.across[0] + (ed.now[1] - ed.from[1]) * ed.across[1];
+            const a = [ed.segment[0][0] + ed.across[0] * d, ed.segment[0][1] + ed.across[1] * d];
+            const b = [ed.segment[1][0] + ed.across[0] * d, ed.segment[1][1] + ed.across[1] * d];
+            ctx.beginPath();
+            this.line(a, b);
+            ctx.stroke();
+            this.paintBadge(`Ridge ${((ed.offset + d) * (this.store.unit === "m" ? 1000 : this.store.unit === "cm" ? 10 : 1)).toFixed(0)} mm`, ed.now, k);
+        }
         else if (ed.kind === "turn") {
             const angle = this.turnAngle(ed);
             for (const w of this.data?.model ?? [])
@@ -1785,6 +1804,14 @@ export class DrawingView {
             ctx.fill("evenodd");
             ctx.strokeStyle = selected ? color : withAlpha(k.muted, 0.9);
             ctx.stroke();
+            if (w.ridge) {
+                ctx.beginPath();
+                this.line(w.ridge[0], w.ridge[1]);
+                ctx.setLineDash([5, 3]);
+                ctx.strokeStyle = selected ? k.select : color;
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
             for (const poly of w.cut_polygons ?? []) {
                 ctx.beginPath();
                 poly.forEach((p, i) => { const [x, y] = this.toScreen(p); if (i)

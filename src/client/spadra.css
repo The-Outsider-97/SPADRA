@@ -63,6 +63,8 @@ button { font: inherit; }
 .panel-resizer:hover, .panel-resizer:focus-visible { background: color-mix(in srgb, var(--accent) 35%, transparent); outline: none; }
 .layer-controls { position: absolute; inset: 0; z-index: 4; pointer-events: none; }
 .layer-plus { position: absolute; transform: translate(-50%, -50%); width: 28px; height: 28px; border-radius: 50%; border: 2px solid var(--select); color: var(--select); background: var(--panel); font-weight: 800; font-size: 19px; line-height: 1; cursor: pointer; pointer-events: auto; box-shadow: 0 2px 7px #0004; }
+.ridge-grip { position: absolute; transform: translate(-50%, -50%); width: 30px; height: 30px; border-radius: 9px; border: 2px solid var(--select); background: var(--panel); color: var(--select); font-size: 18px; cursor: grab; touch-action: none; pointer-events: auto; box-shadow: 0 2px 7px #0004; }
+.ridge-grip:active { cursor: grabbing; }
 .layer-plus:hover, .layer-plus:focus-visible { background: var(--accent-soft); outline: 2px solid var(--select); outline-offset: 2px; }
 .panel-head { display: flex; align-items: center; justify-content: space-between; padding: .7rem .9rem .4rem; font-weight: 700; }
 .panel-body { overflow: auto; padding: .2rem .5rem .8rem; min-height: 0; flex: 1; }

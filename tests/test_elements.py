@@ -37,6 +37,46 @@ class ElementCase(unittest.TestCase):
         return self.p.model.get(oid)["geometry"]["kind"]
 
 
+class Appearance(ElementCase):
+    def test_shared_and_instance_colors_are_independent_and_undoable(self):
+        a, b = self.wall(), self.wall(a=(0, 2000), b=(6000, 2000))
+        self.run_("model.set_property", id=a, key="material_color", value="#164f7c")
+        scene = {o["id"]: o for o in self.p.scene_data()["objects"]}
+        self.assertEqual(scene[a]["color"], "#164F7C")
+        self.assertEqual(scene[b]["color"], "#164F7C")
+        self.run_("model.set_property", id=a, key="color", value="#AABBCC")
+        scene = {o["id"]: o for o in self.p.scene_data()["objects"]}
+        self.assertEqual(scene[a]["color"], "#AABBCC")
+        self.assertEqual(scene[b]["color"], "#164F7C")
+        self.p.undo()
+        self.assertEqual(next(o for o in self.p.scene_data()["objects"] if o["id"] == a)["color"], "#164F7C")
+        with self.assertRaises(BadRequest):
+            self.run_("model.set_property", id=a, key="color", value="red; drop table")
+        self.run_("model.set_property", id=a, key="material_color", value="")
+        self.assertEqual(next(o for o in self.p.scene_data()["objects"] if o["id"] == b)["color"], E.MATERIAL_COLORS["Concrete"])
+
+    def test_layer_color_override_tracks_the_layer_faces(self):
+        wall = self.wall()
+        extra = self.run_("model.add_layer", id=wall, material="Timber", thickness=50)["layer"]
+        self.run_("model.set_property", id=wall, key=f"layer:{extra}:color", value="#ABCDEF")
+        scene = next(o for o in self.p.scene_data()["objects"] if o["id"] == wall)
+        self.assertEqual(len(scene["layer_colors"]), 2)
+        self.assertEqual(scene["layer_colors"][-1]["color"], "#ABCDEF")
+        self.assertEqual(sum(x["count"] for x in scene["layer_colors"]), len(scene["faces"]))
+        self.assertEqual(self.meta(wall)["spadra:layers"][-1]["color"], "#ABCDEF")
+
+    def test_material_colors_survive_native_project_round_trip(self):
+        wall = self.wall()
+        self.run_("model.set_property", id=wall, key="material_color", value="#123456")
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / "colors.spadra"
+            self.p.save_as(target)
+            reloaded = Project.open(target)
+            self.assertEqual(reloaded.manifest["material_colors"]["Concrete"], "#123456")
+            obj = next(o for o in reloaded.scene_data()["objects"] if o["id"] == wall)
+            self.assertEqual(obj["color"], "#123456")
+
+
 class Doors(ElementCase):
     def test_a_door_cuts_exactly_its_own_volume_out_of_the_wall(self):
         w = self.wall()
