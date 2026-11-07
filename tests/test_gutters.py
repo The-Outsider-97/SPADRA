@@ -44,6 +44,39 @@ class Case(unittest.TestCase):
 
 
 class Types(Case):
+    def test_a_gable_verge_trim_alone_displaces_an_existing_eave_gutter_at_the_corner(self):
+        roof = self.roof("gable")
+        gutter = self.gutters(roof, edges=[0], downpipe=False)["gutters"][0]
+        original = self.bounds(gutter)
+        verge = self.run_("model.add_roof_accessory", roof=roof, kind="roof_edge", edge=1)["id"]
+        self.assertTrue(E.alive(self.p, verge))
+        self.assertGreater(GU.frame(self.p, gutter)["gap"], 0.02)
+        self.assertLess(self.bounds(gutter)[0][1], original[0][1] - 0.02)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "roof-edges.spadra"
+            self.p.save(path)
+            restored = Project.open(path)
+            self.assertAlmostEqual(GU.frame(restored, gutter)["gap"], GU.frame(self.p, gutter)["gap"])
+        self.run_("model.delete", id=verge)
+        self.assertAlmostEqual(GU.frame(self.p, gutter)["gap"], 0.0)
+
+    def test_adding_and_removing_roof_edge_displaces_existing_gutter_without_overwriting_its_gap(self):
+        roof = self.roof("gable")
+        gutter = self.gutters(roof, edges=[0], downpipe=False)["gutters"][0]
+        self.assertAlmostEqual(GU.frame(self.p, gutter)["gap"], 0.0)
+        old_bounds = self.bounds(gutter)
+        trim = self.run_("model.add_roof_accessory", roof=roof, kind="roof_edge", edge="all")["ids"][0]
+        shifted = GU.frame(self.p, gutter)["gap"]
+        self.assertGreaterEqual(shifted, 0.035 - 1e-6)
+        self.assertAlmostEqual(float(E.m(self.meta(gutter), "gap", 0.0)), 0.0)
+        self.assertLess(self.bounds(gutter)[0][1], old_bounds[0][1] - 0.02)
+        self.run_("model.set_property", id=trim, key="lateral_offset", value=100)
+        self.assertGreater(GU.frame(self.p, gutter)["gap"], shifted + 0.05)
+        self.p.undo()
+        self.assertAlmostEqual(GU.frame(self.p, gutter)["gap"], shifted, places=6)
+        self.run_("model.delete", id=trim)
+        self.assertLess(GU.frame(self.p, gutter)["gap"], shifted + 0.001)
+
     def test_each_type_is_a_closed_channel_with_the_volume_of_its_section(self):
         roof = self.roof("gable")
         for kind in GU.GUTTER_TYPES:

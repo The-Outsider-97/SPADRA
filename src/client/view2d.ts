@@ -21,7 +21,7 @@ const DRAG_PX = 4;
 const TOOL_KINDS: Record<string, readonly string[]> = {
   offset: ["line", "polyline", "circle"], trim: ["line", "polyline"], extend: ["line", "polyline"], fillet: ["line"],
 };
-const PAINT_ORDER = ["foundation", "floor", "room", "extrusion", "sweep", "generic", "stair", "wall", "structural", "window", "door", "column", "gutter", "downpipe", "void", "grid"];
+const PAINT_ORDER = ["foundation", "floor", "roof", "room", "extrusion", "sweep", "generic", "stair", "wall", "structural", "window", "door", "column", "gutter", "downpipe", "void", "grid"];
 const CURVE_TOOLS = new Set<string>(["offset", "trim", "extend", "fillet", "hatch"]);
 
 /** An edit being dragged with a handle: a wall end, a turn of the selection about its centre, or a section's cut line (an end, or all of it). */
@@ -105,7 +105,7 @@ export class DrawingView {
     this.bind();
   }
 
-  /** The option strips of Extrude, Void and Sweep: numbers kept in the store, shared by every plan, shown only while their tool is active. */
+  /** Reusable tool-option strips kept in the store and shared by 2D and 3D roof drawing. */
   private buildFormHuds(): void {
     const o = this.store.formOptions;
     const num = (label: string, get: () => number, set: (n: number) => void, step: string, positive: boolean): [HTMLLabelElement, () => void] => {
@@ -116,8 +116,14 @@ export class DrawingView {
     const hud = (tool: Tool, note: string, fields: Array<[HTMLElement, () => void]>, extra: HTMLElement[] = []): void => {
       this.formHuds.set(tool, { el: h("div", { class: "wall-hud", hidden: true }, ...fields.map((f) => f[0]), ...extra, h("span", { class: "muted", text: note })), sync: () => fields.forEach((f) => f[1]()) });
     };
-    hud("void", "Draw the outline of the cut. It cuts floors and extrusions it lies wholly inside, and walls it passes through square.",
-      [num("Depth (m)", () => o.voidDepth, (n) => { o.voidDepth = n; }, "0.1", true), num("Base (m)", () => o.voidBase, (n) => { o.voidBase = n; }, "0.1", false)]);
+    const roof = this.store.roofOptions;
+    const roofType = h("select", { attrs: { "aria-label": "Roof type" } },
+      ...(["flat", "shed", "gable", "hip"] as const).map((value) => h("option", { value, text: value.charAt(0).toUpperCase() + value.slice(1) })));
+    roofType.addEventListener("change", () => { roof.kind = roofType.value as typeof roof.kind; });
+    hud("roof", "Draw the roof outline on this plan. Enter or double-click finishes; Esc cancels. Pitched roofs require four perpendicular corners.",
+      [[h("label", {}, "Roof", roofType), () => { roofType.value = roof.kind; }],
+        num("Roof pitch (°)", () => roof.pitch, (n) => { roof.pitch = n; }, "1", true),
+        num("Roof thickness (mm)", () => roof.thickness, (n) => { roof.thickness = n; }, "10", true)]);
     const polygon = this.pickedPolygon.bind(this);
     const extrudeBtn = h("button", { type: "button", class: "tool-inline", text: "Use selected polygon", attrs: { title: "Stand the closed polygon selected in this drawing up to the depth" }, on: { click: () => { void this.extrudeSelected(); } } });
     hud("extrude", "Click each corner of the outline, or select a closed polygon and use it. Enter or double-click finishes, Esc cancels.",
@@ -280,7 +286,7 @@ export class DrawingView {
     });
     this.el.addEventListener("pointerleave", () => { this.cursor = null; this.snap = null; this.hover = null; this.draw(); });
     c.addEventListener("dblclick", (e) => {
-      if (this.store.tool === "polyline" || this.store.tool === "floor" || this.store.tool === "room" || this.store.tool === "extrude" || this.store.tool === "void" || this.store.tool === "sweep") { void this.finish(true); return; }
+      if (this.store.tool === "polyline" || this.store.tool === "floor" || this.store.tool === "roof" || this.store.tool === "room" || this.store.tool === "extrude" || this.store.tool === "void" || this.store.tool === "sweep") { void this.finish(true); return; }
       if (this.store.tool === "wall") { void this.finish(false); return; }
       const mark = this.store.tool === "select" ? this.markAt(this.toWorld(...this.local(e))) : null;       // double-click a section line to open that section
       if (mark) void this.store.openTab({ kind: "drawing", id: mark.id }, mark.name);
@@ -470,7 +476,7 @@ export class DrawingView {
         if (id) await this.store.select({ kind: "model", ids: [id] });
         break;
       }
-      case "floor": case "room": this.pts = [...this.pts, p]; break;
+      case "floor": case "roof": case "room": this.pts = [...this.pts, p]; break;
       case "extrude": case "void": case "sweep":
         if (!this.data?.view.level_id) { toast("Extrusions, voids and sweeps are drawn on a floor plan.", { kind: "info" }); break; }
         this.pts = [...this.pts, p]; break;
@@ -777,11 +783,17 @@ export class DrawingView {
       if (pts.length >= 2) await this.store.run("draw.polyline", { drawing: view, points: pts, closed });
       else toast("A polyline needs at least two points.", { kind: "info" });
     }
-    if (commit && this.store.tool === "floor" && view) {
+    if (commit && (this.store.tool === "floor" || this.store.tool === "roof") && view) {
       const level = this.data?.view.level_id;
       const pts = this.pts.filter((p, i) => i === 0 || dist(p, this.pts[i - 1] ?? p) > 1e-9);
-      if (pts.length >= 3 && level) await this.store.run("model.add_floor", { points: pts, level });
-      else toast("A floor needs at least three corners on a floor plan.", { kind: "info" });
+      if (pts.length >= 3 && level) {
+        const roof = this.store.tool === "roof";
+        const out = roof
+          ? await this.store.run("model.add_roof", { points: pts, level, roof: this.store.roofOptions.kind, pitch: this.store.roofOptions.pitch, thickness: this.store.roofOptions.thickness })
+          : await this.store.run("model.add_floor", { points: pts, level });
+        const id = (out?.result as { id?: string } | undefined)?.id;
+        if (id) await this.store.select({ kind: "model", ids: [id] });
+      } else toast(`${this.store.tool === "roof" ? "A roof" : "A floor"} needs at least three corners on a floor plan.`, { kind: "info" });
     }
     if (commit && (this.store.tool === "extrude" || this.store.tool === "void") && view) {
       const level = this.data?.view.level_id;
@@ -830,7 +842,7 @@ export class DrawingView {
     if (e.key === "-" && !e.ctrlKey && !e.metaKey) { e.preventDefault(); this.zoom(1 / 1.25); return; }
     if (e.key === "0" && !e.ctrlKey && !e.metaKey) { e.preventDefault(); this.fit(); return; }
     if (e.key === "Escape") { if (this.edit) { this.edit = null; this.anchor = null; this.draw(); } else if (this.grip) { this.grip = null; this.draw(); } else if (this.pts.length || this.target || this.tagOf) await this.finish(false); else this.store.setTool("select"); return; }
-    if (e.key === "Enter" && (this.store.tool === "polyline" || this.store.tool === "floor" || this.store.tool === "room" || this.store.tool === "extrude" || this.store.tool === "void" || this.store.tool === "sweep")) { await this.finish(true); return; }
+    if (e.key === "Enter" && (this.store.tool === "polyline" || this.store.tool === "floor" || this.store.tool === "roof" || this.store.tool === "room" || this.store.tool === "extrude" || this.store.tool === "void" || this.store.tool === "sweep")) { await this.finish(true); return; }
     if ((e.key === "c" || e.key === "C") && (this.store.tool === "polyline" || this.store.tool === "sweep") && this.pts.length > 2) { await this.finish(true, true); return; }
     const sel = this.store.selection;
     if ((e.key === "Delete" || e.key === "Backspace") && sel?.kind === "drawing" && this.data) {
@@ -1695,8 +1707,8 @@ export class DrawingView {
     ctx.strokeStyle = k.select; ctx.fillStyle = k.select; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]);
     ctx.beginPath();
     const first = this.pts[0] as Pt;
-    if (tool === "line" || tool === "polyline" || tool === "floor" || tool === "room" || tool === "section" || tool === "grid" || tool === "stair" || tool === "wall" || tool === "extrude" || tool === "void" || tool === "sweep") {
-      const all = [...this.pts, p, ...((tool === "floor" || tool === "room" || tool === "extrude" || tool === "void") && this.pts.length > 1 ? [first] : [])];
+    if (tool === "line" || tool === "polyline" || tool === "floor" || tool === "roof" || tool === "room" || tool === "section" || tool === "grid" || tool === "stair" || tool === "wall" || tool === "extrude" || tool === "void" || tool === "sweep") {
+      const all = [...this.pts, p, ...((tool === "floor" || tool === "roof" || tool === "room" || tool === "extrude" || tool === "void") && this.pts.length > 1 ? [first] : [])];
       for (let i = 0; i + 1 < all.length; i++) this.line(all[i] as Pt, all[i + 1] as Pt);
       const from = this.pts[this.pts.length - 1] as Pt;
       if (tool === "wall" && dist(from, p) > 1e-9) { this.tracePolygon(wallBand(from, p, this.store.wallOptions.thickness / this.mmPerUnit())); ctx.fillStyle = withAlpha(k.select, 0.14); ctx.fill(); }
@@ -1740,7 +1752,7 @@ export class DrawingView {
     const f = (n: number): string => `${n.toLocaleString(undefined, { maximumFractionDigits: 1 })} ${u}`;
     switch (this.store.tool) {
       case "rotate": return this.pts.length > 1 ? `${((angleBetween(first, this.pts[1] as Pt, p) * 180) / Math.PI).toFixed(1)}°` : "";
-      case "line": case "polyline": case "floor": case "room": case "grid": case "stair": case "wall": case "extrude": case "void": case "sweep": {
+      case "line": case "polyline": case "floor": case "roof": case "room": case "grid": case "stair": case "wall": case "extrude": case "void": case "sweep": {
         const from = this.pts[this.pts.length - 1] as Pt;
         const deg = (Math.atan2(p[1] - from[1], p[0] - from[0]) * 180) / Math.PI;
         return `${f(dist(from, p))}  ${deg.toFixed(1)}°`;
@@ -1808,7 +1820,7 @@ export class DrawingView {
       extrude: n ? "Pick the next corner. Enter or double-click finishes, Esc cancels." : "Pick the first corner of the outline to extrude. Set its depth and base above.",
       void: n ? "Pick the next corner of the cut. Enter or double-click finishes, Esc cancels." : "Pick the first corner of the void. It cuts what it passes through (see Properties).",
       sweep: n ? "Pick the next point of the path. Enter or double-click finishes, C closes it, Esc cancels." : "Pick the first point of the path the profile follows.",
-      roof: "", beam: "",
+      roof: n ? "Pick the next roof corner. Enter or double-click finishes, Esc cancels." : "Pick the first roof corner. Roof type, pitch, and thickness are above the drawing.", beam: "",
       section: n ? "Pick the end of the section line. It looks to the left of the line you draw (flip it in Properties)." : "Pick the start of the section line.",
     };
     this.hint.textContent = hints[this.store.tool];

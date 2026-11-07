@@ -86,7 +86,10 @@ const mean = (poly) => poly.reduce((a, p) => [a[0] + p[0] / poly.length, a[1] + 
 
 before(async () => {
   url = await startServer();
-  browser = await chromium.launch({ args: ["--use-gl=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"] });
+  browser = await chromium.launch({
+    ...(process.env.SPADRA_CHROMIUM ? { executablePath: process.env.SPADRA_CHROMIUM } : {}),
+    args: ["--use-gl=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"],
+  });
   page = await browser.newPage({ viewport: { width: 1672, height: 941 } });
   page.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
   page.on("console", (m) => { if (m.type() === "error") problems.push(`console: ${m.text()} ${m.location().url}`); });
@@ -205,6 +208,52 @@ describe("roofs, gutters and profiles in a browser", () => {
     const [beam] = (await ofCategory("beam")).length ? await ofCategory("beam") : (await scene()).filter((o) => o.id === id);
     const b = bounds(beam);
     assert.ok(Math.abs(b[2][1] - b[2][0] - 0.2) < 1e-6, "an IPE 200 is 200 mm deep");
+  });
+
+  it("draws, selects and reshapes a real roof in the 2D roof-plan viewport", async () => {
+    await page.getByRole("treeitem", { name: "Level 01", exact: true }).first().click(); await settle();
+    await page.getByRole("button", { name: "2D", exact: true }).click(); await settle();
+    const existing = (await ofCategory("roof")).length;
+    await tool("Roof");
+    const type = page.locator(".hud-group select[aria-label='Roof type']");
+    assert.ok(await type.isVisible(), "a roof drawn on a plan exposes the real roof options");
+    await type.selectOption("flat");
+    await page.getByLabel("Roof thickness (mm)").fill("250");
+    const surface = page.locator(".view-canvas").first();
+    const frame = await surface.boundingBox();
+    for (const [x, y] of [[0.28, 0.28], [0.68, 0.28], [0.68, 0.70], [0.28, 0.70]]) {
+      await page.mouse.click(frame.x + frame.width * x, frame.y + frame.height * y); await settle();
+    }
+    await page.locator(".view-canvas").first().focus();
+    await page.keyboard.press("Enter"); await settle();
+
+    const roofs = await ofCategory("roof");
+    assert.equal(roofs.length, existing + 1, "plan drawing created an SGEO roof");
+    const id = roofs.find((r) => r.id !== roofId).id;
+    const before = (await drawing()).model.find((r) => r.id === id);
+    assert.equal(before.category, "roof", "the new roof is represented in the floor plan");
+    assert.equal(before.outline.length, 4);
+    assert.equal((await props(id)).top.find((row) => row.key === "thickness").value, 250);
+
+    await tool("Select");
+    await page.getByRole("button", { name: "Zoom to fit", exact: true }).first().click(); await settle();
+    const canvas = page.locator(".view-canvas").first(), box = await canvas.boundingBox();
+    const centre = mean(before.outline);
+    const [cx, cy] = await canvas.evaluate((el, point) => el.spadraView.screenOf(point), centre);
+    await page.mouse.click(box.x + cx, box.y + cy); await settle();
+    const [gx, gy] = await canvas.evaluate((el, point) => el.spadraView.screenOf(point), before.outline[0]);
+    await page.mouse.move(box.x + gx, box.y + gy);
+    await page.mouse.down();
+    await page.mouse.move(box.x + gx - 55, box.y + gy + 35, { steps: 8 });
+    await page.mouse.up(); await settle();
+
+    const after = (await drawing()).model.find((r) => r.id === id);
+    assert.equal(after.id, id, "direct manipulation preserves the roof's semantic identity");
+    assert.ok(Math.hypot(after.outline[0][0] - before.outline[0][0], after.outline[0][1] - before.outline[0][1]) > 50,
+      "dragging its plan corner changed the roof boundary in model units");
+    await page.keyboard.press("Control+z"); await settle();
+    assert.deepEqual((await drawing()).model.find((r) => r.id === id).outline, before.outline,
+      "a roof boundary edit is one undoable model transaction");
   });
 
   it("raised no errors in the browser", () => {

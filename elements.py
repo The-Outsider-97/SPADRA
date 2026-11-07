@@ -1236,57 +1236,104 @@ def _ridge_for_accessory(meta: Mapping[str, Any]) -> tuple[tuple[float, float], 
     raise BadRequest("Only a roof with a real ridge can host a ridge beam or strap")
 
 
-def _segment_member(a: tuple[float, float, float], b: tuple[float, float, float], width: float, depth: float) -> G.Mesh:
-    """Closed rectangular solid following a spatial edge, rather than a 2D projected line."""
-    dx, dy, dz = (b[i] - a[i] for i in range(3))
-    length, horizontal = math.sqrt(dx * dx + dy * dy + dz * dz), math.hypot(dx, dy)
-    if length < 1e-7 or horizontal < 1e-7:
-        raise BadRequest("A roof edge segment is too short")
-    tangent = (dx / length, dy / length, dz / length)
-    across = (-dy / horizontal, dx / horizontal, 0.0)
-    section_up = (tangent[1] * across[2] - tangent[2] * across[1],
-                  tangent[2] * across[0] - tangent[0] * across[2],
-                  tangent[0] * across[1] - tangent[1] * across[0])
-    vertices, faces = _box(0.0, length, -width / 2, width / 2, -depth / 2, depth / 2)
-    mapped = [[a[i] + tangent[i] * q[0] + across[i] * q[1] + section_up[i] * q[2] for i in range(3)] for q in vertices]
-    return mapped, faces
-
-
 def _roof_edge_mesh(project: Any, roof: Mapping[str, Any], edge: int, width: float, depth: float, vertical_offset: float, lateral_offset: float) -> G.Mesh:
+    """One continuous watertight edge solid, with mitred *roof* corners and facet breaks.
+
+    The old implementation assembled separately capped boxes along each roof
+    plane. Their square ends intersected at the gable ridge (the visible
+    diamond) and extended into one another at outline corners. A shared mitre
+    station between adjacent centre-line segments replaces those overlapping
+    end caps. Boundary corner mitres are computed from the neighbouring roof
+    edges even when only one edge component has been installed.
+    """
     boundary = [tuple(map(float, p)) for p in m(roof, "boundary")]
     a, b = boundary[edge], boundary[(edge + 1) % len(boundary)]
     dx, dy = b[0] - a[0], b[1] - a[1]
     length = math.hypot(dx, dy)
     if length < 1e-7:
         raise BadRequest("A roof boundary edge is too short")
-    across = (dy / length, -dx / length)
+    sigma = 1.0 if G.signed_area(boundary) > 0 else -1.0
+    def outward(i: int) -> tuple[float, float, float]:
+        start, stop = boundary[i % len(boundary)], boundary[(i + 1) % len(boundary)]
+        vx, vy = stop[0] - start[0], stop[1] - start[1]
+        norm = math.hypot(vx, vy)
+        if norm < 1e-7:
+            raise BadRequest("The roof outline contains a zero-length edge")
+        return sigma * vy / norm, -sigma * vx / norm, 0.0
+
     facets = roof_facets(project, roof)
     thickness = float(m(roof, "thickness"))
     ridge = roof_ridge(roof)
-    ts = [0.0, 1.0]
-    if ridge:
-        line = G.intersect_lines(a, G.sub(b, a), ridge[0], G.sub(ridge[1], ridge[0]))
-        if line and 1e-7 < line[0] < 1 - 1e-7 and -1e-7 <= line[1] <= 1 + 1e-7:
-            ts.insert(1, line[0])
     def facet_distance_sq(poly: list[tuple[float, float]], x: float, y: float) -> float:
         return min((lambda dx, dy: dx * dx + dy * dy)(x - (p[0] + t * vx), y - (p[1] + t * vy))
                    for p, q in zip(poly, poly[1:] + poly[:1])
                    for vx, vy in [(q[0] - p[0], q[1] - p[1])]
                    for t in [max(0.0, min(1.0, ((x - p[0]) * vx + (y - p[1]) * vy) / max(1e-16, vx * vx + vy * vy)))])
-    def point(t: float) -> tuple[float, float, float]:
-        x, y = a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t
+    def roof_point(x: float, y: float) -> tuple[float, float, float]:
         # Use the roof facet actually incident on this *boundary edge*.
         # Extrapolated planes from a non-incident facet may be far below it.
         _, plane = min(facets, key=lambda item: facet_distance_sq(item[0], x, y))
         z = plane[0] * x + plane[1] * y + plane[2] + thickness
-        return x + across[0] * lateral_offset, y + across[1] * lateral_offset, z - depth / 2 + vertical_offset
+        return x, y, z + vertical_offset
+
+    def edge_points(i: int) -> list[tuple[float, float, float]]:
+        p, q = boundary[i % len(boundary)], boundary[(i + 1) % len(boundary)]
+        ts = [0.0, 1.0]
+        if ridge:
+            line = G.intersect_lines(p, G.sub(q, p), ridge[0], G.sub(ridge[1], ridge[0]))
+            if line and 1e-7 < line[0] < 1 - 1e-7 and -1e-7 <= line[1] <= 1 + 1e-7:
+                ts.insert(1, line[0])
+        return [roof_point(p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t) for t in ts]
+
+    stations = edge_points(edge)
+    # An adjacent gable-end slope can change direction at the ridge. Using the
+    # neighbour's far corner instead of its *local* facet produces mismatched
+    # lower mitre corners, despite sharing the same outline vertex.
+    before = edge_points(edge - 1)[-2]
+    after = edge_points(edge + 1)[1]
+    normals = [outward(edge - 1), *([outward(edge)] * max(0, len(stations) - 2)), outward(edge + 1)]
+    this_normal = outward(edge)
+
+    def direction(p: tuple[float, float, float], q: tuple[float, float, float]) -> tuple[float, float, float]:
+        d = tuple(q[i] - p[i] for i in range(3))
+        n = math.sqrt(sum(v * v for v in d))
+        if n < 1e-7:
+            raise BadRequest("A roof edge or its adjoining roof boundary is too short")
+        return tuple(v / n for v in d)  # type: ignore[return-value]
+
+    def cross(u: tuple[float, float, float], v: tuple[float, float, float]) -> tuple[float, float, float]:
+        return (u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0])
+
+    def mitre(u: tuple[float, float, float], v: tuple[float, float, float]) -> tuple[float, float, float]:
+        """The offset-line intersection: both incident sections project to one mitre."""
+        d = 1 + sum(u[i] * v[i] for i in range(3))
+        if d < 0.05:
+            raise BadRequest("This roof corner is too sharp to mitre with a rectangular edge profile")
+        return tuple((u[i] + v[i]) / d for i in range(3))  # type: ignore[return-value]
+
     verts: list[list[float]] = []
-    faces: list[list[int]] = []
-    for t0, t1 in zip(ts, ts[1:]):
-        vv, ff = _segment_member(point(t0), point(t1), width, depth)
-        at = len(verts)
-        verts.extend(vv)
-        faces.extend([[k + at for k in face] for face in ff])
+    for i, centre in enumerate(stations):
+        prev = before if i == 0 else stations[i - 1]
+        nxt = after if i == len(stations) - 1 else stations[i + 1]
+        prev_normal = normals[i] if i == 0 else this_normal
+        next_normal = normals[i] if i == len(stations) - 1 else this_normal
+        horizontal = mitre(prev_normal, next_normal)
+        incoming = cross(direction(prev, centre), prev_normal)
+        outgoing = cross(direction(centre, nxt), next_normal)
+        downward = mitre(incoming, outgoing)
+        # Upper rails follow the roof top exactly; lower rails converge beneath
+        # the ridge instead of leaving two colliding square-cut members.
+        for side, lower in ((-0.5, False), (0.5, False), (0.5, True), (-0.5, True)):
+            v = [centre[j] + horizontal[j] * (lateral_offset + side * width) + (downward[j] * depth if lower else 0.0) for j in range(3)]
+            verts.append(v)
+    faces: list[list[int]] = [[0, 2, 1], [0, 3, 2]]
+    for i in range(len(stations) - 1):
+        first, second = 4 * i, 4 * (i + 1)
+        for j in range(4):
+            k = (j + 1) % 4
+            faces += [[first + j, first + k, second + k], [first + j, second + k, second + j]]
+    last = 4 * (len(stations) - 1)
+    faces += [[last, last + 1, last + 2], [last, last + 2, last + 3]]
     return _positive_volume((verts, faces))
 
 
@@ -1368,6 +1415,9 @@ def add_roof_accessory(project: Any, p: Mapping[str, Any]) -> list[str]:
         created.append(oid)
     if not created:
         raise BadRequest("This roof already has the selected accessory; select its existing element to edit it")
+    if kind == "roof_edge":
+        from . import gutters as GU
+        GU.follow(project, roof_id)                     # new trim displaces any existing gutter runs without overwriting their requested gap
     return created
 
 
@@ -1449,6 +1499,9 @@ def regenerate(project: Any, oid: str) -> None:
     elif cat == "structural":
         if m(meta, "roof_host"):
             regenerate_roof_accessory(project, oid)
+            if m(meta, "accessory_kind") == "roof_edge":
+                from . import gutters as GU
+                GU.follow(project, str(m(meta, "roof_host")))
         else:
             regenerate_column(project, oid) if is_column(meta) else regenerate_beam(project, oid)
     elif cat == "stair":
@@ -1972,6 +2025,8 @@ def remove(project: Any, oid: str) -> None:
                 if m(meta_of(project, did), "roof_host") == oid:
                     project.model.remove(did)
         project.model.remove(oid)
+        if m(meta, "accessory_kind") == "roof_edge" and alive(project, m(meta, "roof_host")):
+            GU.follow(project, str(m(meta, "roof_host")))
         if run:
             GU.settle_after_delete(project, *run)                                   # its neighbours lose the mitre and get a stop end
 

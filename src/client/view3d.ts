@@ -108,6 +108,13 @@ export class ModelView {
       const input = this.fields[key];
       input?.addEventListener("input", () => { const n = Number(input.value); if (n > 0) this.store.wallOptions[option] = n; });
     }
+    const roof = this.store.roofOptions;
+    const roofKind = this.fields["roof.kind"];
+    roofKind?.addEventListener("change", () => { roof.kind = roofKind.value as typeof roof.kind; });
+    for (const [key, field] of [["roof.pitch", "pitch"], ["roof.thickness", "thickness"]] as const) {
+      const input = this.fields[key];
+      input?.addEventListener("input", () => { const n = Number(input.value); if (Number.isFinite(n) && n > 0) roof[field] = n; });
+    }
     this.hud = h("div", { class: "wall-hud", hidden: true }, h("label", {}, "Level", this.levelSelect), ...this.hudGroups);
     const rail = h("div", { class: "view-rail", attrs: { role: "toolbar", "aria-label": "View tools" } },
       this.railButton("home", "Home view", () => { this.home(); }),
@@ -674,7 +681,7 @@ export class ModelView {
     const level = this.levelSelect.value;
     const out = tool === "floor"
       ? await this.store.run("model.add_floor", { points, level, thickness: this.num("floor.thickness") })
-      : await this.store.run("model.add_roof", { points, level, roof: this.fields["roof.kind"]?.value, pitch: this.num("roof.pitch"), thickness: this.num("roof.thickness") });
+      : await this.store.run("model.add_roof", { points, level, roof: this.store.roofOptions.kind, pitch: this.store.roofOptions.pitch, thickness: this.store.roofOptions.thickness });
     if (out) this.polyPts = [];
     this.draw();
   }
@@ -708,6 +715,10 @@ export class ModelView {
     if (tool === "wall") for (const [key, option] of [["wall.height", "height"], ["wall.thickness", "thickness"]] as const) {
       const input = this.fields[key];
       if (input && document.activeElement !== input && Number(input.value) !== this.store.wallOptions[option]) input.value = String(this.store.wallOptions[option]);
+    }
+    if (tool === "roof") for (const [key, value] of [["roof.kind", this.store.roofOptions.kind], ["roof.pitch", this.store.roofOptions.pitch], ["roof.thickness", this.store.roofOptions.thickness]] as const) {
+      const input = this.fields[key];
+      if (input && document.activeElement !== input && input.value !== String(value)) input.value = String(value);
     }
     if (tool !== this.pendingTool) { this.wallStart = null; this.polyPts = []; this.openingAt = null; this.pendingTool = tool; }
     this.matrices = cameraMatrices(this.cam, this.width, this.height, this.extent);
