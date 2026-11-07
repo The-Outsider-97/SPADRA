@@ -3,7 +3,7 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +11,8 @@ import { createServer } from "node:net";
 import { chromium } from "playwright";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const SLAI = resolve(HERE, "..", "..", "..");
+const NESTED_SLAI = resolve(HERE, "..", "..", "..");
+const SLAI = existsSync(join(NESTED_SLAI, "applications")) ? NESTED_SLAI : resolve(HERE, "..", "..");
 const PYTHON = process.env.PYTHON ?? (process.platform === "win32" ? "python" : "python3");
 
 let server, browser, page, url, dataDir;
@@ -66,7 +67,7 @@ let walls = [], ids = {};
 
 before(async () => {
   url = await startServer();
-  browser = await chromium.launch({ args: ["--use-gl=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"] });
+  browser = await chromium.launch({ executablePath: process.env.CHROMIUM_EXECUTABLE, args: ["--use-gl=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"] });
   page = await browser.newPage({ viewport: { width: 1672, height: 941 } });
   page.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
   page.on("console", (m) => { if (m.type() === "error") problems.push(`console: ${m.text()} ${m.location().url}`); });
@@ -302,6 +303,32 @@ describe("sections, elevations and schedules in a browser", () => {
     const section = (await tree()).find((n) => n.label === "Cross section");
     assert.equal((await api(`/drawing/${section.id}`)).projection.items.filter((i) => i.cut.length).length, 4, "both walls, the window in one, and the floor");
     assert.equal((await api("/check")).ok, true);
+  });
+
+  it("shows real Add Layer plus controls for floors and roofs in sections and elevations", async () => {
+    await openFromTree("Cross section");
+    await tool("Select");
+    const section = await api(`/drawing/${await viewId("Cross section")}`);
+    const floor = section.projection.items.find((item) => item.category === "floor" && item.cut.length);
+    assert.ok(floor, "the section has a cut through the floor");
+    const middle = (points) => [points.reduce((sum, p) => sum + p[0], 0) / points.length, points.reduce((sum, p) => sum + p[1], 0) / points.length];
+    await clickWorld(middle(floor.cut[0]));
+    await page.getByRole("button", { name: "Add top floor layer" }).waitFor();
+    await page.getByRole("button", { name: "Add bottom floor layer" }).waitFor();
+
+    const roofLevel = (await api("/project/tree")).levels.find((l) => l.name === "Roof Level").id;
+    await cmd("model.add_roof", { level: roofLevel, roof: "gable", points: [[0, 0], [8000, 0], [8000, 5000], [0, 5000]], pitch: 30, thickness: 200 });
+    await page.reload(); await settle();
+    for (const label of ["Cross section", "South"]) {
+      await openFromTree(label);
+      const data = await api(`/drawing/${await viewId(label)}`);
+      const roof = data.projection.items.find((item) => item.category === "roof" && (item.cut.length || item.tris.length));
+      assert.ok(roof, `${label} has real projected roof geometry`);
+      const point = roof.cut[0]?.length ? middle(roof.cut[0]) : middle([[roof.tris[0][0], roof.tris[0][1]], [roof.tris[0][2], roof.tris[0][3]], [roof.tris[0][4], roof.tris[0][5]]]);
+      await clickWorld(point);
+      await page.getByRole("button", { name: "Add outside roof layer" }).waitFor();
+      await page.getByRole("button", { name: "Add inside roof layer" }).waitFor();
+    }
   });
 
   it("raised no errors in the browser", () => {

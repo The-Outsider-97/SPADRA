@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import math
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from . import elements as E
 from . import geometry as G
@@ -52,18 +52,25 @@ def is_on(project: Any) -> bool:
 class _Nodes:
     """Points merged when they lie within the join tolerance of one another."""
 
-    def __init__(self) -> None:
+    def __init__(self, blocked: set[frozenset[str]] | None = None) -> None:
         self.pts: list[Pt] = []
         self._cells: dict[tuple[int, int], list[int]] = {}
+        self._roles: list[set[str]] = []
+        self.blocked = blocked or set()
 
-    def get(self, p: Pt) -> int:
+    def get(self, p: Pt, role: str | None = None) -> int:
         cx, cy = math.floor(p[0] / (4 * TOL)), math.floor(p[1] / (4 * TOL))
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
                 for i in self._cells.get((cx + dx, cy + dy), ()):
                     if math.dist(self.pts[i], p) <= TOL:
+                        if role and any(frozenset((role, old)) in self.blocked for old in self._roles[i]):
+                            continue                            # an explicitly open corner must not close the space topologically
+                        if role:
+                            self._roles[i].add(role)
                         return i
         self.pts.append(p)
+        self._roles.append({role} if role else set())
         self._cells.setdefault((cx, cy), []).append(len(self.pts) - 1)
         return len(self.pts) - 1
 
@@ -89,18 +96,70 @@ def _cut_points(i: int, walls: Sequence[tuple[str, Pt, Pt, float]]) -> list[floa
     return sorted(cuts)
 
 
-def _faces(walls: Sequence[tuple[str, Pt, Pt, float]]) -> list[dict[str, Any]]:
-    """The enclosed faces of the wall network: ``{"nodes": [...], "points": [...], "edge_thickness": {...}, "component": n}`` each, counter-clockwise."""
-    nodes = _Nodes()
+def _topological_axes(walls: Sequence[tuple[str, Pt, Pt, float]]) -> list[tuple[str, Pt, Pt, float]]:
+    """Connect a partition ending *at a host wall's face* to its centre line.
+
+    Room boundaries follow wall centre lines, but a modeller correctly draws
+    a butt-joined partition to the host's near face rather than through its
+    material.  That small covered interval must be part of the room *graph*
+    even though the physical partition must not extend into the host core.
+    Only snap an endpoint already within the actual host thickness, and only
+    when the two axes intersect inside the host's span.  This never changes
+    the authored wall endpoints, 3D geometry, or structural join policy.
+    """
+    connected = []
+    for i, (oid, a, b, thick) in enumerate(walls):
+        length = math.dist(a, b)
+        if length <= 1e-6:
+            connected.append((oid, a, b, thick))
+            continue
+        direction = G.unit(G.sub(b, a))
+        ends = []
+        for end in (a, b):
+            options: list[tuple[float, str, Pt]] = []
+            for j, (hid, h0, h1, host_thickness) in enumerate(walls):
+                if i == j:
+                    continue
+                host_length = math.dist(h0, h1)
+                if host_length <= 1e-6:
+                    continue
+                host_dir = G.unit(G.sub(h1, h0))
+                sin_angle = abs(G.cross(direction, host_dir))
+                if sin_angle <= 1e-6:                                 # collinear / near-parallel walls cannot provide a unique T
+                    continue
+                relative = G.sub(end, h0)
+                host_position = G.dot(relative, host_dir)
+                face_distance = abs(G.cross(host_dir, relative))
+                if not (-TOL <= host_position <= host_length + TOL and face_distance <= host_thickness / 2 + TOL):
+                    continue                                         # a genuine gap outside the material must remain open
+                hit = G.intersect_lines(end, direction, h0, host_dir)
+                if hit is None or not -TOL <= hit[1] <= host_length + TOL:
+                    continue
+                extension = abs(hit[0])
+                if extension <= (host_thickness / 2 + TOL) / sin_angle + TOL:
+                    options.append((extension, hid, G.add(end, G.mul(direction, hit[0]))))
+            # A stable tie break is important at multi-wall intersections.
+            ends.append(min(options, key=lambda v: (round(v[0], 9), v[1]))[2] if options else end)
+        connected.append((oid, ends[0], ends[1], thick))
+    return connected
+
+
+def _faces(walls: Sequence[tuple[str, Pt, Pt, float]], *, blocked: set[frozenset[str]] | None = None) -> list[dict[str, Any]]:
+    """Enclosed faces of the wall network, including their actual bounding wall identities."""
+    nodes = _Nodes(blocked)
     thickness: dict[tuple[int, int], float] = {}
-    for i, (_, a, b, t) in enumerate(walls):
+    owners: dict[tuple[int, int], set[str]] = {}
+    for i, (wid, a, b, t) in enumerate(walls):
         length = math.dist(a, b)
         u = ((b[0] - a[0]) / length, (b[1] - a[1]) / length)
-        ids = [nodes.get((a[0] + u[0] * s, a[1] + u[1] * s)) for s in _cut_points(i, walls)]
+        ids = [nodes.get((a[0] + u[0] * s, a[1] + u[1] * s),
+                         f"{wid}:start" if abs(s) <= TOL else f"{wid}:end" if abs(s - length) <= TOL else None)
+               for s in _cut_points(i, walls)]
         for p, q in zip(ids, ids[1:]):
             if p != q:
                 key = (min(p, q), max(p, q))
                 thickness[key] = max(thickness.get(key, 0.0), t)
+                owners.setdefault(key, set()).add(wid)
     adj: dict[int, set[int]] = {}
     for p, q in thickness:
         adj.setdefault(p, set()).add(q)
@@ -111,7 +170,9 @@ def _faces(walls: Sequence[tuple[str, Pt, Pt, float]]) -> list[dict[str, Any]]:
         for n in [n for n, nb in adj.items() if len(nb) <= 1]:
             for m in adj.pop(n):
                 adj[m].discard(n)
-                thickness.pop((min(n, m), max(n, m)), None)
+                key = (min(n, m), max(n, m))
+                thickness.pop(key, None)
+                owners.pop(key, None)
             pruned = True
     P = nodes.pts
     out_edges = {n: sorted(nb, key=lambda m, n=n: math.atan2(P[m][1] - P[n][1], P[m][0] - P[n][0])) for n, nb in adj.items()}
@@ -146,7 +207,8 @@ def _faces(walls: Sequence[tuple[str, Pt, Pt, float]]) -> list[dict[str, Any]]:
                 continue
             if len({frozenset(e) for e in loop}) != len(loop):               # a wall walked twice: a bridge between two spaces, not a boundary
                 continue
-            faces.append({"nodes": ring, "points": pts, "thick": [thickness[(min(e), max(e))] for e in loop], "component": find(n)})
+            faces.append({"nodes": ring, "points": pts, "thick": [thickness[(min(e), max(e))] for e in loop],
+                          "wall_ids": sorted({wid for e in loop for wid in owners[(min(e), max(e))]}), "component": find(n)})
     return faces
 
 
@@ -182,12 +244,29 @@ def _inset(points: Sequence[Pt], thick: Sequence[float]) -> list[Pt] | None:
     return kept if 1e-4 < area < G.signed_area(points) else None
 
 
-def spaces(walls: Sequence[tuple[str, Pt, Pt, float]]) -> list[dict[str, Any]]:
+def _open_corner_roles(project: Any, walls: Sequence[tuple[str, Pt, Pt, float]]) -> set[frozenset[str]]:
+    """Room-graph exclusions for persisted, deliberately non-watertight corner modes."""
+    listed = project.manifest.get("wall_corners") or {}
+    if not isinstance(listed, dict):
+        return set()
+    ends = {f"{wid}:start": a for wid, a, _, _ in walls}
+    ends.update({f"{wid}:end": b for wid, _, b, _ in walls})
+    excluded: set[frozenset[str]] = set()
+    for key, mode in listed.items():
+        if mode != "stepped_open" or not isinstance(key, str):
+            continue
+        roles = key.split("|")
+        if len(roles) == 2 and roles[0] in ends and roles[1] in ends and math.dist(ends[roles[0]], ends[roles[1]]) <= TOL:
+            excluded.add(frozenset(roles))
+    return excluded
+
+
+def spaces(walls: Sequence[tuple[str, Pt, Pt, float]], *, project: Any | None = None) -> list[dict[str, Any]]:
     """The rooms a set of walls (id, start, end, thickness; metres) encloses: ``{"outline": [...], "probe": (x, y)}`` each, in a stable order."""
     walls = [w for w in walls if math.dist(w[1], w[2]) > 1e-6]
     if len(walls) < 3:
         return []
-    faces = _faces(walls)
+    faces = _faces(_topological_axes(walls), blocked=_open_corner_roles(project, walls) if project is not None else None)
     out = []
     for f in faces:
         others = [P for g in faces if g["component"] != f["component"] for P in g["points"]]
@@ -195,7 +274,7 @@ def spaces(walls: Sequence[tuple[str, Pt, Pt, float]]) -> list[dict[str, Any]]:
             continue                                                         # a separate ring of walls inside: the room would need a hole
         outline = _inset(f["points"], f["thick"])
         if outline is not None:
-            out.append({"outline": outline, "probe": interior_point(outline)})
+            out.append({"outline": outline, "probe": interior_point(outline), "wall_ids": f["wall_ids"]})
     out.sort(key=lambda s: (round(min(q[1] for q in s["outline"]), 6), round(min(q[0] for q in s["outline"]), 6)))
     return out
 
@@ -238,21 +317,83 @@ def _pristine(project: Any, rid: str) -> bool:
             and abs(float(E.m(meta, "height", R.DEFAULT_HEIGHT)) - R.DEFAULT_HEIGHT) < 1e-9)
 
 
+def _overlap_area(a: Sequence[Pt], b: Sequence[Pt]) -> float:
+    """Actual 2D overlap; touching at an edge is not enough to identify rooms."""
+    if max(p[0] for p in a) <= min(q[0] for q in b) or min(p[0] for p in a) >= max(q[0] for q in b) or \
+       max(p[1] for p in a) <= min(q[1] for q in b) or min(p[1] for p in a) >= max(q[1] for q in b):
+        return 0.0
+    from . import planar as P
+    try:
+        regions = P.intersection(a, b)
+        return sum(R.metrics(outer)["area"] - sum(R.metrics(h)["area"] for h in holes) for outer, holes in regions)
+    except P.PlanarError:
+        return 0.0                                                  # use persistent wall identities or probes as fallback
+
+
+def _claim_existing(project: Any, auto: Sequence[str], found: Sequence[dict[str, Any]], probes: Mapping[str, Pt]) -> dict[int, str]:
+    """Deterministically match rooms by their wall identities and actual spatial overlap.
+
+    A probe point can cross a moved partition even when the *same* two rooms
+    still exist on its two sides. First-fit point matching then destroys one
+    room and gives its number to a new one. Shared boundary-wall identities
+    preserve each room's structural side; area overlap and probe containment
+    handle old projects without these stored references.
+    """
+    candidate: list[tuple[float, float, int, float, str, int]] = []
+    for rid in auto:
+        meta = E.meta_of(project, rid)
+        prev = R.boundary_of(meta)
+        old_walls = set(E.m(meta, "room_walls") or (w["id"] for w in R.bounding_walls(project, rid)))
+        for i, new in enumerate(found):
+            wall_ids = set(new["wall_ids"])
+            common = len(old_walls & wall_ids)
+            wall_score = common / len(old_walls | wall_ids) if old_walls else 0.0
+            overlap = _overlap_area(prev, new["outline"])
+            new_area = R.metrics(new["outline"])["area"]
+            old_area = R.metrics(prev)["area"]
+            coverage = overlap / max(min(old_area, new_area), 1e-12)
+            has_probe = R.contains(new["outline"], probes[rid])
+            if not common and overlap <= 1e-8 and not has_probe:
+                continue
+            candidate.append((-wall_score, -coverage, -int(has_probe), -overlap, rid, i))
+    claimed: dict[int, str] = {}
+    assigned: set[str] = set()
+    for _wall, _coverage, _probe, _area, rid, i in sorted(candidate):
+        if i not in claimed and rid not in assigned:
+            claimed[i] = rid
+            assigned.add(rid)
+    return claimed
+
+
 def _reconcile_level(project: Any, level_id: str) -> dict[str, int]:
-    found = spaces(_walls_on(project, level_id))
+    found = spaces(_walls_on(project, level_id), project=project)
     auto, manual = _rooms_on(project, level_id)
     probes = {rid: tuple(E.m(E.meta_of(project, rid), "probe") or R.metrics(R.boundary_of(E.meta_of(project, rid)))["centre"]) for rid in auto}
-    claimed: dict[int, str] = {}
-    for rid in auto:                                                         # the room whose probe point is still in a space keeps that space
-        for i, s in enumerate(found):
-            if i not in claimed and R.contains(s["outline"], probes[rid]):
-                claimed[i] = rid
-                break
+    claimed = _claim_existing(project, auto, found, probes)
+    # When a damaged/removed partition suddenly makes one face encompass two
+    # previously distinct rooms, do not silently give their combined area to
+    # whichever probe wins the match and delete the other room. Keep both
+    # identities and their previous outlines, clearly marked unresolved.
+    # Deliberate room merging can be completed by removing the obsolete room.
+    ambiguous: dict[int, set[str]] = {}
+    for i, s in enumerate(found):
+        absorbed = {rid for rid in auto
+                    if _overlap_area(R.boundary_of(E.meta_of(project, rid)), s["outline"]) /
+                    max(R.metrics(R.boundary_of(E.meta_of(project, rid)))["area"], 1e-12) > 0.90}
+        if len(absorbed) > 1:
+            ambiguous[i] = absorbed
+            claimed.pop(i, None)
+    ambiguous_ids = set().union(*ambiguous.values()) if ambiguous else set()
+    claimed = {i: rid for i, rid in claimed.items() if rid not in ambiguous_ids}
     counts = {"added": 0, "updated": 0, "removed": 0, "not_enclosed": 0}
     for rid in auto:
         if rid in claimed.values():
             continue
-        if _pristine(project, rid):
+        if rid in ambiguous_ids:
+            counts["not_enclosed"] += 1
+            if not E.m(E.meta_of(project, rid), "open") or E.m(E.meta_of(project, rid), "room_issue") != "merged":
+                E._attach(project, rid, {"open": True, "room_issue": "merged"})
+        elif _pristine(project, rid):
             project.model.remove(rid)
             counts["removed"] += 1
         else:
@@ -262,17 +403,21 @@ def _reconcile_level(project: Any, level_id: str) -> dict[str, int]:
     manual_probes = [R.metrics(R.boundary_of(E.meta_of(project, rid)))["centre"] for rid in manual]
     manual_points = [interior_point(R.boundary_of(E.meta_of(project, rid))) for rid in manual]
     for i, s in enumerate(found):
+        if i in ambiguous:
+            continue
         outline = [[q[0], q[1]] for q in s["outline"]]
         if i in claimed:
             rid = claimed[i]
             meta = E.meta_of(project, rid)
             old = E.m(meta, "probe")
             probe = tuple(old) if old and R.contains(s["outline"], tuple(old)) else s["probe"]
-            if outline != [list(q) for q in E.m(meta, "boundary")] or not old or tuple(old) != probe or E.m(meta, "open"):
-                E._attach(project, rid, {"boundary": outline, "probe": [probe[0], probe[1]], "open": False})
+            wall_ids = s["wall_ids"]
+            if outline != [list(q) for q in E.m(meta, "boundary")] or not old or tuple(old) != probe or E.m(meta, "open") or E.m(meta, "room_walls") != wall_ids or E.m(meta, "room_issue"):
+                E._attach(project, rid, {"boundary": outline, "probe": [probe[0], probe[1]], "room_walls": wall_ids, "open": False, "room_issue": None})
                 counts["updated"] += 1
         elif not any(R.contains(s["outline"], q) for q in manual_points + manual_probes):
             rid = R.create(project, level_id, outline, auto=True, probe=s["probe"])
+            E._attach(project, rid, {"room_walls": s["wall_ids"]})
             counts["added"] += 1
     return counts
 
@@ -288,6 +433,9 @@ def reconcile(project: Any, *, force: bool = False) -> dict[str, int] | None:
     for level in project.manifest["levels"]:
         walls = _walls_on(project, level["id"])
         sig = signature(walls)
+        open_corners = _open_corner_roles(project, walls)
+        if open_corners:
+            sig += "|open:" + ";".join(sorted("|".join(sorted(roles)) for roles in open_corners))
         if not force and st["sig"].get(level["id"], "") == sig:
             continue
         if not walls and not st["sig"].get(level["id"]) and not force:

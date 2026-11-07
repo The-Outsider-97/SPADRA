@@ -343,11 +343,19 @@ def calculated(project: Any, ids: Sequence[str] | None = None) -> dict[str, dict
             put("NetVolume", net_vol, "volume of the solid as SGEO measures it")
             weights(net_vol, net_vol)
         elif ent == "IfcSpace":
-            d = R.data(project, oid)
-            put("Height", d["height"], "height of the enclosing geometry")
-            put("GrossFloorArea", d["area"], "area of the room outline")
-            put("GrossPerimeter", d["perimeter"], "perimeter of the room outline")
-            put("GrossVolume", d["volume"], f"room volume, {d['volume_basis']}")
+            enclosure = R.enclosure_status(project, oid) if E.m(meta, "auto") else {"valid": True}
+            if not enclosure["valid"]:
+                # A stale outline may span two formerly independent rooms.
+                # Emitting its area/volume as valid BIM quantities would be a
+                # safety-critical misrepresentation, not just a UI problem.
+                for q in ("Height", "GrossFloorArea", "GrossPerimeter", "GrossVolume"):
+                    why[q] = str(enclosure["message"])
+            else:
+                d = R.data(project, oid)
+                put("Height", d["height"], "height of the enclosing geometry")
+                put("GrossFloorArea", d["area"], "area of the room outline")
+                put("GrossPerimeter", d["perimeter"], "perimeter of the room outline")
+                put("GrossVolume", d["volume"], f"room volume, {d['volume_basis']}")
         out[oid] = {"set": name, "values": vals, "omitted": why}
     return out
 

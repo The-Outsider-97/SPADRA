@@ -37,6 +37,49 @@ class ElementCase(unittest.TestCase):
         return self.p.model.get(oid)["geometry"]["kind"]
 
 
+class RoofAccessoryConnections(ElementCase):
+    def roof(self):
+        return self.run_("model.add_roof", points=[[0, 0], [8000, 0], [8000, 6000], [0, 6000]],
+                         level=self.l2, roof="gable", pitch=30, thickness=200)["id"]
+
+    def test_context_commands_create_real_hosted_members_and_follow_roof_edits(self):
+        roof = self.roof()
+        beam = self.run_("model.add_roof_accessory", roof=roof, kind="ridge_beam")["id"]
+        strap = self.run_("model.add_roof_accessory", roof=roof, kind="ridge_strap")["id"]
+        edges = self.run_("model.add_roof_accessory", roof=roof, kind="roof_edge", edge="all")["ids"]
+        self.assertEqual(len(edges), 4)
+        for oid in [beam, strap, *edges]:
+            self.assertEqual(E.m(self.meta(oid), "roof_host"), roof)
+            self.assertGreater(self.vol(oid), 0.0)
+        upper_plan = next(v["id"] for v in self.p.manifest["views"] if v.get("level_id") == self.l2)
+        self.assertTrue({beam, strap, *edges}.issubset({row["id"] for row in self.p.plan_overlay(upper_plan)}))
+        self.assertNotEqual(E.m(self.meta(beam), "type"), E.m(self.meta(strap), "type"))
+        rows = E.properties(self.p, beam)
+        self.assertIn("vertical_offset", [r.get("key") for group in rows["groups"] for r in group["rows"]])
+        self.assertIn("lateral_offset", [r.get("key") for group in rows["groups"] for r in group["rows"]])
+        self.run_("model.set_property", id=beam, key="lateral_offset", value=250)
+        self.assertAlmostEqual(E.m(self.meta(beam), "lateral_offset"), 0.25)
+        self.run_("model.set_property", id=strap, key="span", value=1000)
+        self.assertAlmostEqual(E.m(self.meta(strap), "span"), 1.0)
+        with self.assertRaises(BadRequest):
+            self.run_("model.set_property", id=beam, key="top", value=5)
+        original = (E.m(self.meta(beam), "start"), self.bounds(edges[1]))
+        self.run_("model.set_property", id=roof, key="ridge_offset", value=500)
+        self.assertNotEqual(original[0], E.m(self.meta(beam), "start"))
+        self.run_("model.set_property", id=roof, key="pitch", value=40)
+        self.assertNotEqual(original[1], self.bounds(edges[1]))
+        with self.assertRaises(BadRequest):
+            self.run_("model.add_roof_accessory", roof=roof, kind="ridge_beam")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "accessory.spadra"
+            self.p.save(path)
+            reopened = Project.open(path)
+            self.assertGreater(reopened.model.volume(beam, unit="m"), 0.0)
+            self.assertEqual(E.m(reopened.model.get(strap)["metadata"], "roof_host"), roof)
+        self.run_("model.delete", id=roof)
+        self.assertFalse(any(E.alive(self.p, oid) for oid in [beam, strap, *edges]))
+
+
 class Appearance(ElementCase):
     def test_shared_and_instance_colors_are_independent_and_undoable(self):
         a, b = self.wall(), self.wall(a=(0, 2000), b=(6000, 2000))

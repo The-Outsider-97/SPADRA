@@ -12,6 +12,7 @@ export async function addLayerDialog(store, id, category, side) {
     const thickness = h("input", { type: "number", value: category === "wall" ? "12.5" : "50", min: "1", max: "5000", step: "any", attrs: { "aria-label": "Layer thickness in millimetres" } });
     const openings = h("select", { attrs: { "aria-label": "Opening inheritance" } }, h("option", { value: "all", text: "Inherit all openings and voids" }), h("option", { value: "none", text: "Do not inherit existing cuts" }));
     const boundary = category === "wall" ? ["start", "end", "bottom", "top"].map((edge) => [edge, h("input", { type: "number", value: "0", step: "any", attrs: { "aria-label": `${edge} edge offset in mm` } })]) : [];
+    const joints = category === "wall" ? ["start", "end"].map((edge) => [edge, h("select", { attrs: { "aria-label": `${edge} wall layer junction behavior` } }, h("option", { value: "flush", text: "Stop at joined face (no overlap)" }), h("option", { value: "penetrate", text: "Allow deliberate penetration past joined face" }))]) : [];
     const preview = s("svg", { attrs: { viewBox: "0 0 300 210", role: "img", "aria-label": "Live model geometry preview" }, css: { width: "100%", height: "210px", background: "var(--surface)", border: "1px solid var(--hairline)", borderRadius: "10px" } });
     const previewStatus = h("p", { class: "muted", text: "Computing the exact layer geometry before committing…" });
     let requestSerial = 0;
@@ -27,7 +28,8 @@ export async function addLayerDialog(store, id, category, side) {
                 return null;
             edges[edge] = n;
         }
-        return { side, thickness: amount, material: material.value, openings: openings.value, ...edges };
+        const jointPolicy = Object.fromEntries(joints.map(([edge, input]) => [`${edge}_joint`, input.value]));
+        return { side, thickness: amount, material: material.value, openings: openings.value, ...edges, ...jointPolicy };
     };
     const drawPreview = (before, after) => {
         const project = (v) => [((v[0] ?? 0) - (v[1] ?? 0)) * 0.8660254, ((v[0] ?? 0) + (v[1] ?? 0)) * 0.5 - (v[2] ?? 0)];
@@ -71,12 +73,12 @@ export async function addLayerDialog(store, id, category, side) {
     };
     const refresh = () => { if (pending)
         clearTimeout(pending); pending = setTimeout(() => { void updatePreview(); }, 180); };
-    for (const control of [material, thickness, openings, ...boundary.map(([, input]) => input)]) {
+    for (const control of [material, thickness, openings, ...boundary.map(([, input]) => input), ...joints.map(([, input]) => input)]) {
         control.addEventListener("input", refresh);
         control.addEventListener("change", refresh);
     }
     const handle = openDialog({ title: `Add ${side} ${category} layer`, size: "normal",
-        body: h("div", { css: { display: "grid", gap: ".65rem" } }, labelled("Material", material), labelled("Thickness (mm)", thickness), labelled("Opening / void cuts", openings), ...boundary.map(([edge, input]) => labelled(`${edge[0]?.toUpperCase()}${edge.slice(1)} boundary (mm)`, input)), preview, previewStatus),
+        body: h("div", { css: { display: "grid", gap: ".65rem" } }, labelled("Material", material), labelled("Thickness (mm)", thickness), labelled("Opening / void cuts", openings), ...boundary.map(([edge, input]) => labelled(`${edge[0]?.toUpperCase()}${edge.slice(1)} boundary (mm)`, input)), ...joints.map(([edge, input]) => labelled(`${edge[0]?.toUpperCase()}${edge.slice(1)} junction`, input)), preview, previewStatus),
         actions: [{ label: "Add layer", kind: "primary", run: async () => {
                     if (pending)
                         clearTimeout(pending);

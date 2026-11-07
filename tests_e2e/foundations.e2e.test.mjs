@@ -3,7 +3,7 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +11,8 @@ import { createServer } from "node:net";
 import { chromium } from "playwright";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const SLAI = resolve(HERE, "..", "..", "..");
+const NESTED_SLAI = resolve(HERE, "..", "..", "..");
+const SLAI = existsSync(join(NESTED_SLAI, "applications")) ? NESTED_SLAI : resolve(HERE, "..", "..");
 const PYTHON = process.env.PYTHON ?? (process.platform === "win32" ? "python" : "python3");
 
 let server, browser, page, url, dataDir;
@@ -84,7 +85,7 @@ const mean = (poly) => poly.reduce((a, p) => [a[0] + p[0] / poly.length, a[1] + 
 
 before(async () => {
   url = await startServer();
-  browser = await chromium.launch({ args: ["--use-gl=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"] });
+  browser = await chromium.launch({ executablePath: process.env.CHROMIUM_EXECUTABLE, args: ["--use-gl=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"] });
   page = await browser.newPage({ viewport: { width: 1672, height: 941 } });
   page.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
   page.on("console", (m) => { if (m.type() === "error") problems.push(`console: ${m.text()} ${m.location().url}`); });
@@ -113,7 +114,7 @@ const select = async (name) => {
 };
 
 describe("foundations in a browser", () => {
-  let level, wallId, columnId;
+  let level, wallId, columnId, stripId;
   it("Foundation with a wall selected makes a strip under it that is as wide as the wall plus the projection, and Properties says what it stands on", async () => {
     level = (await api("/project/tree")).levels.find((l) => l.name === "Level 01").id;
     wallId = (await cmd("model.add_wall", { level, start: [0, 0], end: [6000, 0], height: 3, thickness: 200 })).id;
@@ -128,6 +129,7 @@ describe("foundations in a browser", () => {
     await dialog.getByRole("button", { name: "Add foundation" }).click(); await settle();
     const strips = await ofCategory("foundation");
     assert.equal(strips.length, 1);
+    stripId = strips[0].id;
     const b = bbox(strips[0]);
     assert.ok(Math.abs((b.hi[0] - b.lo[0]) - 6) < 1e-6 && Math.abs((b.hi[1] - b.lo[1]) - 0.6) < 1e-6, "6 m long and 600 mm wide (200 mm wall + 2 x 200 mm)");
     assert.ok(Math.abs(b.hi[2]) < 1e-9 && Math.abs(b.lo[2] + 0.5) < 1e-9, "its top meets the wall's base at the level, 500 mm deep");
@@ -200,6 +202,32 @@ describe("foundations in a browser", () => {
     assert.match(text, /Strip foundation/);
     assert.match(text, /Pad foundation|Pad/);
     assert.match(text, /Ground-bearing slab/);
+  });
+
+  it("lets a person select either the wall or its foundation at their coincident section boundary", async () => {
+    const section = await cmd("view.add_section", { a: [4500, -1000], b: [4500, 1000], name: "Wall foundation selection" });
+    const proj = (await api(`/drawing/${section.id}`)).projection;
+    const wall = proj.items.find((item) => item.category === "wall" && item.id === wallId);
+    const strip = proj.items.find((item) => item.category === "foundation" && item.id === stripId);
+    assert.ok(wall?.cut.length && strip, "the wall and strip foundation both intersect this section");
+    const wc = wall.cut.flat(), fc = strip.cut.flat();
+    const wMin = Math.min(...wc.map((p) => p[0])), wMax = Math.max(...wc.map((p) => p[0]));
+    const fMin = Math.min(...fc.map((p) => p[0])), fMax = Math.max(...fc.map((p) => p[0]));
+    const world = [(Math.max(wMin, fMin) + Math.min(wMax, fMax)) / 2, 0];
+
+    await page.reload(); await settle();
+    await page.getByRole("treeitem", { name: /Wall foundation selection/ }).first().click(); await settle();
+    const c = page.locator("canvas[aria-label='Drawing canvas']");
+    const hits = await c.evaluate((el, at) => el.spadraView.modelCandidates(at), world);
+    assert.ok(hits.some((hit) => hit.id === wallId) && hits.some((hit) => hit.category === "foundation"), "both objects are in the hit stack");
+    const screen = await c.evaluate((el, at) => el.spadraView.screenOf(at), world), box = await c.boundingBox();
+    const x = box.x + screen[0], y = box.y + screen[1];
+    await page.mouse.click(x, y); await settle();
+    let selected = await c.evaluate((el) => el.spadraView.store.selection?.ids?.[0]);
+    assert.equal(selected, wallId, "the wall wins the initial ambiguous pick");
+    await page.mouse.click(x, y); await settle();
+    selected = await c.evaluate((el) => el.spadraView.store.selection?.ids?.[0]);
+    assert.equal(selected, strip.id, "clicking again cycles to the foundation without changing its geometry");
   });
 
   it("the page logged no errors", () => { assert.deepEqual(problems, []); });

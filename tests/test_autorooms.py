@@ -87,6 +87,54 @@ class Closing(Base):
         self.assertEqual(len(rooms), 2)
         self.assertAlmostEqual(sum(area(self.outline(r)) for r in rooms), (5.8 * 3.8) - 0.1 * 3.8, places=6)
 
+    def test_partitions_ending_at_host_wall_faces_enclose_three_distinct_rooms(self):
+        # A wall drawn to another wall's near face is physically joined even
+        # though its axis stops 100 mm before the host wall's centre line.
+        self.box(0, 0, 10000, 6000, 200)
+        self.wall((6000, 100), (6000, 5900), 100)
+        between = self.wall((6000, 3000), (9900, 3000), 100)
+        rooms = self.rooms()
+        self.assertEqual(len(rooms), 3)
+        # Internal partition occupies 100 mm across 5.8 m; the second
+        # partition begins at its inner face, so its net width is 3.85 m.
+        self.assertAlmostEqual(sum(area(self.outline(r)) for r in rooms),
+                               (9.8 * 5.8) - (0.1 * 5.8) - (0.1 * 3.85), places=6)
+        # Hosted door openings do not erase the wall as a room separator.
+        self.p.execute("model.add_door", {"wall": between, "offset": 2.0, "width": 900, "height": 2100})
+        self.assertEqual(set(self.rooms()), set(rooms))
+
+    def test_reconnecting_partitions_to_faces_preserves_room_ids_and_areas(self):
+        self.box(0, 0, 10000, 6000, 200)
+        vertical = self.wall((6000, 0), (6000, 6000), 100)
+        horizontal = self.wall((6000, 3000), (10000, 3000), 100)
+        before = set(self.rooms())
+        self.assertEqual(len(before), 3)
+        self.p.execute("model.set_wall_ends", {"id": horizontal, "end": [9900, 3000]})
+        self.p.execute("model.set_wall_ends", {"id": vertical, "start": [6000, 100], "end": [6000, 5900]})
+        self.assertEqual(set(self.rooms()), before)
+        self.assertEqual(len(AR.spaces(AR._walls_on(self.p, self.level))), 3)
+
+    def test_moving_a_partition_preserves_both_room_identities_even_when_probes_cross_it(self):
+        self.box(0, 0, 6000, 4000)
+        divider = self.wall((2000, 0), (2000, 4000), 100)
+        before = sorted(self.rooms(), key=lambda rid: R.metrics(self.outline(rid))["centre"][0])
+        self.assertEqual(len(before), 2)
+        self.p.execute("model.set_wall_ends", {"id": divider, "start": [4000, 0], "end": [4000, 4000]})
+        after = sorted(self.rooms(), key=lambda rid: R.metrics(self.outline(rid))["centre"][0])
+        self.assertEqual(after, before)
+
+    def test_explicitly_open_corner_does_not_create_a_fictitiously_enclosed_room(self):
+        walls = self.box(0, 0, 5000, 4000)
+        self.assertEqual(len(self.rooms()), 1)
+        roles = sorted((f"{walls[0]}:end", f"{walls[1]}:start"))
+        key = "|".join(roles)
+        self.p.manifest.setdefault("wall_corners", {})[key] = "stepped_open"
+        AR.reconcile(self.p)
+        self.assertEqual(self.rooms(), [])
+        self.p.manifest["wall_corners"].pop(key)
+        AR.reconcile(self.p)
+        self.assertEqual(len(self.rooms()), 1)
+
     def test_a_partition_that_stops_short_does_not_split_it(self):
         self.box(0, 0, 6000, 4000)
         self.wall((3000, 0), (3000, 2500), 100)
@@ -179,6 +227,73 @@ class Following(Base):
         names = sorted(self.p.model.get(r)["name"] for r in self.rooms())
         self.assertEqual(names, ["Hall", "Room"])
 
+    def test_a_broken_partition_must_not_silently_replace_two_rooms_with_their_combined_area(self):
+        self.box(0, 0, 6000, 4000)
+        partition = self.wall((3000, 0), (3000, 4000), 100)
+        before = set(self.rooms())
+        self.assertEqual(len(before), 2)
+        self.p.execute("model.delete", {"id": partition})
+        self.assertEqual(set(self.rooms()), before)                      # no identities silently destroyed
+        for rid in before:
+            self.assertTrue(E.m(E.meta_of(self.p, rid), "open"))
+            self.assertEqual(R.enclosure_status(self.p, rid)["state"], "ambiguous")
+        from .. import bimdata as BD
+        quantities = BD.calculated(self.p, sorted(before))
+        for rid in before:
+            self.assertNotIn("GrossFloorArea", quantities[rid]["values"])
+            self.assertNotIn("GrossVolume", quantities[rid]["values"])
+            self.assertIn("GrossFloorArea", quantities[rid]["omitted"])
+            self.assertIn("GrossVolume", quantities[rid]["omitted"])
+        import csv
+        import io
+        from .. import documentation as DOC
+        schedule = DOC.schedule_data(self.p, "room")
+        self.assertEqual(len(schedule["rows"]), 2)
+        for row in schedule["rows"]:
+            self.assertIsNone(row["area"])
+            self.assertIsNone(row["volume"])
+            self.assertIn("measurement_warning", row)
+        self.assertIsNone(schedule["totals"].get("area"))
+        self.assertIsNone(schedule["totals"].get("volume"))
+        csv_rows = list(csv.reader(io.StringIO(DOC.schedule_csv(schedule))))
+        index = {column["key"]: i for i, column in enumerate(schedule["columns"])}
+        for row in csv_rows[1:]:
+            self.assertEqual(row[index["area"]], "")
+            self.assertEqual(row[index["volume"]], "")
+        self.p.undo()
+        self.assertEqual(set(self.rooms()), before)
+        self.assertTrue(all(R.enclosure_status(self.p, rid)["valid"] for rid in before))
+
+    def test_a_room_schedule_sums_valid_rooms_but_excludes_ambiguous_ones(self):
+        from .. import documentation as DOC
+        self.box(0, 0, 6000, 4000)
+        partition = self.wall((3000, 0), (3000, 4000), 100)
+        self.box(8000, 0, 11000, 3000)
+        self.p.execute("model.delete", {"id": partition})
+        schedule = DOC.schedule_data(self.p, "room")
+        valid = [r for r in schedule["rows"] if r["area"] is not None]
+        invalid = [r for r in schedule["rows"] if r["area"] is None]
+        self.assertEqual((len(valid), len(invalid)), (1, 2))
+        self.assertEqual(schedule["totals"]["area"], valid[0]["area"])
+        self.assertEqual(schedule["totals"]["volume"], valid[0]["volume"])
+        self.assertIn("unresolved boundaries", schedule["note"])
+
+    def test_repaired_partition_and_room_identities_survive_save_and_reopen(self):
+        import tempfile
+        from pathlib import Path
+        self.box(0, 0, 6000, 4000)
+        partition = self.wall((3000, 0), (3000, 4000), 100)
+        before = set(self.rooms())
+        self.p.execute("model.set_wall_ends", {"id": partition, "start": [3000, 100], "end": [3000, 3900]})
+        self.assertEqual(set(self.rooms()), before)
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "rooms.spadra"
+            self.p.save(path)
+            reopened = Project.open(path)
+            got = {rid for rid in E.element_ids(reopened) if E.category(reopened, rid) == "room"}
+            self.assertEqual(got, before)
+            self.assertTrue(all(R.enclosure_status(reopened, rid)["valid"] for rid in before))
+
     def test_tags_follow_the_room_and_go_when_it_does(self):
         walls = self.box(0, 0, 5000, 4000)
         (rid,) = self.rooms()
@@ -261,6 +376,14 @@ class Geometry(unittest.TestCase):
     def test_walls_that_cross_make_four_spaces(self):
         walls = [("a", (0, 0), (6, 0), .1), ("b", (6, 0), (6, 6), .1), ("c", (6, 6), (0, 6), .1), ("d", (0, 6), (0, 0), .1), ("e", (0, 3), (6, 3), .1), ("f", (3, 0), (3, 6), .1)]
         self.assertEqual(len(AR.spaces(walls)), 4)
+
+    def test_an_actual_gap_outside_the_host_face_is_not_closed_artificially(self):
+        # The host's face is 100 mm from its centre line; an extra 10 mm is a
+        # real gap and must not be silently treated as a connection.
+        walls = [("a", (0, 0), (6, 0), .2), ("b", (6, 0), (6, 4), .2),
+                 ("c", (6, 4), (0, 4), .2), ("d", (0, 4), (0, 0), .2),
+                 ("partition", (3, .11), (3, 4), .1)]
+        self.assertEqual(len(AR.spaces(walls)), 1)
 
     def test_the_probe_point_is_inside_even_for_an_l_shape(self):
         l = [(0, 0), (4, 0), (4, 1), (1, 1), (1, 4), (0, 4)]

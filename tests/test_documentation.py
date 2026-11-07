@@ -49,6 +49,32 @@ class Room(unittest.TestCase):
 
 
 class Sections(Room):
+    def test_gable_roof_exposes_horizontal_ridge_edit_handle_only_in_meaningful_2d_views(self):
+        roof = self.cmd("model.add_roof", points=[[0, 0], [6000, 0], [6000, 4000], [0, 4000]],
+                        level=self.level, roof="gable", pitch=30, thickness=200)["id"]
+        vid, projection = self.section((3000, -2000), (3000, 6000))
+        ridge = next(item["ridge_handle"] for item in projection["items"] if item["id"] == roof)
+        self.assertAlmostEqual(abs(ridge["transverse_dot"]), 1.0)
+        self.assertEqual(ridge["offset_mm"], 0)
+        self.assertEqual(len(ridge["point"]), 2)
+        # A south elevation resolves the ridge length, not its transverse
+        # displacement: displaying a horizontal drag control would be false.
+        south = next(item for item in self.elevation("south")["items"] if item["id"] == roof)
+        self.assertNotIn("ridge_handle", south)
+
+        self.cmd("model.set_property", id=roof, key="ridge_offset", value=400)
+        after = next(item["ridge_handle"] for item in D.project_view(self.p, self.p.view(vid), 1000.0)["items"] if item["id"] == roof)
+        self.assertEqual(after["offset_mm"], 400)
+        self.assertAlmostEqual(after["point"][0] - ridge["point"][0], ridge["transverse_dot"] * 400, places=2)
+        self.assertEqual(after["point"][1], ridge["point"][1])  # horizontal offset preserves ridge elevation
+
+    def test_explicit_material_color_is_preserved_in_section_projection_geometry(self):
+        self.cmd("model.set_property", id=self.walls[0], key="color", value="#3179B5")
+        _, pr = self.section((1500, -2000), (1500, 6000))
+        wall = next(item for item in pr["items"] if item["id"] == self.walls[0])
+        self.assertEqual(wall["appearance_color"], "#3179B5")
+        self.assertTrue(wall["cut"])
+
     def test_a_wall_cut_through_its_middle_is_exactly_thickness_times_height(self):
         _, pr = self.section((3000, -2000), (3000, 6000))
         areas = self.cuts(pr)

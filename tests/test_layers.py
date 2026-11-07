@@ -158,6 +158,49 @@ class Walls(Case):
         self.assertIn("joined", c.exception.message)
         self.assertEqual(self.layers()[1]["end"], 0.0)                                         # nothing was changed
 
+    def test_optional_layer_penetration_requires_explicit_policy_and_is_undoable(self):
+        """A T/corner host is never penetrated by default, but a chosen layer may deliberately pass its resolved joint face."""
+        lid = self.add(material="Plasterboard", thickness=50, openings="none", name="Local lining")
+        other = self.wall(a=(6000, 0), b=(6000, 4000))
+        base_volume = self.vol(self.w)
+        before = self.p.revision
+        with self.assertRaises(BadRequest):
+            self.run_("model.set_property", id=self.w, key=f"layer:{lid}:end", value=50)
+        self.assertEqual((self.p.revision, self.layers()[1]["end_joint"]), (before, "flush"))
+        self.run_("model.set_property", id=self.w, key=f"layer:{lid}:end_joint", value="penetrate")
+        self.run_("model.set_property", id=self.w, key=f"layer:{lid}:end", value=50)
+        self.assertEqual((self.layers()[1]["end_joint"], self.layers()[1]["end"]), ("penetrate", .05))
+        self.assertAlmostEqual(self.vol(self.w) - base_volume, .05 * .05 * 3.2, places=5)
+        self.assertTrue(other)
+        self.p.undo()
+        self.assertAlmostEqual(self.vol(self.w), base_volume, places=5)
+        self.assertEqual(self.layers()[1]["end"], 0.0)
+        self.p.redo()
+        self.assertAlmostEqual(self.vol(self.w) - base_volume, .05 * .05 * 3.2, places=5)
+
+    def test_junction_modes_can_be_set_at_layer_creation_and_invalid_modes_roll_back(self):
+        lid = self.add(material="Mineral wool", thickness=75, start_joint="penetrate", end_joint="flush", openings="selected", opening_ids=[self.door])
+        lay = self.layers()[1]
+        self.assertEqual((lay["start_joint"], lay["end_joint"], lay["opening_ids"]), ("penetrate", "flush", [self.door]))
+        self.assertEqual(LY.inherited(lay, [self.door, self.win]), [self.door])
+        before = self.p.revision
+        with self.assertRaises(BadRequest):
+            self.run_("model.set_property", id=self.w, key=f"layer:{lid}:start_joint", value="unsafe")
+        self.assertEqual(self.p.revision, before)
+
+    def test_collinear_continuation_also_blocks_default_layer_overlap(self):
+        """A straight wall continuation has zero miter offsets but is still connected and cannot be penetrated by default."""
+        lid = self.add(material="Plasterboard", thickness=40)
+        second = self.wall(a=(6000, 0), b=(9000, 0))
+        self.assertTrue(second)
+        self.assertEqual(self.meta(self.w)["spadra:ends"], [[0.0, 0.0], [0.0, 0.0]])
+        with self.assertRaises(BadRequest) as rejected:
+            self.run_("model.set_property", id=self.w, key=f"layer:{lid}:end", value=50)
+        self.assertIn("joined", rejected.exception.message)
+        self.run_("model.set_property", id=self.w, key=f"layer:{lid}:end_joint", value="penetrate")
+        self.run_("model.set_property", id=self.w, key=f"layer:{lid}:end", value=50)
+        self.assertEqual(self.layers()[1]["end"], 0.05)
+
     def test_a_layer_trimmed_to_nothing_is_refused(self):
         lid = self.add(thickness=50)
         with self.assertRaises(BadRequest):
@@ -245,6 +288,23 @@ class PlanBands(Case):
         self.assertEqual(len(bands[1]["polygons"]), 1)                 # ... and the lining runs across it
         self.assertEqual(bands[0]["hatch"]["pattern"], "lines-135")
         self.assertEqual(sum(1 for i in pieces if i.get("bands")), 1)
+
+    def test_each_layer_plan_band_matches_its_true_joint_shape_and_solid_volume(self):
+        """Drawings must not show rectangular layer bands while their solid uses a miter, butt or chosen open corner."""
+        a = self.wall(a=(0, 0), b=(6000, 0), material="Masonry")
+        b = self.wall(a=(6000, 0), b=(6000, 3500), material="Masonry")
+        self.run_("model.add_layer", id=a, material="Plasterboard", thickness=50)
+        plan = next(v["id"] for v in self.p.manifest["views"] if v.get("level_id") == self.l1)
+        for mode in ("through_selected", "through_other", "stepped_open", "miter"):
+            with self.subTest(mode=mode):
+                self.run_("model.set_property", id=a, key=f"corner_join:{b}:end", value=mode)
+                pieces = [i for i in self.p.plan_overlay(plan) if i["id"] == a and i.get("bands")]
+                self.assertEqual(len(pieces), 1)
+                actual = {r["id"]: r["volume_m3"] for r in LY.layer_volumes(self.p, a)}
+                self.assertEqual(len(actual), 2)
+                for band in pieces[0]["bands"]:
+                    drawn_volume = sum(area(poly) for poly in band["polygons"]) / 1e6 * 3.2
+                    self.assertAlmostEqual(drawn_volume, actual[band["layer"]], places=5)
 
 
 class Floors(Case):

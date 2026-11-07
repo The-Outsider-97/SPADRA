@@ -68,7 +68,7 @@ export interface PlanSymbol {
   more?: Array<{ hinge: Pt; leaf_end: Pt; radius: number; start_angle: number; end_angle: number }>;
 }
 /** A room's plan label: its name and number, its area from the outline (m²) and where the label sits (drawing units). */
-export interface RoomLabel { name: string; number: string; area_m2: number; volume_m3?: number; at: Pt }
+export interface RoomLabel { name: string; number: string; area_m2: number | null; volume_m3?: number | null; at: Pt; valid?: boolean; warning?: string }
 /** A grid line's bubble: its label, where the bubble sits (the line's start) and its radius, in drawing units. */
 /** A grid's label: where its bubble(s) are drawn (`bubbles` names the ends that carry one; an older answer without it means the start). */
 export interface GridLabel { name: string; at: Pt; radius: number; bubbles?: Array<"start" | "end"> }
@@ -91,6 +91,8 @@ export interface PlanWall {
   outline?: Pt[];
   /** A gable roof's selectable ridge line and its transverse offset, in drawing units. */
   ridge?: [Pt, Pt]; ridge_offset?: number; ridge_across?: Pt;
+  /** Two-wall corner relationships, exposed as on-canvas controls rather than hidden Properties rows. */
+  corner_joins?: Array<{ endpoint: "start" | "end"; other: string; point: Pt; mode: "through_selected" | "through_other" | "stepped_open" | "miter" }>;
   /** A foundation's kind (poer, strook, plaat...). */
   kind?: string;
 }
@@ -100,6 +102,7 @@ export interface PlanWall {
 export interface HatchSpec { pattern: string; label: string; kind: "none" | "solid" | "lines" | "cross" | "dots"; angle: number; spacing_mm: number; standard: null }
 export interface ProjItem {
   id: string; category: string; name: string; depth: number; tris: number[][]; edges: number[][]; cut: Pt[][]; cut_material?: string[];
+  ridge_handle?: { point: Pt; transverse_dot: number; offset_mm: number };
   /** A door or window's opening direction: two lines from the hinge edge, drawn solid when the leaf opens toward the viewer and dashed when away. */
   opening?: { kind: "door" | "window"; toward: boolean; lines: number[][]; /** the other swinging panels of a door, each solid or dashed on its own */ more?: Array<{ toward: boolean; lines: number[][] }> } | null;
   /** How the cut is hatched; absent when the view hides material hatching (the cut is then a plain fill) or the material has no assignment. */
@@ -107,6 +110,9 @@ export interface ProjItem {
   /** A wall, floor or roof built in layers: which layer each loop of `cut` is, and (unless hatching is hidden) how each is hatched. */
   cut_layers?: Array<{ layer: string; material: string; name: string }>;
   cut_hatches?: Array<HatchSpec | null>;
+  /** Explicit material/element colors; absence keeps architectural monochrome drafting. */
+  appearance_color?: string;
+  cut_colors?: Array<string | null>;
 }
 export interface Projection {
   kind: "section" | "elevation"; items: ProjItem[]; levels: Array<{ name: string; z: number }>; bounds: [Pt, Pt] | null; span?: number; far?: number;

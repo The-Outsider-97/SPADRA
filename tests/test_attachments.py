@@ -2,8 +2,15 @@
 from __future__ import annotations
 
 import math
+import tempfile
+from collections import Counter
+from pathlib import Path
 
 from applications.SPADRA import attachments as AT
+from applications.SPADRA import documentation as DOC
+from applications.SPADRA import elements as E
+from applications.SPADRA import planar as P
+from applications.SPADRA import rooms as RM
 from applications.tools.errors import BadRequest
 
 from .test_bim import Case
@@ -12,6 +19,111 @@ RECT = [[0, 0], [6000, 0], [6000, 4000], [0, 4000]]
 
 
 class Attachments(Case):
+    def _eave_wall(self, thickness=500):
+        """A wall parallel to the ridge, whose two faces lie at different roof heights."""
+        return self.run_("model.add_wall", start=[1000, 500], end=[5000, 500], level=self.l1,
+                         thickness=thickness, height=3.2)["id"]
+
+    def _top_of_face(self, wall, y):
+        verts, _ = DOC.world_mesh(self.p, wall, self.p.model._model.world_transforms())
+        return max(v[2] for v in verts if abs(v[1] - y) < 1e-8)
+
+    def test_eave_wall_is_clipped_to_roof_underside_at_both_faces(self):
+        wall, roof = self._eave_wall(), self.roof()
+        self.run_("model.attach_wall", ids=[wall, roof], to="roof")
+        base = self.elevation(self.roof_level) - 0.1
+        slope = math.tan(math.radians(30))
+        self.assertAlmostEqual(self._top_of_face(wall, 0.25), base + 0.25 * slope, places=7)
+        self.assertAlmostEqual(self._top_of_face(wall, 0.75), base + 0.75 * slope, places=7)
+        self.assertAlmostEqual(self.meta(wall)["spadra:height"], base + 0.75 * slope, places=7)
+        self.assertAlmostEqual(self.vol(wall), 4 * .5 * (base + .5 * slope), places=6)
+        self.run_("model.set_property", id=roof, key="pitch", value=45)
+        self.assertAlmostEqual(self._top_of_face(wall, 0.25), base + 0.25, places=7)
+        self.assertAlmostEqual(self._top_of_face(wall, 0.75), base + 0.75, places=7)
+        self.p.undo()
+        self.assertAlmostEqual(self._top_of_face(wall, 0.25), base + 0.25 * slope, places=7)
+        self.run_("model.set_property", id=roof, key="ridge_offset", value=300)
+        slope_after_ridge_shift = 2.0 * slope / 2.3
+        self.assertAlmostEqual(self._top_of_face(wall, 0.25), base + 0.25 * slope_after_ridge_shift, places=7)
+        self.assertAlmostEqual(self._top_of_face(wall, 0.75), base + 0.75 * slope_after_ridge_shift, places=7)
+
+    def test_a_door_cut_is_preserved_under_face_wise_roof_clipping(self):
+        wall, roof = self._eave_wall(), self.roof()
+        door = self.run_("model.add_door", wall=wall, offset=2.0, width=900, height=2100)["id"]
+        self.run_("model.attach_wall", ids=[wall, roof], to="roof")
+        base = self.elevation(self.roof_level) - 0.1
+        slope = math.tan(math.radians(30))
+        without_opening = 4 * .5 * (base + .5 * slope)
+        self.assertAlmostEqual(self.vol(wall), without_opening - .9 * .5 * 2.1, places=6)
+        self.assertEqual(E.m(self.meta(door), "host"), wall)
+        self.assertAlmostEqual(self._top_of_face(wall, .25), base + .25 * slope, places=7)
+
+    def test_face_wise_roof_attachment_survives_native_project_round_trip(self):
+        wall, roof = self._eave_wall(), self.roof()
+        self.run_("model.attach_wall", ids=[wall, roof], to="roof")
+        before = [self._top_of_face(wall, y) for y in (.25, .75)]
+        with tempfile.TemporaryDirectory() as tmp:
+            self.p.save(Path(tmp) / "attached.spadra")
+            self.p = type(self.p).open(Path(tmp) / "attached.spadra")
+            self.assertEqual([round(self._top_of_face(wall, y), 8) for y in (.25, .75)],
+                             [round(z, 8) for z in before])
+            self.run_("model.set_property", id=roof, key="pitch", value=45)
+            self.assertNotAlmostEqual(self._top_of_face(wall, .25), before[0], places=5)
+
+
+    def test_layered_eave_wall_clips_each_independent_material_shell(self):
+        wall, roof = self._eave_wall(), self.roof()
+        self.run_("model.add_layer", id=wall, side="right", material="Mineral wool", thickness=100)
+        self.run_("model.attach_wall", ids=[wall, roof], to="roof")
+        base = self.elevation(self.roof_level) - 0.1
+        slope = math.tan(math.radians(30))
+        for y in (0.2, 0.3, 0.8):
+            self.assertAlmostEqual(self._top_of_face(wall, y), base + slope * y, places=7)
+        self.assertAlmostEqual(self.vol(wall), 4 * .6 * (base + .5 * slope), places=6)
+
+    def test_shed_roof_wall_follows_transverse_incline_without_penetration(self):
+        wall, roof = self._eave_wall(), self.roof(kind="shed")
+        self.run_("model.attach_wall", ids=[wall, roof], to="roof")
+        base = self.elevation(self.roof_level) - .1
+        rise = math.tan(math.radians(30))
+        for y in (.25, .75):
+            self.assertAlmostEqual(self._top_of_face(wall, y), base + y * rise, places=7)
+
+    def test_oblique_gable_and_hip_attachments_are_piecewise_exact_watertight_and_layer_aware(self):
+        """A ridge crossing wall thickness obliquely must split top facets, not make a twisted quad."""
+        for kind, layered in ((kind, layered) for kind in ("gable", "hip") for layered in (False, True)):
+            with self.subTest(kind=kind, layered=layered):
+                p = type(self.p).create("Diagonal roof clipping")
+                self.p = p
+                self.l1, self.l2, self.roof_level = (l["id"] for l in p.manifest["levels"])
+                wall = self.run_("model.add_wall", start=[1000, 500], end=[5000, 3500], level=self.l1,
+                                 thickness=500, height=3.2)["id"]
+                roof = self.roof(kind=kind)
+                if layered:
+                    self.run_("model.add_layer", id=wall, side="right", material="Mineral wool", thickness=100)
+                self.run_("model.attach_wall", ids=[wall, roof], to="roof")
+                verts, faces = DOC.world_mesh(self.p, wall, self.p.model._model.world_transforms())
+                edges = Counter(tuple(sorted((a, b))) for f in faces for a, b in zip(f, f[1:] + f[:1]))
+                self.assertEqual(set(edges.values()), {2}, "every triangle edge is paired in a closed wall shell")
+
+                # Independent exact integration of the piecewise planar roof
+                # over the wall's footprint, including the ridge's oblique cut.
+                fr = E.wall_frame(self.p, wall)
+                c, s, half = math.cos(fr["angle"]), math.sin(fr["angle"]), fr["thickness"] / 2
+                a, b = fr["start"], fr["end"]
+                polygon = [(a[0] - s * half, a[1] + c * half), (b[0] - s * half, b[1] + c * half),
+                           (b[0] + s * half, b[1] - c * half), (a[0] + s * half, a[1] - c * half)]
+                expected = 0.0
+                for ring, plane in E.roof_facets(self.p, E.meta_of(self.p, roof)):
+                    for outer, holes in P.intersection(polygon, ring):
+                        area, integrated_z = RM._region_integral(outer, holes, plane)
+                        expected += integrated_z - area * fr["base"]
+                self.assertAlmostEqual(self.vol(wall), expected, delta=1e-6 * max(1.0, expected))
+
+                self.run_("model.set_property", id=roof, key="ridge_offset" if kind == "gable" else "pitch", value=300 if kind == "gable" else 45)
+                self.p.undo()
+                self.assertAlmostEqual(self.vol(wall), expected, delta=1e-6 * max(1.0, expected))
+
     def test_offset_ridge_preserves_peak_elevation_and_updates_attached_gable_wall(self):
         w, r = self.gable_wall(), self.roof()
         self.run_("model.attach_wall", ids=[w, r], to="roof")
