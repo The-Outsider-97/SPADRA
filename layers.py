@@ -33,6 +33,7 @@ MODES = ("all", "none", "selected")
 JOINT_MODES = ("flush", "penetrate")  # explicit overlap is never the default
 SNAP = 0.005                       # m: a layer edge this close to the wall's own edge is that edge
 LAYERED = ("wall", "floor", "roof")
+LAYER_ROLES = ("unspecified", "core", "non_core")
 EDGES = ("start", "end", "bottom", "top")
 
 
@@ -48,9 +49,12 @@ def is_layered(meta: Mapping[str, Any]) -> bool:
 def _full(row: Mapping[str, Any]) -> dict[str, Any]:
     out = {"id": str(row.get("id") or new_id()[:8]), "name": str(row.get("name") or row.get("material") or "Layer"), "material": str(row.get("material") or "Concrete"),
            "thickness": float(row["thickness"]), "openings": str(row.get("openings") or "all"), "opening_ids": [str(i) for i in row.get("opening_ids") or []],
+           "role": str(row.get("role") or "unspecified"),
            "color": E.color(row.get("color")), "start_joint": str(row.get("start_joint", "flush")), "end_joint": str(row.get("end_joint", "flush"))}
     for edge in EDGES:
         out[edge] = float(row.get(edge) or 0.0)
+    if out["role"] not in LAYER_ROLES:
+        raise BadRequest(f"Layer function must be one of {', '.join(LAYER_ROLES)}")
     if out["start_joint"] not in JOINT_MODES or out["end_joint"] not in JOINT_MODES:
         raise BadRequest("A wall layer joint must be flush or penetrate")
     return out
@@ -115,7 +119,7 @@ def add_layer(project: Any, oid: str, p: Mapping[str, Any]) -> str:
         raise BadRequest("Selected openings must belong to the host element")
     row = _full({"name": text(p.get("name") or material, "name", 60), "material": material, "thickness": thickness,
                  "openings": mode, "opening_ids": opening_ids if mode == "selected" else [],
-                 "start_joint": p.get("start_joint", "flush"), "end_joint": p.get("end_joint", "flush")})
+                 "start_joint": p.get("start_joint", "flush"), "end_joint": p.get("end_joint", "flush"), "role": p.get("role", "unspecified")})
     if cat != "wall" and (row["start_joint"] != "flush" or row["end_joint"] != "flush"):
         raise BadRequest("Junction penetration applies only to wall layers")
     side = p.get("side")
@@ -211,6 +215,15 @@ def set_field(project: Any, oid: str, key: str, value: Any) -> None:
         row["material"] = str(value)
     elif field == "color":
         row["color"] = E.color(value)
+    elif field == "role":
+        if cat != "roof":
+            raise BadRequest("Roof core designation is available for roof layers only")
+        if value not in LAYER_ROLES:
+            raise BadRequest(f"Layer function must be one of {', '.join(LAYER_ROLES)}")
+        row["role"] = str(value)
+        indices = [i for i, r in enumerate(rows) if r["role"] == "core"]
+        if indices and indices != list(range(indices[0], indices[-1] + 1)):
+            raise BadRequest("Structural roof core layers must be contiguous")
     elif field == "thickness":
         row["thickness"] = number(value, "thickness (mm)", 1, 5000) / 1000.0
     elif field == "openings":
@@ -502,6 +515,12 @@ def rows(project: Any, oid: str) -> dict[str, Any] | None:
             {"key": key("color"), "label": f"{n}. Color override", "type": "color", "value": lay["color"] or "",
              "text": project.manifest.get("material_colors", {}).get(lay["material"]) or E.MATERIAL_COLORS.get(lay["material"], "#BFBFC7")},
             {"key": key("thickness"), "label": f"{n}. Thickness", "type": "number", "unit": "mm", "value": round(lay["thickness"] * 1000, 6)}]
+        if cat == "roof":
+            block.append({"key": key("role"), "label": f"{n}. Roof layer function", "type": "choice",
+                          "value": lay["role"], "choices": [
+                              {"value": "unspecified", "label": "Unspecified / legacy"},
+                              {"value": "core", "label": "Structural core"},
+                              {"value": "non_core", "label": "Non-core finish / insulation"}]})
         if cat != "roof" and every:
             block.append({"key": key("openings"), "label": f"{n}. Openings", "type": "choice", "value": lay["openings"], "choices": modes})
             if lay["openings"] == "selected":
