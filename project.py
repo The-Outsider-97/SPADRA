@@ -900,7 +900,40 @@ class Project:
         """The Properties panel for a selection: ``{"model": id}``, ``{"drawing": view_id, "entity": id}`` or ``{"sheet": id}``. ``relations``
         adds the links from a model element to what it is connected to (the panel asks for them; the assistant and the calculator do not)."""
         if "model" in ref:
-            return E.properties(self, str(ref["model"]), relations)
+            props = E.properties(self, str(ref["model"]), relations)
+            modifiers = [m for m in self.model.modifiers()
+                         if m["target"]["item_id"] == str(ref["model"])]
+            if modifiers:
+                rows = []
+                for item in modifiers:
+                    mid = item["id"]
+                    name = item["kind"].split(".", 1)[-1].title()
+                    rows.append({"label": name + " · " + mid[:8],
+                                 "type": "readonly", "value": "Non-destructive SGEO modifier"})
+                    for field, value in item["parameters"].items():
+                        if isinstance(value, (int, float)) and not isinstance(value, bool):
+                            rows.append({"key": f"modifier:{mid}:{field}",
+                                         "label": f"{name} · {field.replace('_', ' ').title()}",
+                                         "type": "number", "value": (
+                                             round(math.degrees(value), 6) if field == "angle" else value),
+                                         "unit": "°" if field == "angle" else
+                                                 ("m" if field in ("amount", "depth", "start", "end", "max_edge") else "")})
+                        elif isinstance(value, str):
+                            choices = {"side": ("positive", "negative"),
+                                       "axis": ("x", "y", "z"),
+                                       "operation": ("union", "subtract", "intersect")}.get(field)
+                            if choices:
+                                rows.append({"key": f"modifier:{mid}:{field}",
+                                             "label": f"{name} · {field.title()}",
+                                             "type": "choice", "value": value,
+                                             "choices": [{"value": v, "label": v.title()} for v in choices]})
+                        elif isinstance(value, list):
+                            for n, part in enumerate(value):
+                                rows.append({"key": f"modifier:{mid}:{field}:{n}",
+                                             "label": f"{name} · {field.title()} {n + 1}",
+                                             "type": "number", "value": part})
+                props.setdefault("groups", []).append({"title": "Native modifiers", "rows": rows})
+            return props
         if "level" in ref:
             return _level_properties(self, str(ref["level"]))
         if "entity" in ref:
@@ -1920,6 +1953,47 @@ class _Commands:
             raise BadRequest("The modifier produced empty geometry; no change was committed")
         return {"id": oid, "modifier_id": mid, "operation": operation, "mode": "non_destructive",
                 "diagnostics": result.get("diagnostics", {})}
+
+    @staticmethod
+    @command(_model_target("Edit SGEO modifier"))
+    def model__set_modifier(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        oid = text(p.get("id"), "id", 80)
+        mid = text(p.get("modifier"), "modifier", 80)
+        current = next((m for m in project.model.modifiers()
+                        if m["id"] == mid and m["target"]["item_id"] == oid), None)
+        if not current:
+            raise BadRequest("The selected SGEO modifier does not belong to this model element")
+        key = text(p.get("key"), "parameter", 60)
+        value = p.get("value")
+        params = dict(current["parameters"])
+        parts = key.split(":")
+        field = parts[0]
+        if field not in params:
+            raise BadRequest(f"'{field}' is not a parameter of this modifier")
+        if len(parts) == 2:
+            if not isinstance(params[field], list):
+                raise BadRequest("Only a geometric vector supports indexed components")
+            idx = integer(parts[1], "vector component", 0, len(params[field]) - 1)
+            params[field] = [*params[field]]
+            params[field][idx] = number(value, key, -1e9, 1e9)
+        elif len(parts) == 1:
+            old = params[field]
+            if type(old) is int:
+                params[field] = integer(value, field, 1, 256)
+            elif isinstance(old, (int, float)):
+                val = number(value, field, -1e9, 1e9)
+                params[field] = math.radians(val) if field == "angle" else val
+            elif isinstance(old, str):
+                params[field] = text(value, field, 60)
+            else:
+                raise BadRequest("This modifier parameter cannot be edited in Properties")
+        else:
+            raise BadRequest("Modifier parameter key has too many components")
+        project.model.update_modifier(mid, parameters=params)
+        report = next(item for item in project.model.evaluate_modifiers() if item["modifier_id"] == mid)
+        if report["status"] != "ok" or report["result"] is None:
+            raise BadRequest("The changed modifier produces invalid or empty geometry")
+        return {"id": oid, "modifier_id": mid, "parameters": params}
 
     @staticmethod
     @command(_model_target("Array elements"))
