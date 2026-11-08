@@ -154,17 +154,45 @@ def build(project: Any, name: str, sections: list[str], *, author: str = "",
     created = datetime.now(timezone.utc).isoformat(timespec="seconds")
     revision = project.revision
     body = _blocks(project, sections)
+    styles = {"paragraph": {
+        "report_body": {"font_family": "Arial", "font_size_pt": 10, "line_height": 1.45,
+                        "space_after_pt": 7},
+        "report_h1": {"based_on": "report_body", "font_size_pt": 17, "bold": True,
+                      "color": "#172B3D", "keep_with_next": True, "space_after_pt": 14},
+        "report_h2": {"based_on": "report_body", "font_size_pt": 14, "bold": True,
+                      "color": "#172B3D", "keep_with_next": True, "space_after_pt": 11},
+        "report_h3": {"based_on": "report_body", "font_size_pt": 11, "bold": True,
+                      "color": "#172B3D", "keep_with_next": True, "space_after_pt": 9},
+        "cover_brand": {"based_on": "report_body", "font_size_pt": 29, "bold": True,
+                        "align": "center", "color": "#172B3D", "space_before_pt": 18},
+        "cover_tagline": {"based_on": "report_body", "font_size_pt": 11,
+                          "align": "center", "color": "#597083", "space_after_pt": 26},
+        "cover_title": {"based_on": "report_body", "font_size_pt": 20, "bold": True,
+                        "align": "center", "color": "#172B3D", "space_after_pt": 20},
+        "cover_meta": {"based_on": "report_body", "font_size_pt": 10, "align": "center",
+                       "color": "#536775", "space_after_pt": 8},
+        "toc_title": {"based_on": "report_body", "font_size_pt": 17, "bold": True,
+                      "color": "#172B3D", "space_after_pt": 16},
+        "toc_h1": {"based_on": "report_body", "bold": True, "space_after_pt": 5},
+        "toc_h2": {"based_on": "report_body", "indent_mm": 5, "space_after_pt": 5},
+        "toc_h3": {"based_on": "report_body", "indent_mm": 10, "space_after_pt": 5},
+        "report_footer": {"based_on": "report_body", "font_size_pt": 8, "color": "#536775"},
+    }}
     for item in body:
         item["section"] = "body"
         if item["type"] == "heading":
             item["id"] = S.new_block_id()
+            item["style"] = "report_h" + str(item["attributes"]["level"])
+        elif item["type"] in ("paragraph", "list_item"):
+            item["style"] = "report_body"
     headings = [b for b in body if b["type"] == "heading" and 1 <= b["attributes"]["level"] <= 3]
     toc_id = secrets.token_hex(12)
-    toc = [S.make_block("paragraph", "Table of Contents", section="front",
+    toc = [S.make_block("paragraph", "Table of Contents", section="front", style="toc_title",
                         extensions={"slai.sldc.toc": {"id": toc_id, "role": "title",
                                                      "depth": 3, "show_page_numbers": True,
                                                      "leader_dots": True, "refresh_mode": "automatic"}})]
     toc.extend(S.make_block("paragraph", item["text"], section="front",
+                            style="toc_h" + str(item["attributes"]["level"]),
                             extensions={"slai.sldc.toc": {"id": toc_id, "role": "entry",
                                                          "heading": item["id"], "level": item["attributes"]["level"],
                                                          "source_text": item["text"]}})
@@ -173,11 +201,11 @@ def build(project: Any, name: str, sections: list[str], *, author: str = "",
     asset = S.make_asset(logo_bytes)
     cover = [
         dict(S.make_figure(asset, "SPADRA official logo", width_mm=36, align="center"), section="cover"),
-        S.make_block("paragraph", "SPADRA", section="cover"),
-        S.make_block("paragraph", "Intelligent CAD, BIM & Engineering powered by SLAI", section="cover"),
-        S.make_block("paragraph", name, section="cover"),
-        S.make_block("paragraph", f"Made by {author or '—'}", section="cover"),
-        S.make_block("paragraph", created.replace("T", " "), section="cover"),
+        S.make_block("paragraph", "SPADRA", section="cover", style="cover_brand"),
+        S.make_block("paragraph", "Intelligent CAD, BIM & Engineering powered by SLAI", section="cover", style="cover_tagline"),
+        S.make_block("paragraph", name, section="cover", style="cover_title"),
+        S.make_block("paragraph", f"Made by {author or '—'}", section="cover", style="cover_meta"),
+        S.make_block("paragraph", created.replace("T", " "), section="cover", style="cover_meta"),
     ]
     metadata = {"project": project.name, "model_revision": str(revision),
                 "sections": ",".join(sections), "author": author,
@@ -187,13 +215,13 @@ def build(project: Any, name: str, sections: list[str], *, author: str = "",
         {"id": "front", "role": "front_matter", "page": page, "numbering": {"show": False}},
         {"id": "body", "role": "body", "page": page,
          "numbering": {"show": True, "start": 1, "format": "decimal"},
-         "footer": {"left": name, "right": "Page {page} of {pages}"}},
+         "footer": {"left": name, "right": "Page {page} of {pages}", "style": "report_footer"}},
     ]
     try:
         package = S.new_package(name, [*cover, *toc, *body],
                                 metadata=metadata, publication={"authors": [author] if author else [],
                                 "published": created, "cover_asset": asset.id},
-                                sections=native_sections, assets=[asset])
+                                sections=native_sections, styles=styles, assets=[asset])
         # Managed native ToC and cover roles are SLDC 1.1 features. The
         # 1.0 package writer correctly refuses them unless upgraded explicitly.
         package.version = "1.1.0"
