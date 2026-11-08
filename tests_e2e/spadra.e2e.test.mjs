@@ -79,6 +79,7 @@ describe("SPADRA in a browser", () => {
   });
 
   it("draws a rectangle and a polyline with real clicks and the server stores them", async () => {
+    await page.getByRole("tab", { name: "Annotate", exact: true }).click();
     await page.getByRole("button", { name: "Rectangle" }).click();
     await click(".view-canvas", 0.3, 0.3); await click(".view-canvas", 0.5, 0.55);
     await page.getByRole("button", { name: "Polyline" }).click();
@@ -93,6 +94,7 @@ describe("SPADRA in a browser", () => {
 
   it("snaps a new line to an existing endpoint exactly", async () => {
     const [corner] = (await drawing()).entities[0].geometry.points;
+    await page.getByRole("tab", { name: "Annotate", exact: true }).click();
     await page.getByRole("button", { name: "Line", exact: true }).click();
     const box = await page.locator(".view-canvas").first().boundingBox();
     // A new drawing opens on a 20 m square centred at (10 m, 7.5 m) with 48 px margins; the view does not move as things are drawn.
