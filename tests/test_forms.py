@@ -463,7 +463,7 @@ class NativeModifierCommands(unittest.TestCase):
         return self.p.execute(op, params)["result"]
 
     def generic_box(self, x=0.0):
-        return self.p.model.add_box(width=2, depth=2, height=2, position=(x, 0, 0), name="Independent solid")
+        return self.p.model.add_box(width=2, depth=2, height=2, center=(x, 0, 0), name="Independent solid")
 
     def scene_bounds(self, oid):
         obj = next(obj for obj in self.p.scene_data()["objects"] if obj["id"] == oid)
@@ -499,7 +499,8 @@ class NativeModifierCommands(unittest.TestCase):
             self.p.save(target)
             reopened = Project.open(target)
             self.assertEqual(len(reopened.model.modifiers()), 1)
-            self.assertGreater(next(o for o in reopened.scene_data()["objects"] if o["id"] == left)["vertices"][-1][0], -2)
+            coordinates = next(o for o in reopened.scene_data()["objects"] if o["id"] == left)["vertices"]
+            self.assertAlmostEqual(max(v[0] for v in coordinates), 2.0, places=4)
 
     def test_semantically_hosted_wall_rejects_freeform_modification_atomically(self):
         level = self.p.manifest["levels"][0]["id"]
