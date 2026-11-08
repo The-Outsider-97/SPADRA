@@ -186,8 +186,9 @@ class Reports(ServerCase):
         a.post("/api/project/new", {"name": "R", "unit": "mm"})
         rid = a.cmd("report.create", {"name": "Status"})["result"]["id"]
         view = a.get(f"/api/report/{rid}")
-        self.assertIn("# Status", view["markdown"])
-        self.assertEqual(view["container"]["version"], "1.0.0")
+        self.assertIn("Status", view["markdown"])
+        self.assertEqual(view["document"]["metadata"]["model_revision"], "0")
+        self.assertEqual(view["container"]["version"], "1.1.0")
         status, headers, raw = a.raw("GET", f"/api/export/report/{rid}")
         self.assertEqual(status, 200)
         self.assertEqual(sldc.loads_package(raw).document["title"], "Status")
