@@ -612,3 +612,100 @@ class SchedulesAndChecks(Case):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RequestedBimRegressions(Case):
+    """Shared-model regression tests for the November 2026 modeling corrections."""
+
+    def test_level_properties_height_recomputes_later_storeys_and_undo(self):
+        from applications.SPADRA import datums as DT
+        wall = self.run_("model.add_wall", start=[0, 0], end=[6000, 0],
+                         level=self.l2, height=2.8, thickness=250)["id"]
+        before = self.p.model.world_bounds(wall)[0][2]
+        p = self.p.properties({"level": self.l1})
+        self.assertEqual(p["kind"], "level")
+        props = {row.get("key"): row for row in p["groups"][0]["rows"]}
+        self.assertAlmostEqual(props["height"]["value"], 3.2)
+        self.run_("level.set", id=self.l1, height=4.0)
+        self.assertAlmostEqual(self.p.level(self.l2)["elevation"], 4.0)
+        self.assertAlmostEqual(self.p.level(self.roof_level)["elevation"], 7.2)
+        self.assertAlmostEqual(DT.height_to_next(self.p, self.l1), 4.0)
+        self.assertAlmostEqual(self.p.model.world_bounds(wall)[0][2], before + 0.8)
+        self.p.undo()
+        self.assertAlmostEqual(self.p.model.world_bounds(wall)[0][2], before)
+        with self.assertRaises(BadRequest):
+            self.run_("level.set", id=self.roof_level, height=3)
+
+    def test_level_description_is_editable_and_persistent(self):
+        note = "Roof datum\nCoordinates all upper envelope elements."
+        self.run_("level.set", id=self.roof_level, description=note)
+        fields = {row.get("key"): row for row in self.p.properties({"level": self.roof_level})["top"]}
+        self.assertEqual((fields["description"]["type"], fields["description"]["value"]),
+                         ("multiline", note))
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "levels.spadra"
+            self.p.save(target)
+            loaded = Project.open(target)
+            self.assertEqual(loaded.level(self.roof_level)["description"], note)
+
+    def test_multiline_description_is_identity_metadata_and_persists(self):
+        wall = self.wall()
+        text = "Loadbearing exterior wall\nDo not alter without structural review."
+        self.run_("model.set_property", id=wall, key="description", value=text)
+        desc = self.rows(wall)["description"]
+        self.assertEqual((desc["value"], desc["type"]), (text, "multiline"))
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "description.spadra"
+            self.p.save(target)
+            restored = Project.open(target)
+            props = restored.properties({"model": wall})
+            rows = {row.get("key"): row for g in props["groups"] for row in g["rows"]}
+            self.assertEqual(rows["description"]["value"], text)
+        self.p.undo()
+        self.assertEqual(self.rows(wall)["description"]["value"], "")
+
+    def test_section_angle_rotates_real_cut_line_and_flip_reverses_direction(self):
+        sid = self.run_("view.add_section", a=[0, 0], b=[4000, 0])["id"]
+        self.run_("view.set_section", id=sid, angle=90)
+        view = self.p.view(sid)
+        self.assertAlmostEqual(view["a"][0], 2.0, places=6)
+        self.assertAlmostEqual(view["b"][0], 2.0, places=6)
+        self.assertAlmostEqual(view["a"][1], -2.0, places=6)
+        self.assertAlmostEqual(view["b"][1], 2.0, places=6)
+        before = list(view["a"]), list(view["b"])
+        self.run_("view.flip_section", id=sid)
+        self.assertEqual((self.p.view(sid)["a"], self.p.view(sid)["b"]),
+                         (before[1], before[0]))
+        props = self.p.properties({"view": sid})
+        fields = {r.get("key"): r for g in props["groups"] for r in g["rows"]}
+        self.assertIn("angle", fields)
+
+    def test_opening_profile_real_mesh_sections_are_drawn_on_plan(self):
+        wall = self.wall()
+        window = self.run_("model.add_window", wall=wall, offset=2, width=1200,
+                           height=1200, sill=600)["id"]
+        frame = self.run_("model.add_opening_profile", opening=window, width=50)["id"]
+        plan = next(v["id"] for v in self.p.manifest["views"] if v.get("level_id") == self.l1)
+        shown = {item["id"]: item for item in self.p.plan_overlay(plan)}
+        self.assertIn(frame, shown)
+        self.assertEqual(shown[frame]["category"], "opening_profile")
+        self.assertGreaterEqual(len(shown[frame]["cut_polygons"]), 2)
+        self.run_("view.set_cut_plane", id=plan, key="cut_offset", value=2300)
+        self.assertNotIn(frame, [i["id"] for i in self.p.plan_overlay(plan)])
+
+    def test_wall_join_graph_is_exposed_to_plan_selection(self):
+        first = self.wall()
+        second = self.wall(a=(6000, 0), b=(6000, 4000))
+        detached = self.wall(a=(12000, 0), b=(14000, 0))
+        plan = next(v["id"] for v in self.p.manifest["views"] if v.get("level_id") == self.l1)
+        items = {i["id"]: i for i in self.p.plan_overlay(plan) if i["category"] == "wall"}
+        self.assertIn(second, items[first]["joins"])
+        self.assertIn(first, items[second]["joins"])
+        self.assertNotIn(detached, items[first]["joins"])
+
+    def test_invalid_view_range_change_is_atomic(self):
+        plan = next(v["id"] for v in self.p.manifest["views"] if v.get("level_id") == self.l1)
+        previous = self.p.view(plan).get("cut_offset", 1.5)
+        with self.assertRaises(BadRequest):
+            self.run_("view.set_cut_plane", id=plan, key="cut_offset", value=-500)
+        self.assertEqual(self.p.view(plan).get("cut_offset", 1.5), previous)

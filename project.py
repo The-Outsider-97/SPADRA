@@ -899,6 +899,8 @@ class Project:
         adds the links from a model element to what it is connected to (the panel asks for them; the assistant and the calculator do not)."""
         if "model" in ref:
             return E.properties(self, str(ref["model"]), relations)
+        if "level" in ref:
+            return _level_properties(self, str(ref["level"]))
         if "entity" in ref:
             return _entity_properties(self, str(ref.get("drawing")), str(ref["entity"]))
         if "sheet" in ref:
@@ -1118,6 +1120,9 @@ def _view_properties(project: Project, vid: str) -> dict[str, Any]:
             {"key": "looking", "label": "Looking", "type": "choice", "value": "current",
              "choices": [{"value": "current", "label": f"Toward {here}"}, {"value": "flip", "label": f"Toward {there}"}]},
             {"key": "depth", "label": "Depth beyond cut", "type": "number", "unit": "m", "value": float(view.get("depth", D.SECTION_DEPTH))},
+            {"key": "angle", "label": "Section angle", "type": "number", "unit": "°",
+             "value": round(math.degrees(math.atan2(view["b"][1] - view["a"][1],
+                                                     view["b"][0] - view["a"][0])), 6)},
             {"label": "Start", "type": "readonly", "value": f"X: {mm(view['a'][0])}  Y: {mm(view['a'][1])}"},
             {"label": "End", "type": "readonly", "value": f"X: {mm(view['b'][0])}  Y: {mm(view['b'][1])}"},
             {"label": "Length", "type": "readonly", "value": f"{fr.span:.3f} m"}]})
@@ -1136,6 +1141,24 @@ def _view_properties(project: Project, vid: str) -> dict[str, Any]:
             {"key": f"hatch:{material}", "label": material, "type": "choice", "value": (D.hatch_pattern(project, material) or {}).get("pattern", "none"), "choices": patterns}
             for material in D.DEFAULT_HATCH] + [{"label": "Note", "type": "readonly", "value": D.HATCH_NOTE}]})
     return {"ref": {"view": vid}, "title": view["name"], "category": kind, "kind": "view", "top": top, "groups": groups}
+
+
+def _level_properties(project: Project, level_id: str) -> dict[str, Any]:
+    """Expose existing level constraints as editable, derived Properties rows."""
+    level = project.level(level_id)
+    height = DT.height_to_next(project, level_id)
+    rows = [{"key": "elevation", "label": "Absolute elevation", "type": "number",
+             "unit": "m", "value": level["elevation"]}]
+    if height is not None:
+        rows.append({"key": "height", "label": "Height to next level", "type": "number",
+                     "unit": "m", "value": round(height, 6)})
+    else:
+        rows.append({"label": "Height to next level", "type": "readonly", "value": "Topmost level"})
+    return {"ref": {"level": level_id}, "kind": "level", "category": "level",
+            "title": level["name"], "top": [
+            {"key": "name", "label": "Name", "type": "text", "value": level["name"]},
+            {"key": "description", "label": "Description", "type": "multiline", "value": level.get("description", "")}],
+            "groups": [{"title": "Level constraints", "rows": rows}]}
 
 
 def _sheet_properties(project: Project, sid: str) -> dict[str, Any]:
@@ -2232,6 +2255,13 @@ class _Commands:
             if p.get(key) is not None:
                 x, y = _point(p[key], key)
                 view[key] = [x * to_m, y * to_m]
+        if p.get("angle") is not None:
+            angle = math.radians(number(p["angle"], "section angle (degrees)", -36000, 36000))
+            span = math.dist(view["a"], view["b"])
+            cx = (view["a"][0] + view["b"][0]) / 2
+            cy = (view["a"][1] + view["b"][1]) / 2
+            vx, vy = math.cos(angle) * span / 2, math.sin(angle) * span / 2
+            view["a"], view["b"] = [cx - vx, cy - vy], [cx + vx, cy + vy]
         if math.dist(view["a"], view["b"]) < 0.01:
             raise BadRequest("A section line needs two points at least 10 mm apart")
         return {"id": view["id"]}
@@ -2278,7 +2308,16 @@ class _Commands:
             if key == "range_bottom" and value < float(view.get("range_depth", -1.0)):
                 raise BadRequest("View range bottom cannot be below the view depth")
             view[key] = value
-        return {"id": view["id"], "reference": view.get("cut_reference_level") or view["level_id"], "offset": view.get("cut_offset", 1.5)}
+        # Reject an impossible range immediately, while command rollback still
+        # protects the project, rather than failing on the next viewport load.
+        ref = view.get("cut_reference_level") or view["level_id"]
+        cut_z = project.level(ref)["elevation"] + float(view.get("cut_offset", 1.5))
+        base_z = project.level(view["level_id"])["elevation"]
+        bottom_z = base_z + float(view.get("range_bottom", -0.2))
+        depth_z = base_z + float(view.get("range_depth", -1.0))
+        if not (depth_z <= bottom_z <= cut_z):
+            raise BadRequest("Plan view range must satisfy view depth ≤ bottom ≤ cut plane")
+        return {"id": view["id"], "reference": ref, "offset": view.get("cut_offset", 1.5)}
 
     @staticmethod
     @command(_model_target("View option"))

@@ -357,3 +357,68 @@ class Drainage(Case):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RequestedDrainageRegressions(Case):
+    """Downpipe length and roof-core references use actual SGEO geometry."""
+
+    def test_pipe_length_is_editable_without_detaching_gutter(self):
+        roof = self.roof()
+        gutter = self.gutters(roof, edges=[0], downpipe=False)["gutters"][0]
+        pipe = self.run_("model.add_downpipe", gutter=gutter, offset=5)["id"]
+        before_top = self.bounds(pipe)[1][2]
+        self.run_("model.set_property", id=pipe, key="length", value=2.5)
+        low, high = self.bounds(pipe)
+        self.assertAlmostEqual(high[2], before_top, places=6)
+        self.assertAlmostEqual(low[2], before_top - 2.5, places=6)
+        props = E.properties(self.p, pipe)
+        fields = {row.get("key"): row for g in props["groups"] for row in g["rows"]}
+        self.assertAlmostEqual(fields["length"]["value"], 2.5)
+        with self.assertRaises(BadRequest):
+            self.run_("model.set_property", id=pipe, key="length", value=0.05)
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "pipe-length.spadra"
+            self.p.save(target)
+            after = Project.open(target)
+            self.assertAlmostEqual(after.model.world_bounds(pipe)[0][2], before_top - 2.5, places=6)
+
+    def test_pipe_cut_and_depth_visibility_come_from_elevations(self):
+        roof = self.roof()
+        gutter = self.gutters(roof, edges=[0], downpipe=False)["gutters"][0]
+        pipe = self.run_("model.add_downpipe", gutter=gutter, offset=5)["id"]
+        view = next(v["id"] for v in self.p.manifest["views"] if v.get("level_id") == self.roof_level)
+        shown = {i["id"]: i for i in self.p.plan_overlay(view)}
+        self.assertIn(pipe, shown)
+        self.assertFalse(shown[pipe]["cut"])
+        self.run_("view.set_cut_plane", id=view, key="range_bottom", value=-50)
+        self.run_("view.set_cut_plane", id=view, key="range_depth", value=-60)
+        self.assertNotIn(pipe, [i["id"] for i in self.p.plan_overlay(view)])
+
+    def test_flat_roof_edge_profile_reference_centres_in_total_thickness(self):
+        roof = self.roof(kind="flat")
+        meta = E.meta_of(self.p, roof)
+        verts, faces = E._roof_edge_mesh(self.p, meta, 0, 0.06, 0.18, 0.0, 0.0)
+        self.assertGreater(len(faces), 0)
+        roof_top = E.level_elevation(self.p, self.roof_level) + float(E.m(meta, "thickness"))
+        zcentre = sum(v[2] for v in verts[:4]) / 4
+        self.assertAlmostEqual(zcentre, roof_top - float(E.m(meta, "thickness")) / 2, places=6)
+
+    def test_explicit_core_alignment_ignores_new_outer_finish(self):
+        from applications.SPADRA import layers as LY
+        roof = self.roof(kind="flat")
+        accessory = self.run_("model.add_roof_accessory", roof=roof, kind="roof_edge", edge=1)["id"]
+        initial = self.bounds(accessory)
+        original = LY.stack(self.p, roof)[0]
+        self.run_("model.set_property", id=roof, key=f"layer:{original['id']}:role", value="core")
+        self.run_("model.add_layer", id=roof, side="outside", thickness=20,
+                  material="Timber", role="non_core")
+        now = self.bounds(accessory)
+        self.assertAlmostEqual((now[0][2] + now[1][2]) / 2,
+                               (initial[0][2] + initial[1][2]) / 2, places=6)
+        roles = [row["role"] for row in LY.stack(self.p, roof)]
+        self.assertEqual(roles, ["non_core", "core"])
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "structural-core.spadra"
+            self.p.save(target)
+            restored = Project.open(target)
+            self.assertEqual([row["role"] for row in LY.stack(restored, roof)], roles)

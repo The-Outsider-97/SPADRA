@@ -19,6 +19,7 @@ export type Selection =
   | { kind: "model"; ids: string[] }
   | { kind: "drawing"; view: string; ids: string[] }
   | { kind: "sheet"; id: string }
+  | { kind: "level"; id: string }
   | null;
 
 export interface Tab { ref: OpenRef; title: string; format: "SGEO" | "SDRW" | "Schedule" }
@@ -324,7 +325,7 @@ export class Store {
   /** After an edit, undo or delete, forget selected things that no longer exist instead of asking the server about them. */
   private dropVanishedSelection(): void {
     const sel = this.selection;
-    if (!sel || sel.kind === "sheet") return;
+    if (!sel || sel.kind === "sheet" || sel.kind === "level") return;
     if (sel.kind === "model" && this.animation?.animation) return;       // an element the animation hides is not in the picture but is still there; loadProperties drops a really deleted one
     const listed = (): string[] => flatten(this.tree).map((n) => n.select?.model).filter((id): id is string => !!id);      // elements with no solid (grids, arrays) are not in the 3D scene, but the browser lists them
     const live = sel.kind === "drawing" ? this.drawing?.entities.map((e) => e.id) : this.scene ? [...this.scene.objects.map((o) => o.id), ...listed()] : undefined;
@@ -400,6 +401,7 @@ export class Store {
     } else if (sel.kind === "model" && sel.ids[0]) ref = { model: sel.ids[0] };
     else if (sel.kind === "drawing" && sel.ids[0]) ref = { drawing: sel.view, entity: sel.ids[0] };
     else if (sel.kind === "sheet") ref = { sheet: sel.id };
+    else if (sel.kind === "level") ref = { level: sel.id };
     if (!ref) return;
     // The selected thing may be gone (deleted, or undone away). That is not an error to show: there is just nothing selected now.
     try {
@@ -638,6 +640,7 @@ export class Store {
   /** The Project Browser row that stands for the current selection, so the browser can reveal it. */
   selectedNodeId(): string | null {
     const sel = this.selection;
+    if (sel?.kind === "level") return sel.id;
     if (sel?.kind !== "model" || !sel.ids[0]) return null;
     return flatten(this.tree).find((n) => n.select?.model === sel.ids[0])?.id ?? null;
   }

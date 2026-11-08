@@ -1263,6 +1263,17 @@ def _roof_edge_mesh(project: Any, roof: Mapping[str, Any], edge: int, width: flo
 
     facets = roof_facets(project, roof)
     thickness = float(m(roof, "thickness"))
+    # The roof assembly is ordered outer/top to inner/bottom. Locate
+    # the structural core from explicit consecutive layer roles, or fall
+    # back to the complete legacy assembly when no core has been assigned.
+    cursor, core_ranges = 0.0, []
+    for layer in m(roof, "layers") or []:
+        t = float(layer["thickness"])
+        if layer.get("role") == "core":
+            core_ranges.append((cursor, cursor + t))
+        cursor += t
+    core_depth = ((core_ranges[0][0] + core_ranges[-1][1]) / 2
+                  if core_ranges else thickness / 2)
     ridge = roof_ridge(roof)
     def facet_distance_sq(poly: list[tuple[float, float]], x: float, y: float) -> float:
         return min((lambda dx, dy: dx * dx + dy * dy)(x - (p[0] + t * vx), y - (p[1] + t * vy))
@@ -1321,10 +1332,16 @@ def _roof_edge_mesh(project: Any, roof: Mapping[str, Any], edge: int, width: flo
         incoming = cross(direction(prev, centre), prev_normal)
         outgoing = cross(direction(centre, nxt), next_normal)
         downward = mitre(incoming, outgoing)
-        # Upper rails follow the roof top exactly; lower rails converge beneath
-        # the ridge instead of leaving two colliding square-cut members.
+        # All four rails share the same core-centred section reference.
+        # The ridge station is continuous, avoiding capped and overlapping members.
         for side, lower in ((-0.5, False), (0.5, False), (0.5, True), (-0.5, True)):
-            v = [centre[j] + horizontal[j] * (lateral_offset + side * width) + (downward[j] * depth if lower else 0.0) for j in range(3)]
+            # Constrain the profile section midpoint to the roof core
+            # reference, or the legacy assembly midpoint if no core exists.
+            # Subtract half the downward section vector on both rails so
+            # pitched gable ends remain centred in XY as well as elevation.
+            v = [centre[j] + horizontal[j] * (lateral_offset + side * width)
+                 + downward[j] * ((depth if lower else 0.0) - depth / 2)
+                 - (core_depth if j == 2 else 0.0) for j in range(3)]
             verts.append(v)
     faces: list[list[int]] = [[0, 2, 1], [0, 3, 2]]
     for i in range(len(stations) - 1):
@@ -1583,6 +1600,9 @@ def set_property(project: Any, oid: str, key: str, value: Any) -> None:
             raise BadRequest("Corner join controls apply only to walls")
         _, other, endpoint = (key.split(":", 2) + [""])[:3]
         set_wall_corner_mode(project, oid, other, endpoint, value)
+        return
+    if key == "description":
+        _attach(project, oid, {"description": text(value, "description", 2000, empty=True, multiline=True)})
         return
     if key == "color":
         if not m(meta, "material"):
@@ -2096,10 +2116,18 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
         if cat == "downpipe":
             from . import gutters as GU
             try:
-                if GU.pipe_on_level(project, oid, level_id):
-                    out.append(GU.pipe_plan_item(project, oid, f))
+                pipe = GU.pipe_frame(project, oid)
+                cut = pipe["bottom"] - 1e-9 <= cut_z <= pipe["top"] + 1e-9
+                projected = (m(meta, "level") == level_id and
+                             pipe["top"] >= depth_z - 1e-9 and
+                             pipe["bottom"] <= top_z + 1e-9)
+                if cut or projected:
+                    item = GU.pipe_plan_item(project, oid, f)
+                    item["cut"] = cut
+                    item["overhead"] = not cut and pipe["bottom"] > cut_z
+                    out.append(item)
             except BadRequest:
-                pass                                                                     # a downpipe without its gutter is reported by the model check, not drawn
+                pass  # Missing gutter: model checking reports the broken association.
             continue
         if cat in ("grid", "array") or cat in OPENINGS:
             # Grids are level-independent, openings are emitted with their
@@ -2112,7 +2140,7 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
             if not 0.0 <= relative_cut < frame["height"]:
                 continue
             wall_cuts[oid] = relative_cut
-        elif cat not in ("room", "gutter"):
+        elif cat != "room":
             # Imported/legacy metadata groups can also be non-geometric.
             # They are not drawable, but must not make a sheet digest or the
             # entire Project Browser fail. Geometry validation is separate.
@@ -2147,7 +2175,8 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
             first = True
             for x0, x1 in cuts + [(fr["length"], fr["length"])]:
                 if x0 - cursor > 1e-9:
-                    piece = {"id": oid, "category": "wall", "name": obj["name"], "polygon": _wall_piece(fr, cursor, x0, f), "axis": axis}
+                    piece = {"id": oid, "category": "wall", "name": obj["name"], "polygon": _wall_piece(fr, cursor, x0, f), "axis": axis,
+                             "joins": list(m(meta, "joins") or ())}
                     if corner_joins:
                         piece["corner_joins"] = corner_joins
                     if show_hatching and not layered:
@@ -2163,6 +2192,13 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
                         first = False
                     out.append(piece)
                 cursor = max(cursor, x1)
+        elif cat == "opening_profile":
+            # Frame profiles are independently modelled SGEO solids. Draw
+            # their true horizontal intersection loops, not a symbolic proxy.
+            if cut_polygons:
+                out.append({"id": oid, "category": "opening_profile",
+                            "name": obj["name"], "polygon": cut_polygons[0],
+                            "cut_polygons": cut_polygons})
         elif cat == "floor":
             item = {"id": oid, "category": "floor", "name": obj["name"], "polygon": [[q[0] * f, q[1] * f] for q in (m(meta, "cut_outline") or m(meta, "boundary"))],
                     "outline": [[q[0] * f, q[1] * f] for q in m(meta, "boundary")]}

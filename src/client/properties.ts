@@ -26,6 +26,7 @@ export function renderProperties(store: Store): HTMLElement[] {
 export function iconFor(p: Properties): string {
   if (p.kind === "view") return p.category === "section" ? "section" : p.category === "elevation" ? "elevation" : p.category === "schedule" ? "table" : "plan";
   if (p.kind === "sheet") return "page";
+  if (p.kind === "level") return "grid";
   if (p.kind === "entity") return p.category === "tag" ? "tag" : p.category === "dimension" ? "dimension" : p.category === "text" ? "text" : p.category === "circle" ? "circle" : "line";
   const byCategory: Record<string, string> = { wall: "wall", door: "door", window: "window", floor: "floor", roof: "roof", gutter: "gutter", downpipe: "downpipe", foundation: "foundation", structural: "beam", beam: "beam", column: "column", room: "room", stair: "stair", grid: "grid", generic: "family" };
   return byCategory[p.category] ?? "cube";
@@ -121,6 +122,12 @@ function rowEl(store: Store, p: Properties, row: PropRow): HTMLElement {
     return h("div", { class: "prop-row" }, label, h("div", { class: "color-controls" },
       h("div", { class: "color-controls-main" }, picker, hex, reset),
       rgb));
+  }
+  if (row.type === "multiline") {
+    const input = h("textarea", { id, attrs: { rows: 3, maxlength: 2000, "aria-label": row.label } }) as HTMLTextAreaElement;
+    input.value = String(row.value ?? "");
+    input.addEventListener("change", () => { void commit(store, p, key, input.value, "multiline"); });
+    return h("div", { class: "prop-row" }, label, input);
   }
   if (row.type === "sfb") return sfbRow(store, p, row, id, label);
   if (row.type === "catalog") return catalogRow(store, p, row, id, label);
@@ -248,6 +255,7 @@ async function removeRow(store: Store, p: Properties, key: string): Promise<void
 export function editCommand(p: Pick<Properties, "kind" | "ref">, key: string, value: string | number): { op: string; params: Record<string, unknown> } | null {
   const ref = p.ref;
   if (p.kind === "model") return { op: "model.set_property", params: { id: ref["model"], key, value } };
+  if (p.kind === "level" && ["name", "description", "elevation", "height"].includes(key)) return { op: "level.set", params: { id: ref["level"], [key]: value } };
   if (p.kind === "sheet") {
     if (key.startsWith("vp:")) { const [, viewport, field] = key.split(":"); return { op: "sheet.set_viewport", params: { id: ref["sheet"], viewport, key: field, value } }; }
     if (key.startsWith("note:")) return { op: "sheet.set_note", params: { id: ref["sheet"], note: key.slice(5), key: "text", value } };
@@ -255,7 +263,7 @@ export function editCommand(p: Pick<Properties, "kind" | "ref">, key: string, va
   }
   if (p.kind === "view" && ["cut_reference", "cut_offset", "range_top", "range_bottom", "range_depth"].includes(key)) return { op: "view.set_cut_plane", params: { id: ref["view"], key, value } };
   if (p.kind === "view" && key === "name") return { op: "view.rename", params: { id: ref["view"], name: value } };
-  if (p.kind === "view" && key === "depth") return { op: "view.set_section", params: { id: ref["view"], depth: value } };
+  if (p.kind === "view" && (key === "depth" || key === "angle")) return { op: "view.set_section", params: { id: ref["view"], [key]: value } };
   if (p.kind === "view" && (key === "opening_direction" || key === "material_hatching")) return { op: "view.set_option", params: { id: ref["view"], key, value } };
   if (p.kind === "view" && key.startsWith("hatch:")) return { op: "hatch.set", params: { material: key.slice(6), pattern: value } };
   if (p.kind === "view" && key === "looking") return value === "flip" ? { op: "view.flip_section", params: { id: ref["view"] } } : null;

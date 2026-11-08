@@ -85,6 +85,8 @@ export interface PlanWall {
   bands?: Array<{ layer: string; name: string; material: string; polygons: Pt[][]; hatch?: HatchSpec | null }>;
   /** Rings cut out of the polygon (a floor or extrusion with voids through it, or the inside of a closed sweep) and a sweep's centre line. */
   holes?: Pt[][]; path?: Pt[]; closed?: boolean; /** a void whose cutting is off is drawn dotted and unhatched */ off?: boolean;
+  /** Server-derived wall joins, reused for topology-aware connected-wall selection. */
+  joins?: string[];
   /** A wall's centre line and thickness, in the drawing's unit: what its end grips hold and what the next wall snaps to. */
   axis?: { a: Pt; b: Pt; thickness: number };
   /** A floor's outline (its corner points, in the drawing's unit): what its corner and edge grips hold. */
@@ -161,7 +163,7 @@ export interface Choice { value: string; label: string }
 /** Where a ``link`` row leads: select an element (or a drawing entity), open a view or sheet, or open a dialog. */
 export interface LinkTarget { select?: { model?: string; drawing?: string; entity?: string }; open?: OpenRef; dialog?: string }
 export interface PropRow {
-  key?: string; label: string; type: "text" | "number" | "choice" | "readonly" | "link" | "sfb" | "catalog" | "color"; value: string | number; unit?: string; choices?: Choice[];
+  key?: string; label: string; type: "text" | "multiline" | "number" | "choice" | "readonly" | "link" | "sfb" | "catalog" | "color"; value: string | number; unit?: string; choices?: Choice[];
   /** A custom property or a note can be taken away. */
   removable?: boolean; target?: LinkTarget;
   /** An NL-SfB code: the table the picker searches, the name of the code that is set, and the codes usually given to this kind of element. */
@@ -181,7 +183,7 @@ export interface PropGroup {
   add?: "custom" | "note" | "layer" | "panel";
 }
 export interface Properties {
-  ref: Record<string, string>; title: string; category: string; kind: "model" | "entity" | "sheet" | "view";
+  ref: Record<string, string>; title: string; category: string; kind: "model" | "entity" | "sheet" | "view" | "level";
   top: PropRow[]; groups: PropGroup[];
 }
 

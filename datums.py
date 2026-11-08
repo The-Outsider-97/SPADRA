@@ -67,6 +67,15 @@ def add_level(project: Any, p: Mapping[str, Any], new_drawing: Any) -> dict[str,
     return {"id": level["id"], "plan": plan_view(project, level["id"])["id"] if plan_view(project, level["id"]) else None}
 
 
+def height_to_next(project: Any, level_id: str) -> float | None:
+    """Derived floor-to-floor height; the topmost level has no next storey."""
+    ordered = sorted(project.manifest["levels"], key=lambda row: row["elevation"])
+    for i, level in enumerate(ordered):
+        if level["id"] == level_id:
+            return float(ordered[i + 1]["elevation"]) - float(level["elevation"]) if i + 1 < len(ordered) else None
+    raise NotFound(f"Level {level_id} does not exist")
+
+
 def set_level(project: Any, p: Mapping[str, Any]) -> dict[str, Any]:
     """Rename a level and/or move it; everything standing on it is rebuilt, and the whole change is refused if some of it no longer fits."""
     level = project.level(text(p.get("id"), "id", 80))
@@ -77,12 +86,28 @@ def set_level(project: Any, p: Mapping[str, Any]) -> dict[str, Any]:
             view["name"] = new                                               # the plan keeps following its level's name
             project.drawings[view["id"]].rename(new)
         level["name"] = new
+    if "description" in p:
+        level["description"] = text(p["description"], "description", 2000, empty=True, multiline=True)
+    if "height" in p and "elevation" in p:
+        raise BadRequest("Edit either level elevation or height in one command, not both")
     if "elevation" in p:
         level["elevation"] = _elevation(p["elevation"])
         project.manifest["levels"].sort(key=lambda l: l["elevation"])
         E.regenerate_all(project)
-    if "name" not in p and "elevation" not in p:
-        raise BadRequest("Nothing to change: give a name or an elevation")
+    if "height" in p:
+        ordered = sorted(project.manifest["levels"], key=lambda l: l["elevation"])
+        pos = next(i for i, row in enumerate(ordered) if row["id"] == level["id"])
+        if pos == len(ordered) - 1:
+            raise BadRequest("The highest level has no floor-to-floor height")
+        previous = float(ordered[pos + 1]["elevation"]) - float(level["elevation"])
+        height = number(p["height"], "height", 0.1, 1000.0)
+        change = height - previous
+        for other in ordered[pos + 1:]:
+            other["elevation"] = _elevation(float(other["elevation"]) + change)
+        project.manifest["levels"].sort(key=lambda l: l["elevation"])
+        E.regenerate_all(project)
+    if not any(k in p for k in ("name", "description", "elevation", "height")):
+        raise BadRequest("Nothing to change: give a name, description, elevation or floor-to-floor height")
     return {"id": level["id"]}
 
 

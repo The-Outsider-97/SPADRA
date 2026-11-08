@@ -732,6 +732,8 @@ export class ModelView {
     const selection = this.store.selection;
     if (this.clean || this.store.tool !== "select" || selection?.kind !== "model" || selection.ids.length !== 1) return;
     const id = selection.ids[0] as string;
+    const pipe = this.drawables.find((d) => d.id === id && d.category === "downpipe");
+    if (pipe) { this.syncDownpipeGrip(pipe); return; }
     const item = this.drawables.find((d) => d.id === id && ["wall", "floor", "roof"].includes(d.category));
     if (!item) return;
     for (const { side, point } of item.layerPoints) {
@@ -770,6 +772,68 @@ export class ModelView {
         this.layerControls.appendChild(grip);
       }
     }
+  }
+
+  /** Direct downpipe-length edit: only the free bottom endpoint moves.
+   *  Projected world Z supplies the drag axis; the gutter-attached top never
+   *  changes. The guide is temporary and the backend validates the final mesh. */
+  private syncDownpipeGrip(item: Drawable): void {
+    if (!item.verts.length) return;
+    const z0 = Math.min(...item.verts.map(v => v[2]));
+    const z1 = Math.max(...item.verts.map(v => v[2]));
+    const x0 = Math.min(...item.verts.map(v => v[0])), x1 = Math.max(...item.verts.map(v => v[0]));
+    const y0 = Math.min(...item.verts.map(v => v[1])), y1 = Math.max(...item.verts.map(v => v[1]));
+    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+    const bottom = this.project([cx, cy, z0]), top = this.project([cx, cy, z1]);
+    const unit = this.project([cx, cy, z0 + 1]);
+    if (!bottom || !top || !unit || bottom[0] < 8 || bottom[1] < 8 ||
+        bottom[0] > this.width - 8 || bottom[1] > this.height - 8) return;
+    const vertical: [number, number] = [unit[0] - bottom[0], unit[1] - bottom[1]];
+    const norm2 = vertical[0] ** 2 + vertical[1] ** 2;
+    if (norm2 < 1e-6) return; // End-on view: use numerical Length in Properties instead.
+    const grip = h("button", { class: "ridge-grip", type: "button", text: "◆",
+      attrs: { "aria-label": "Adjust downpipe length", title: "Drag the free bottom endpoint; the gutter connection stays fixed" } });
+    grip.style.left = `${bottom[0]}px`; grip.style.top = `${bottom[1]}px`;
+    const guide = h("div", { attrs: { "aria-hidden": "true" } });
+    guide.style.cssText = "display:none;position:absolute;pointer-events:none;border-top:2px dashed #FFD400;transform-origin:left center";
+    this.layerControls.append(guide, grip);
+    let origin: [number, number] | null = null;
+    let length = z1 - z0;
+    const paintGuide = (point: [number, number]): void => {
+      const dx = point[0] - top[0], dy = point[1] - top[1];
+      guide.style.display = "";
+      guide.style.left = `${top[0]}px`; guide.style.top = `${top[1]}px`;
+      guide.style.width = `${Math.hypot(dx, dy)}px`;
+      guide.style.transform = `rotate(${Math.atan2(dy, dx)}rad)`;
+      grip.style.left = `${point[0]}px`; grip.style.top = `${point[1]}px`;
+    };
+    grip.addEventListener("pointerdown", e => {
+      if (e.button !== 0) return;
+      e.preventDefault(); e.stopPropagation(); grip.setPointerCapture(e.pointerId);
+      origin = [e.clientX, e.clientY];
+      length = z1 - z0;
+    });
+    grip.addEventListener("pointermove", e => {
+      if (!origin) return;
+      const dz = ((e.clientX - origin[0]) * vertical[0] + (e.clientY - origin[1]) * vertical[1]) / norm2;
+      const raw = Math.max(0.1, (z1 - z0) - dz);
+      length = e.shiftKey ? Math.round(raw * 10) / 10 : raw;
+      const actualDz = (z1 - z0) - length;
+      paintGuide([bottom[0] + actualDz * vertical[0], bottom[1] + actualDz * vertical[1]]);
+      grip.title = `Downpipe length ${(length * 1000).toFixed(0)} mm — release to apply (Shift: 100 mm steps)`;
+    });
+    grip.addEventListener("pointerup", e => {
+      if (!origin) return;
+      origin = null; grip.releasePointerCapture(e.pointerId);
+      guide.style.display = "none";
+      if (Math.abs(length - (z1 - z0)) > 1e-5)
+        void this.store.run("model.set_property", { id: item.id, key: "length", value: length });
+      else { grip.style.left = `${bottom[0]}px`; grip.style.top = `${bottom[1]}px`; }
+    });
+    grip.addEventListener("pointercancel", () => {
+      origin = null; guide.style.display = "none";
+      grip.style.left = `${bottom[0]}px`; grip.style.top = `${bottom[1]}px`;
+    });
   }
 
   private parseColor(value: string): [number, number, number, number] { return rgba(value); }
