@@ -121,9 +121,37 @@ def frame_of(view: Mapping[str, Any]) -> Frame:
 
 
 # -------------------------------------------------------------------------------------------------------------------- meshes
+def evaluated_meshes(project: Any) -> dict[str, dict[str, Any]]:
+    """Resolve native non-destructive SGEO modifiers once per model revision.
+
+    The authoritative SGEO records remain unmodified; the same derived meshes
+    drive 3D display, section/elevation projection and plan cut geometry.
+    The SLAI kernel owns evaluator ordering, caching and geometry diagnostics.
+    """
+    cache = getattr(project, "_cache", None)
+    key = ("modifier-meshes", project.model.revision)
+    if isinstance(cache, dict) and key in cache:
+        return cache[key]
+    result: dict[str, dict[str, Any]] = {}
+    if project.model.modifiers():
+        from src.utils.spatial_formats.sgeo.tessellation import tessellate
+        for row in project.model.evaluate_modifiers():
+            if row["status"] != "ok" or row["result"] is None:
+                continue
+            geometry = row["result"].get("geometry")
+            if geometry is not None:
+                result[row["item_id"]] = tessellate(geometry)
+    if isinstance(cache, dict):
+        cache[key] = result
+    return result
+
+
+# -------------------------------------------------------------------------------------------------------------------- meshes
 def world_mesh(project: Any, oid: str, matrices: Any = None) -> tuple[list[Pt3], list[tuple[int, int, int]]]:
     """The element's mesh in world space. ``matrices`` (SGEO ``world_transforms()``) avoids asking the scene for every element in turn."""
-    mesh = project.model.tessellate(oid)
+    mesh = evaluated_meshes(project).get(oid)
+    if mesh is None:
+        mesh = project.model.tessellate(oid)
     t = matrices[oid] if matrices is not None else project.model.world_transform(oid)
     verts = [(t[0] * x + t[1] * y + t[2] * z + t[3], t[4] * x + t[5] * y + t[6] * z + t[7], t[8] * x + t[9] * y + t[10] * z + t[11]) for x, y, z in mesh["vertices"]]
     return verts, [(int(f[0]), int(f[1]), int(f[2])) for f in mesh["faces"]]
