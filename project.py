@@ -1933,7 +1933,13 @@ class _Commands:
                 raise BadRequest("The chosen element has no geometric surface to copy")
             oid = project.model.add_mesh(vertices, faces,
                                          name=source.get("name", "Geometry") + " · editable copy")
-            E._attach(project, oid, {"category": "generic", "derived_from": previous_id})
+            # Retain display and schedule identity without copying hosting,
+            # opening, layer, attachment or family constraints.
+            copy_info = {"category": "generic", "derived_from": previous_id}
+            for key in ("level", "material", "color"):
+                if E.m(meta, key) is not None:
+                    copy_info[key] = E.m(meta, key)
+            E._attach(project, oid, copy_info)
             detached_from = previous_id
             source = project.model.get(oid)
             cat = "generic"
