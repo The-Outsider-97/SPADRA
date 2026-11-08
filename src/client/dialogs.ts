@@ -326,10 +326,13 @@ export function modifierDialog(store: Store, operation: "boolean" | "chamfer" | 
   if (policy) policy.value = defaultPolicy;
   const note = h("p", { class: "muted", text: is3d
     ? operation === "weld" || operation === "subdivision"
-      ? "This mesh operation permanently updates the selected geometry and is reversible through Undo. BIM hosts cannot be modified this way."
-      : "The native SGEO modifier remains editable and non-destructive. Only independent generic geometry is eligible."
+      ? "Mesh baking requires independent geometry. Family instances can instead use non-destructive modifiers, or a separate editable copy."
+      : "Generic parametric family instances keep their family link and formulas under native modifiers. BIM hosts require a separate editable copy to preserve native constraints."
     : "A native SDRW evaluation is committed as drawing geometry and can be undone." });
   box.append(note);
+  const independentCopy = is3d ? h("input", { type: "checkbox", attrs: {
+    "aria-label": "Create independent editable copy" } }) as HTMLInputElement : null;
+  if (independentCopy) box.append(labelled("Create independent editable copy (original BIM element and family remain unchanged)", independentCopy));
   type Mesh = { vertices: number[][]; faces: number[][] };
   type DrawingShape = { kind: string; geometry: Record<string, unknown> };
   type Preview = { revision: number; before: Mesh | DrawingShape; after: Mesh | DrawingShape;
@@ -411,6 +414,7 @@ export function modifierDialog(store: Store, operation: "boolean" | "chamfer" | 
     if (values.some(v => typeof v === "number" && !Number.isFinite(v))) return null;
     return { operation, id: source, ...(operand ? { operand } : {}), parameters,
       ...(policy ? { policy: policy.value } : {}),
+      ...(independentCopy?.checked ? { independent_copy: true } : {}),
       ...(drawingId ? { drawing: drawingId } : {}) };
   };
   const updatePreview = async (): Promise<boolean> => {
@@ -445,7 +449,7 @@ export function modifierDialog(store: Store, operation: "boolean" | "chamfer" | 
     actions: [{ label: "Apply modifier", kind: "primary", run: async () => {
       if (timeout) clearTimeout(timeout);
       const ok = await updatePreview();
-      if (!ok) { toast("Correct the geometry preview error before applying this modifier.", { kind: "error" }); return undefined; }
+      if (!ok) { toast("The modifier cannot be applied; read the geometry diagnostic below the preview.", { kind: "error" }); return undefined; }
       const params = payload();
       if (!params) return undefined;
       const done = await store.run(is3d ? "model.modifier" : "draw.modifier", params);
