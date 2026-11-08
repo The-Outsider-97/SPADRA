@@ -1913,11 +1913,30 @@ class _Commands:
         # Family instances have native, parameter-generated SGEO geometry.
         # They do not lose their family link when a modifier DAG is layered
         # over that geometry; only destructive baking would break that link.
-        if cat not in (None, "generic"):
+        if cat not in (None, "generic") and not p.get("independent_copy", False):
             raise BadRequest("This BIM host has construction or attachment semantics",
-                             hint="Use the BIM element's parametric Properties for host-aware geometry. Non-destructive modifiers are available on generic family instances.")
+                             hint="Edit its native parameters or enable 'Create independent editable copy' to apply modifiers without changing the BIM family or host.")
         if source.get("geometry") is None:
             raise BadRequest("Choose a geometric object or a family instance with generated geometry")
+        detached_from = None
+        independent_copy = p.get("independent_copy", False)
+        if type(independent_copy) is not bool:
+            raise BadRequest("Independent copy must be true or false")
+        if independent_copy:
+            # Explicit, reversible conversion in this same Project transaction.
+            # The original BIM object/family and its host relationships are NOT
+            # modified. A standalone mesh can receive every native operation.
+            from .documentation import world_mesh
+            previous_id = oid
+            vertices, faces = world_mesh(project, oid)
+            if not vertices or not faces:
+                raise BadRequest("The chosen element has no geometric surface to copy")
+            oid = project.model.add_mesh(vertices, faces,
+                                         name=source.get("name", "Geometry") + " · editable copy")
+            E._attach(project, oid, {"category": "generic", "derived_from": previous_id})
+            detached_from = previous_id
+            source = project.model.get(oid)
+            cat = "generic"
         family_instance = "family_id" in source
         if family_instance and operation in ("weld", "subdivision"):
             raise BadRequest("Weld and Subdivision would overwrite this family's generated geometry",
@@ -1946,7 +1965,8 @@ class _Commands:
                 diagnostics = {"backend": "conforming edge subdivision", "approximate": False,
                                "vertices": len(vertices), "faces": len(faces)}
             project.model.set_geometry(oid, result)
-            return {"id": oid, "operation": operation, "mode": "baked", "diagnostics": diagnostics}
+            return {"id": oid, "operation": operation, "mode": "baked", "diagnostics": diagnostics,
+                    "derived_from": detached_from}
         operands = [text(p.get("operand"), "operand", 80)] if operation == "boolean" else []
         if operands:
             operand = project.model.get(operands[0])
@@ -1954,8 +1974,17 @@ class _Commands:
                 raise BadRequest("Select a distinct geometric Boolean operand")
             other_meta = operand.get("metadata", {})
             if E.m(other_meta, "category") not in (None, "generic"):
-                raise BadRequest("A Boolean operand must be independent generic geometry or a generic family instance",
-                                 hint="Edit hosted BIM solids through their parametric construction commands.")
+                if not independent_copy:
+                    raise BadRequest("A Boolean operand must be independent generic geometry or a generic family instance",
+                                     hint="Enable 'Create independent editable copy' to also copy the BIM operand without changing its host.")
+                from .documentation import world_mesh
+                vs, fs = world_mesh(project, operands[0])
+                if not vs or not fs:
+                    raise BadRequest("The Boolean operand has no solid geometry to copy")
+                operand_copy = project.model.add_mesh(vs, fs,
+                                                    name=operand.get("name", "Boolean operand") + " · editable copy")
+                E._attach(project, operand_copy, {"category": "generic", "derived_from": operands[0]})
+                operands[0] = operand_copy
         policy = p.get("policy", "display_only" if operation == "bend" else "tolerance_controlled")
         evaluation_policy = {"mode": policy}
         if policy == "tolerance_controlled":
@@ -1967,7 +1996,7 @@ class _Commands:
         if result["status"] != "ok" or not result["result"] or result["result"].get("geometry") is None:
             raise BadRequest("The modifier produced empty geometry; no change was committed")
         return {"id": oid, "modifier_id": mid, "operation": operation, "mode": "non_destructive",
-                "diagnostics": result.get("diagnostics", {})}
+                "derived_from": detached_from, "diagnostics": result.get("diagnostics", {})}
 
     @staticmethod
     @command(_model_target("Edit SGEO modifier"))
