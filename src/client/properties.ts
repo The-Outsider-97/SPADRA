@@ -254,6 +254,11 @@ async function removeRow(store: Store, p: Properties, key: string): Promise<void
 /** Which command carries an edit of a row, and its parameters; null when the row is not editable here. Exported so a test can pin every mapping. */
 export function editCommand(p: Pick<Properties, "kind" | "ref">, key: string, value: string | number): { op: string; params: Record<string, unknown> } | null {
   const ref = p.ref;
+  if (p.kind === "model" && key.startsWith("modifier:")) {
+    const [, modifier, ...parts] = key.split(":");
+    if (!modifier || !parts.length) return null;
+    return { op: "model.set_modifier", params: { id: ref["model"], modifier, key: parts.join(":"), value } };
+  }
   if (p.kind === "model") return { op: "model.set_property", params: { id: ref["model"], key, value } };
   if (p.kind === "level" && ["name", "description", "elevation", "height"].includes(key)) return { op: "level.set", params: { id: ref["level"], [key]: value } };
   if (p.kind === "sheet") {
