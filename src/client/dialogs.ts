@@ -391,7 +391,7 @@ export function modifierDialog(store: Store, operation: "boolean" | "chamfer" | 
       return s("path", { attrs: { d: path, fill: "none", stroke: color, "stroke-width": "1.1", "stroke-dasharray": dash } });
     };
     const paths = [add(b, "#8796a5", "3,3"), add(a, "#2677c9", "")];
-    visual.replaceChildren(...paths.filter((node): node is SVGElement => node !== null));
+    visual.replaceChildren(...paths.filter((node): node is SVGPathElement => node !== null));
   };
 
   const payload = (): Record<string, unknown> | null => {
