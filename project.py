@@ -637,11 +637,12 @@ class Project:
         if time is not None and self.model.animation() is not None:
             return self._animated_scene(max_vertices, float(time))
         objects, total = [], 0
+        evaluated = D.evaluated_meshes(self)
         raw = self.model._model                                                # the native SGEO scene: one pass answers for every object
         matrices = raw.world_transforms()                                      # (asking per object re-validates the whole scene each time)
         for oid in all_ids(self.model, has_geometry=True):
             obj = self.model.get(oid)
-            mesh = self.model.tessellate(oid)
+            mesh = evaluated.get(oid) or self.model.tessellate(oid)
             t = matrices[oid]
             verts = [[t[0] * x + t[1] * y + t[2] * z + t[3], t[4] * x + t[5] * y + t[6] * z + t[7], t[8] * x + t[9] * y + t[10] * z + t[11]]
                      for x, y, z in mesh["vertices"]]
@@ -667,12 +668,13 @@ class Project:
                             "layer_colors": layer_colors,
                             "ridge_handle": ridge_handle,
                             "layer_points": self._layer_points(category, meta, verts, mesh["faces"])})
-        all_bounds = raw.bounds_by_object()
-        wb = [all_bounds[o["id"]] for o in objects]
+        # Derived geometry, not the source's unmodified bounding box,
+        # defines camera fit and zoom extent.
+        points = [vertex for item in objects for vertex in item["vertices"]]
         bounds = None
-        if wb:
-            lo = [min(b[0][i] for b in wb) for i in range(3)]
-            hi = [max(b[1][i] for b in wb) for i in range(3)]
+        if points:
+            lo = [min(v[i] for v in points) for i in range(3)]
+            hi = [max(v[i] for v in points) for i in range(3)]
             bounds = [lo, hi]
         return {"unit": "m", "revision": self.revision, "objects": objects, "bounds": bounds}
 
