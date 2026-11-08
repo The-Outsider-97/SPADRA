@@ -388,3 +388,7 @@ table.schedule tfoot td { font-weight: 700; border-top: 2px solid var(--ink); bo
   .report-print-root .report-page { display: block; box-shadow: none; margin: 0; break-after: page; page-break-after: always; }
   .report-print-root .report-page:last-child { break-after: auto; page-break-after: auto; }
 }
+
+/* Modifier groups share the existing ribbon; only the group labels are new. */
+.ribbon .group:has(.ribbon-group-title) { flex-wrap: wrap; align-content: flex-start; max-width: 340px; }
+.ribbon .ribbon-group-title { flex-basis: 100%; font-size: .68rem; letter-spacing: .015em; color: var(--muted); padding: 0 .35rem .2rem; white-space: nowrap; }
