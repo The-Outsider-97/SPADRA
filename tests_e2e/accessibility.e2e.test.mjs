@@ -206,7 +206,7 @@ describe("print", () => {
     assert.equal(pdf.subarray(0, 5).toString(), "%PDF-");
     // Chromium exposes physical page size in the PDF itself: never require
     // Poppler's pdfinfo/pdftotext binaries to be installed on Windows.
-    const boxes = [...pdf.toString("latin1").matchAll(/\\/MediaBox\\s*\\[\\s*0\\s+0\\s+([\\d.]+)\\s+([\\d.]+)\\s*\\]/g)];
+    const boxes = [...pdf.toString("latin1").matchAll(/\/MediaBox\s*\[\s*0\s+0\s+([\d.]+)\s+([\d.]+)\s*\]/g)];
     assert.ok(boxes.length, "PDF contains a physical MediaBox");
     const [widthPt, heightPt] = boxes.at(-1).slice(1).map(Number);
     const mm = (pts) => Number(pts) / 72 * 25.4;
