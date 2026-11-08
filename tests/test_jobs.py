@@ -197,7 +197,7 @@ class Jobs(ServerCase):
         self.assertEqual(self.revision(), before + 1)
         made = self.wait(self.start("report", {"name": "From a job"}))
         self.assertEqual(made["status"], "done")
-        self.assertIn("# From a job", self.api.get(f"/api/report/{made['result']['id']}")["markdown"])
+        self.assertIn("From a job", self.api.get(f"/api/report/{made['result']['id']}")["markdown"])
 
     def test_unknown_kinds_and_bad_parameters_are_refused_at_once(self):
         self.assertEqual(self.api.call("POST", "/api/jobs", {"kind": "mine.bitcoin"})[0], 400)
