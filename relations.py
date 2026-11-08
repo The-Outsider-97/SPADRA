@@ -205,7 +205,11 @@ def augment(project: Any, oid: str, out: dict[str, Any], relations: bool = False
     if identity is None:
         identity = {"title": "Identity", "rows": []}
         out["groups"].append(identity)
-    identity["rows"] += [{"label": "Category", "type": "readonly", "value": cat.title()}, {"label": "Element ID", "type": "readonly", "value": oid}]
+    identity["rows"] += [
+        {"key": "description", "label": "Description", "type": "multiline",
+         "value": str(E.m(meta, "description", ""))},
+        {"label": "Category", "type": "readonly", "value": cat.title()},
+        {"label": "Element ID", "type": "readonly", "value": oid}]
     from . import arrays as AY
     item = AY.item_rows(project, oid)
     if item:
