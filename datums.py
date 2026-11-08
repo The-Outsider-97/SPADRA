@@ -86,6 +86,8 @@ def set_level(project: Any, p: Mapping[str, Any]) -> dict[str, Any]:
             view["name"] = new                                               # the plan keeps following its level's name
             project.drawings[view["id"]].rename(new)
         level["name"] = new
+    if "description" in p:
+        level["description"] = text(p["description"], "description", 2000, empty=True, multiline=True)
     if "height" in p and "elevation" in p:
         raise BadRequest("Edit either level elevation or height in one command, not both")
     if "elevation" in p:
@@ -104,8 +106,8 @@ def set_level(project: Any, p: Mapping[str, Any]) -> dict[str, Any]:
             other["elevation"] = _elevation(float(other["elevation"]) + change)
         project.manifest["levels"].sort(key=lambda l: l["elevation"])
         E.regenerate_all(project)
-    if "name" not in p and "elevation" not in p and "height" not in p:
-        raise BadRequest("Nothing to change: give a name, elevation or floor-to-floor height")
+    if not any(k in p for k in ("name", "description", "elevation", "height")):
+        raise BadRequest("Nothing to change: give a name, description, elevation or floor-to-floor height")
     return {"id": level["id"]}
 
 
