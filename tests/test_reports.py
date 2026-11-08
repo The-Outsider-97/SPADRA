@@ -33,7 +33,7 @@ class Reports(Case):
         rid = self.make(name="Status")
         data, entry = RP.read(self.p, rid)
         info = S.inspect_package(data)
-        self.assertEqual((info["container"], info["version"], info["supported"]), ("package", "1.0.0", True))
+        self.assertEqual((info["container"], info["version"], info["supported"]), ("package", "1.1.0", True))
         package = S.loads_package(data)
         self.assertEqual(package.document["title"], "Status")
         self.assertEqual(package.document["metadata"]["model_revision"], str(self.p.revision - 1))           # the revision it was made from, before the command itself
