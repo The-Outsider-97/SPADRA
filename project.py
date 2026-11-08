@@ -1973,7 +1973,9 @@ class _Commands:
         if len(parts) == 2:
             if not isinstance(params[field], list):
                 raise BadRequest("Only a geometric vector supports indexed components")
-            idx = integer(parts[1], "vector component", 0, len(params[field]) - 1)
+            if not parts[1].isdigit():
+                raise BadRequest("Modifier vector component must be a nonnegative index")
+            idx = integer(int(parts[1]), "vector component", 0, len(params[field]) - 1)
             params[field] = [*params[field]]
             params[field][idx] = number(value, key, -1e9, 1e9)
         elif len(parts) == 1:
