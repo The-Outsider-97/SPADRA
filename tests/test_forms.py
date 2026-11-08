@@ -543,6 +543,55 @@ class NativeModifierCommands(unittest.TestCase):
         self.p.undo()
         self.assertEqual(self.p.model.get(source)["geometry"], original)
 
+    def test_weld_merges_shared_triangle_positions_without_erasing_faces(self):
+        oid = self.generic_box()
+        existing = self.p.model.tessellate(oid)
+        unindexed, faces = [], []
+        for triangle in existing["faces"]:
+            at = len(unindexed)
+            unindexed.extend([existing["vertices"][vertex] for vertex in triangle])
+            faces.append([at, at + 1, at + 2])
+        self.p.model.set_geometry(oid, {"kind": "mesh", "vertices": unindexed, "faces": faces})
+        self.execute("model.modifier", id=oid, operation="weld", parameters={"decimals": None})
+        result = self.p.model.get(oid)["geometry"]
+        self.assertLess(len(result["vertices"]), len(unindexed))
+        self.assertEqual(len(result["faces"]), len(faces))
+        self.assertFalse(self.p.model.modifiers())
+        self.p.undo()
+        self.assertEqual(len(self.p.model.get(oid)["geometry"]["vertices"]), len(unindexed))
+
+    def test_native_sdrw_bend_changes_derived_curve_with_undo(self):
+        import math
+        view = next(v["id"] for v in self.p.manifest["views"] if v["kind"] == "plan")
+        oid = self.p.drawing(view).add_line([0, 0], [3000, 0])
+        outcome = self.execute("draw.modifier", drawing=view, id=oid,
+                               operation="bend", policy="display_only",
+                               parameters={"axis": "x", "start": 0, "end": 2000,
+                                           "angle": math.pi / 4, "segments": 16})
+        result = self.p.drawing(view).get(outcome["id"])
+        self.assertEqual(result["kind"], "polyline")
+        self.assertGreater(len(result["geometry"]["points"]), 2)
+        self.p.undo()
+        self.assertEqual(self.p.drawing(view).get(oid)["kind"], "line")
+
+    def test_native_2d_region_boolean_replaces_source_and_preserves_operand(self):
+        try:
+            import shapely  # noqa: F401
+        except ImportError:
+            self.skipTest("Native planar Boolean requires shapely")
+        view = next(v["id"] for v in self.p.manifest["views"] if v["kind"] == "plan")
+        doc = self.p.drawing(view)
+        first = doc.add_polyline([[0, 0], [2000, 0], [2000, 2000], [0, 2000]], closed=True)
+        second = doc.add_polyline([[1000, 0], [3000, 0], [3000, 2000], [1000, 2000]], closed=True)
+        result = self.execute("draw.modifier", drawing=view, id=first, operand=second,
+                              operation="boolean", policy="tolerance_controlled",
+                              parameters={"operation": "union"})
+        self.assertEqual(self.p.drawing(view).get(result["id"])["kind"], "hatch")
+        self.assertNotIn(first, self.p.drawing(view).query_ids(limit=100))
+        self.assertIn(second, self.p.drawing(view).query_ids(limit=100))
+        self.p.undo()
+        self.assertIn(first, self.p.drawing(view).query_ids(limit=100))
+
     def test_sdrw_chamfer_uses_native_kernel_and_is_undoable(self):
         try:
             import shapely  # noqa: F401
