@@ -97,6 +97,23 @@ class RoofAccessoryConnections(ElementCase):
             incoming = {tuple(round(c, 6) for c in v) for v in meshes[(index + 1) % 4]["vertices"][:4]}
             self.assertEqual(outgoing, incoming)                          # same four world-space seam points, no overlap or corner gap
 
+    def test_roof_end_profile_remains_vertical_on_both_pitched_segments(self):
+        """The gable end trim follows the roof shape; section depth is vertical like roof thickness."""
+        roof = self.roof()
+        ids = self.run_("model.add_roof_accessory", roof=roof, kind="roof_edge", edge="all")["ids"]
+        scene = {o["id"]: o for o in self.p.scene_data()["objects"]}
+        # Short gable-end edges cross the ridge (three profile stations).
+        for oid in (ids[1], ids[3]):
+            vertices = scene[oid]["vertices"]
+            self.assertEqual(len(vertices), 12)
+            self.assertNotAlmostEqual(vertices[0][2], vertices[4][2], places=4)
+            self.assertNotAlmostEqual(vertices[4][2], vertices[8][2], places=4)
+            for k in range(0, len(vertices), 4):
+                for top, below in ((0, 3), (1, 2)):
+                    self.assertAlmostEqual(vertices[k + top][0], vertices[k + below][0], places=8)
+                    self.assertAlmostEqual(vertices[k + top][1], vertices[k + below][1], places=8)
+                    self.assertAlmostEqual(abs(vertices[k + top][2] - vertices[k + below][2]), 0.18, places=7)
+
     def test_flat_shed_and_hip_roof_edges_share_their_corner_mitre_without_overlapping_end_caps(self):
         from collections import Counter
 
