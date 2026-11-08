@@ -2175,6 +2175,13 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
                         first = False
                     out.append(piece)
                 cursor = max(cursor, x1)
+        elif cat == "opening_profile":
+            # Frame profiles are independently modelled SGEO solids. Draw
+            # their true horizontal intersection loops, not a symbolic proxy.
+            if cut_polygons:
+                out.append({"id": oid, "category": "opening_profile",
+                            "name": obj["name"], "polygon": cut_polygons[0],
+                            "cut_polygons": cut_polygons})
         elif cat == "floor":
             item = {"id": oid, "category": "floor", "name": obj["name"], "polygon": [[q[0] * f, q[1] * f] for q in (m(meta, "cut_outline") or m(meta, "boundary"))],
                     "outline": [[q[0] * f, q[1] * f] for q in m(meta, "boundary")]}
