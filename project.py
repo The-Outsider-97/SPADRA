@@ -1155,8 +1155,9 @@ def _level_properties(project: Project, level_id: str) -> dict[str, Any]:
     else:
         rows.append({"label": "Height to next level", "type": "readonly", "value": "Topmost level"})
     return {"ref": {"level": level_id}, "kind": "level", "category": "level",
-            "title": level["name"], "top": [{"key": "name", "label": "Name",
-            "type": "text", "value": level["name"]}],
+            "title": level["name"], "top": [
+            {"key": "name", "label": "Name", "type": "text", "value": level["name"]},
+            {"key": "description", "label": "Description", "type": "multiline", "value": level.get("description", "")}],
             "groups": [{"title": "Level constraints", "rows": rows}]}
 
 
