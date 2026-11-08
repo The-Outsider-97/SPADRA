@@ -150,5 +150,44 @@ describe("walls at an angle in a browser", () => {
     assert.equal(JSON.stringify((await drawing()).model.filter((m) => m.category === "wall").map((m) => m.polygon)), before, "undo restores the first corner exactly");
   });
 
+  it("Shift + double-click selects both connected walls through their join graph", async () => {
+    const canvas = page.locator(".view-canvas").first();
+    await tool("Select"); await settle();
+    const d = await drawing();
+    const first = d.model.find((v) => v.category === "wall");
+    assert.ok(first?.axis, "wall centre-line is available");
+    const world = first.axis.a.map((v, i) => (v + first.axis.b[i]) / 2);
+    const pos = await canvas.evaluate((el, point) => el.spadraView.screenOf(point), world);
+    const box = await canvas.boundingBox();
+    await page.keyboard.down("Shift");
+    await page.mouse.dblclick(box.x + pos[0], box.y + pos[1], { delay: 45 });
+    await page.keyboard.up("Shift"); await settle();
+    const selected = await canvas.evaluate((el) => el.spadraView.store.selection);
+    assert.equal(selected.kind, "model");
+    assert.deepEqual(new Set(selected.ids), new Set(d.model.filter((v) => v.category === "wall").map((v) => v.id)));
+  });
+
+  it("requires Enter to commit a dimension; double-click alone cannot finalize", async () => {
+    const canvas = page.locator(".view-canvas").first();
+    await tool("Dimension"); await settle();
+    const box = await canvas.boundingBox();
+    const point = async (p) => {
+      const s = await canvas.evaluate((el, v) => el.spadraView.screenOf(v), p);
+      return [box.x + s[0], box.y + s[1]];
+    };
+    const start = await point([800, 400]);
+    const end = await point([2600, 400]);
+    const offset = await point([2000, 1100]);
+    await page.mouse.click(...start); await settle();
+    await page.mouse.click(...end); await settle();
+    await page.mouse.dblclick(...offset, { delay: 50 }); await settle();
+    assert.equal((await drawing()).entities.filter((e) => e.kind === "dimension").length, 0);
+    await page.mouse.move(...offset);
+    await canvas.focus();
+    await page.keyboard.press("Enter"); await settle();
+    assert.equal((await drawing()).entities.filter((e) => e.kind === "dimension").length, 1);
+    await page.keyboard.press("Escape");
+  });
+
   it("raised no errors in the browser", () => { assert.deepEqual(problems, []); });
 });
