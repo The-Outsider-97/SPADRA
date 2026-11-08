@@ -21,7 +21,7 @@ const DRAG_PX = 4;
 const TOOL_KINDS: Record<string, readonly string[]> = {
   offset: ["line", "polyline", "circle"], trim: ["line", "polyline"], extend: ["line", "polyline"], fillet: ["line"],
 };
-const PAINT_ORDER = ["foundation", "floor", "roof", "room", "extrusion", "sweep", "generic", "stair", "wall", "structural", "window", "door", "column", "gutter", "downpipe", "void", "grid"];
+const PAINT_ORDER = ["foundation", "floor", "roof", "room", "extrusion", "sweep", "generic", "stair", "wall", "structural", "window", "door", "opening_profile", "column", "gutter", "downpipe", "void", "grid"];
 const CURVE_TOOLS = new Set<string>(["offset", "trim", "extend", "fillet", "hatch"]);
 
 /** An edit being dragged with a handle: a wall end, a turn of the selection about its centre, or a section's cut line (an end, or all of it). */
@@ -1493,6 +1493,17 @@ export class DrawingView {
         ctx.beginPath(); poly.forEach((p, i) => { const [x, y] = this.toScreen(p); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); }); ctx.closePath();
         ctx.fillStyle = withAlpha(color, selected ? 0.35 : 0.2); ctx.fill(); ctx.strokeStyle = color; ctx.stroke();
         if (w.hatch) this.paintCutHatch([poly], w.hatch, color);
+      }
+      return;
+    }
+    if (w.category === "opening_profile") {
+      // Each frame ring comes from a real horizontal SGEO intersection.
+      for (const ring of w.cut_polygons ?? []) {
+        ctx.beginPath();
+        ring.forEach((p, i) => { const [x, y] = this.toScreen(p); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
+        ctx.closePath(); ctx.setLineDash([]);
+        ctx.fillStyle = withAlpha(color, selected ? 0.5 : 0.3);
+        ctx.fill("evenodd"); ctx.stroke();
       }
       return;
     }
