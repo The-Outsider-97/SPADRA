@@ -1324,7 +1324,15 @@ def _roof_edge_mesh(project: Any, roof: Mapping[str, Any], edge: int, width: flo
         # Upper rails follow the roof top exactly; lower rails converge beneath
         # the ridge instead of leaving two colliding square-cut members.
         for side, lower in ((-0.5, False), (0.5, False), (0.5, True), (-0.5, True)):
-            v = [centre[j] + horizontal[j] * (lateral_offset + side * width) + (downward[j] * depth if lower else 0.0) for j in range(3)]
+            # The profile reference is the midpoint of its section, anchored
+            # to the roof core's mid-thickness plane at this boundary station.
+            # Current roof layers do not identify a separate structural core:
+            # use the entire roof thickness until a core designation exists.
+            # Subtract half the downward section vector on both rails so
+            # pitched gable ends remain centred in XY as well as elevation.
+            v = [centre[j] + horizontal[j] * (lateral_offset + side * width)
+                 + downward[j] * ((depth if lower else 0.0) - depth / 2)
+                 - (thickness / 2 if j == 2 else 0.0) for j in range(3)]
             verts.append(v)
     faces: list[list[int]] = [[0, 2, 1], [0, 3, 2]]
     for i in range(len(stations) - 1):
@@ -1583,6 +1591,9 @@ def set_property(project: Any, oid: str, key: str, value: Any) -> None:
             raise BadRequest("Corner join controls apply only to walls")
         _, other, endpoint = (key.split(":", 2) + [""])[:3]
         set_wall_corner_mode(project, oid, other, endpoint, value)
+        return
+    if key == "description":
+        _attach(project, oid, {"description": text(value, "description", 2000, empty=True, multiline=True)})
         return
     if key == "color":
         if not m(meta, "material"):
@@ -2147,7 +2158,8 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
             first = True
             for x0, x1 in cuts + [(fr["length"], fr["length"])]:
                 if x0 - cursor > 1e-9:
-                    piece = {"id": oid, "category": "wall", "name": obj["name"], "polygon": _wall_piece(fr, cursor, x0, f), "axis": axis}
+                    piece = {"id": oid, "category": "wall", "name": obj["name"], "polygon": _wall_piece(fr, cursor, x0, f), "axis": axis,
+                             "joins": list(m(meta, "joins") or ())}
                     if corner_joins:
                         piece["corner_joins"] = corner_joins
                     if show_hatching and not layered:
