@@ -2307,7 +2307,16 @@ class _Commands:
             if key == "range_bottom" and value < float(view.get("range_depth", -1.0)):
                 raise BadRequest("View range bottom cannot be below the view depth")
             view[key] = value
-        return {"id": view["id"], "reference": view.get("cut_reference_level") or view["level_id"], "offset": view.get("cut_offset", 1.5)}
+        # Reject an impossible range immediately, while command rollback still
+        # protects the project, rather than failing on the next viewport load.
+        ref = view.get("cut_reference_level") or view["level_id"]
+        cut_z = project.level(ref)["elevation"] + float(view.get("cut_offset", 1.5))
+        base_z = project.level(view["level_id"])["elevation"]
+        bottom_z = base_z + float(view.get("range_bottom", -0.2))
+        depth_z = base_z + float(view.get("range_depth", -1.0))
+        if not (depth_z <= bottom_z <= cut_z):
+            raise BadRequest("Plan view range must satisfy view depth ≤ bottom ≤ cut plane")
+        return {"id": view["id"], "reference": ref, "offset": view.get("cut_offset", 1.5)}
 
     @staticmethod
     @command(_model_target("View option"))
