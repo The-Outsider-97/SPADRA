@@ -221,7 +221,8 @@ class ModifierPreview(ServerCase):
         self.assertEqual(len(self.app.require().model.modifiers()), 0)
         created = api.cmd("model.modifier", {k: v for k, v in payload.items()
                                             if k != "kind"})["result"]
-        self.assertEqual(created["id"], preview["result"]["id"] if False else created["id"])
+        self.assertNotEqual(created["id"], wall)
+        self.assertTrue(preview["result"]["id"], "the scratch result identifies its prospective geometry")
         self.assertEqual(created["derived_from"], wall)
         self.assertEqual(self.app.require().revision, revision + 1)
         self.assertEqual(self.app.require().model.get(wall), original)
