@@ -15,6 +15,7 @@ export const SHORTCUTS: Shortcut[] = [
   { keys: "Esc", does: "Cancel what is being drawn, or go back to the Select tool", where: "2D and 3D views" },
   { keys: "Enter", does: "Confirm a dimension after two points, or finish a polyline, floor or roof outline", where: "2D and 3D views" },
   { keys: "Shift+double-click", does: "Select all topologically connected walls in the current plan", where: "2D plan" },
+  { keys: "Shift+F", does: "Flip the selected section cut direction", where: "2D plan" },
   { keys: "C", does: "Close a polyline (three points or more)", where: "2D view" },
   { keys: "Delete or Backspace", does: "Delete the selected items; Backspace removes the previous dimension point while measuring", where: "2D and 3D views" },
   { keys: "V  L  P  R  O", does: "Select, Line, Polyline, Rectangle, Circle", where: "Outside a text box" },
