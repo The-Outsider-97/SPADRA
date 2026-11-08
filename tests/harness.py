@@ -73,6 +73,10 @@ class ServerCase(unittest.TestCase):
                             data_dir=Path(self.tmp.name) / "data", config_path=Path(self.tmp.name) / "none.yaml")
         self.server, self.app = build_server(settings, TOKEN, root=None, client_dir=client)
         threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+        # unittest runs cleanups in reverse registration order: stop requests,
+        # close the listener, then release the SQLite outbox before Windows
+        # attempts to remove the temporary data directory.
+        self.addCleanup(self.app.commits.close)
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
         self.api = Api(self.server.port)
