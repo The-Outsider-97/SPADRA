@@ -1332,8 +1332,8 @@ def _roof_edge_mesh(project: Any, roof: Mapping[str, Any], edge: int, width: flo
         incoming = cross(direction(prev, centre), prev_normal)
         outgoing = cross(direction(centre, nxt), next_normal)
         downward = mitre(incoming, outgoing)
-        # Upper rails follow the roof top exactly; lower rails converge beneath
-        # the ridge instead of leaving two colliding square-cut members.
+        # All four rails share the same core-centred section reference.
+        # The ridge station is continuous, avoiding capped and overlapping members.
         for side, lower in ((-0.5, False), (0.5, False), (0.5, True), (-0.5, True)):
             # Constrain the profile section midpoint to the roof core
             # reference, or the legacy assembly midpoint if no core exists.
