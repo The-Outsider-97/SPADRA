@@ -327,7 +327,12 @@ describe("sections, elevations and schedules in a browser", () => {
       const roof = data.projection.items.find((item) => item.category === "roof" && (item.cut.length || item.tris.length));
       assert.ok(roof, `${label} has real projected roof geometry`);
       const point = roof.cut[0]?.length ? middle(roof.cut[0]) : middle([[roof.tris[0][0], roof.tris[0][1]], [roof.tris[0][2], roof.tris[0][3]], [roof.tris[0][4], roof.tris[0][5]]]);
-      await clickWorld(point);
+      // Roof and fascia may occupy the same projected surface. Clicking the
+      // same point cycles the overlap stack; do not assume the first hit wins.
+      for (let attempt = 0; attempt < 8; attempt++) {
+        await clickWorld(point);
+        if (await page.getByRole("button", { name: "Add outside roof layer" }).count()) break;
+      }
       await page.getByRole("button", { name: "Add outside roof layer" }).waitFor();
       await page.getByRole("button", { name: "Add inside roof layer" }).waitFor();
     }
