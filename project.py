@@ -1970,21 +1970,12 @@ class _Commands:
         operands = [text(p.get("operand"), "operand", 80)] if operation == "boolean" else []
         if operands:
             operand = project.model.get(operands[0])
-            if operands[0] == oid or operand.get("geometry") is None:
+            if operands[0] == (detached_from or oid) or operand.get("geometry") is None:
                 raise BadRequest("Select a distinct geometric Boolean operand")
-            other_meta = operand.get("metadata", {})
-            if E.m(other_meta, "category") not in (None, "generic"):
-                if not independent_copy:
-                    raise BadRequest("A Boolean operand must be independent generic geometry or a generic family instance",
-                                     hint="Enable 'Create independent editable copy' to also copy the BIM operand without changing its host.")
-                from .documentation import world_mesh
-                vs, fs = world_mesh(project, operands[0])
-                if not vs or not fs:
-                    raise BadRequest("The Boolean operand has no solid geometry to copy")
-                operand_copy = project.model.add_mesh(vs, fs,
-                                                    name=operand.get("name", "Boolean operand") + " · editable copy")
-                E._attach(project, operand_copy, {"category": "generic", "derived_from": operands[0]})
-                operands[0] = operand_copy
+            # The operand is read-only in the SGEO modifier DAG. It may be a
+            # hosted BIM element or family instance without duplication,
+            # conversion, or loss of native parametric relationships. Only the
+            # target is edited (or explicitly cloned) by this operation.
         policy = p.get("policy", "display_only" if operation == "bend" else "tolerance_controlled")
         evaluation_policy = {"mode": policy}
         if policy == "tolerance_controlled":
