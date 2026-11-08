@@ -1535,7 +1535,11 @@ export class DrawingView {
     if (w.category === "generic") { trace(); ctx.setLineDash([]); ctx.fillStyle = withAlpha(color, selected ? 0.4 : 0.22); ctx.fill(); ctx.stroke(); return; }
     if (w.category === "gutter") { trace(); ctx.setLineDash([]); ctx.fillStyle = withAlpha(color, selected ? 0.45 : 0.25); ctx.fill(); ctx.stroke(); return; }
     if (w.category === "downpipe") {                                                                      // a ring with a dot: a pipe seen end-on, filled where it is cut
-      trace(); ctx.setLineDash([]); ctx.fillStyle = withAlpha(k.paper, 1); ctx.fill(); ctx.stroke();
+      trace(); ctx.setLineDash(w.cut === false ? (w.overhead ? [6, 3] : [2, 4]) : []);
+      ctx.fillStyle = withAlpha(k.paper, 1);
+      if (w.cut !== false) ctx.fill();
+      ctx.stroke(); ctx.setLineDash([]);
+      if (w.cut === false) return;
       const xs = w.polygon.map((p) => this.toScreen(p)[0]), ys = w.polygon.map((p) => this.toScreen(p)[1]);
       const cx = (Math.min(...xs) + Math.max(...xs)) / 2, cy = (Math.min(...ys) + Math.max(...ys)) / 2;
       ctx.beginPath(); ctx.arc(cx, cy, Math.max(1.5, (Math.max(...xs) - Math.min(...xs)) / 6), 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
