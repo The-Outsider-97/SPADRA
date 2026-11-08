@@ -636,6 +636,18 @@ class RequestedBimRegressions(Case):
         with self.assertRaises(BadRequest):
             self.run_("level.set", id=self.roof_level, height=3)
 
+    def test_level_description_is_editable_and_persistent(self):
+        note = "Roof datum\nCoordinates all upper envelope elements."
+        self.run_("level.set", id=self.roof_level, description=note)
+        fields = {row.get("key"): row for row in self.p.properties({"level": self.roof_level})["top"]}
+        self.assertEqual((fields["description"]["type"], fields["description"]["value"]),
+                         ("multiline", note))
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "levels.spadra"
+            self.p.save(target)
+            loaded = Project.open(target)
+            self.assertEqual(loaded.level(self.roof_level)["description"], note)
+
     def test_multiline_description_is_identity_metadata_and_persists(self):
         wall = self.wall()
         text = "Loadbearing exterior wall\nDo not alter without structural review."
