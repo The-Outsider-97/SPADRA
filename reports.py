@@ -194,6 +194,9 @@ def build(project: Any, name: str, sections: list[str], *, author: str = "",
                                 metadata=metadata, publication={"authors": [author] if author else [],
                                 "published": created, "cover_asset": asset.id},
                                 sections=native_sections, assets=[asset])
+        # Managed native ToC and cover roles are SLDC 1.1 features. The
+        # 1.0 package writer correctly refuses them unless upgraded explicitly.
+        package.version = "1.1.0"
         data = S.dumps_package(package)
     except (S.SLDCError, OSError) as exc:
         raise BadRequest(f"The report could not be written: {exc}") from exc
