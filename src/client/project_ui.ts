@@ -5,6 +5,7 @@ import { glyph } from "../../../tools/web/src/icons.js";
 import { confirmDialog, openDialog, saveBlob, toast } from "../../../tools/web/src/ui.js";
 import type { Store } from "./store.js";
 import type { FamiliesResponse, FamilyInfo, ReportView } from "./types.js";
+import { paginatedReport } from "./report_layout.js";
 
 /** Keep a dialog's body in step with the project while it is open: re-draw on every change, stop when it closes. */
 function live(store: Store, handle: { result: Promise<unknown> }, redraw: () => void): void {
@@ -144,16 +145,24 @@ const REPORT_SECTIONS: Array<[string, string]> = [["summary", "Project and model
 /** Make a project report (an SLDC document) from chosen sections, as a background operation, then read it. */
 export function newReportDialog(store: Store): void {
   const name = h("input", { type: "text", value: `${store.project?.name ?? "Project"} report`, attrs: { maxlength: 80, autocomplete: "off", "aria-label": "Report name" } });
+  const author = h("input", { type: "text", placeholder: "Report author", attrs: { maxlength: 200, autocomplete: "name", "aria-label": "Report author" } });
+  const paper = h("select", { attrs: { "aria-label": "Paper size" } },
+    ...["A5", "A4", "A3", "B5", "Letter", "Legal", "Tabloid"].map(value => h("option", { value, text: value })));
+  paper.value = "A4";
+  const orientation = h("select", { attrs: { "aria-label": "Paper orientation" } },
+    h("option", { value: "portrait", text: "Portrait" }), h("option", { value: "landscape", text: "Landscape" }));
   const boxes = REPORT_SECTIONS.map(([id, label]) => { const box = h("input", { type: "checkbox", attrs: { value: id } }); box.checked = true; return { id, label, box }; });
   const handle = openDialog<string>({
     title: "New report", size: "narrow", focus: () => name,
     body: h("div", { css: { display: "grid", gap: ".8rem" } }, labelled("Name", name),
+      labelled("Author", author), labelled("Paper size", paper), labelled("Orientation", orientation),
       h("fieldset", { class: "plain-fieldset" }, h("legend", { text: "Sections" }), ...boxes.map((b) => h("label", { class: "check-inline" }, b.box, b.label))),
       h("p", { class: "muted", text: "A report is a snapshot of the project as it is now, saved in the project as an SLDC document. Later changes are not in it." })),
     actions: [{ label: "Make report", kind: "primary", run: async () => {
       const sections = boxes.filter((b) => b.box.checked).map((b) => b.id);
       if (!sections.length) { toast("Choose at least one section.", { kind: "info" }); return undefined; }
-      const job = await store.runJob("report", { name: name.value.trim(), sections }, { refresh: true });
+      const job = await store.runJob("report", { name: name.value.trim(), author: author.value.trim(),
+        paper: paper.value, orientation: orientation.value, sections }, { refresh: true });
       const id = (job?.result as { id?: string } | undefined)?.id;
       return job?.status === "done" && id ? id : undefined;
     } }],
@@ -165,11 +174,17 @@ export async function reportDialog(store: Store, id: string): Promise<void> {
   const view = await store.guard(() => store.api.get<ReportView>(`/report/${id}`), "Reading the report");
   if (!view) return;
   const r = view.report;
+  let pageView: ReturnType<typeof paginatedReport> | null = null;
+  try { pageView = paginatedReport(view); }
+  catch (error) { toast(error instanceof Error ? error.message : "Report pagination failed", { kind: "error" }); }
   const handle = openDialog<"delete">({
     title: r.name, eyebrow: `Made from revision ${r.revision} · ${r.created.slice(0, 16).replace("T", " ")} · ${(r.bytes / 1024).toFixed(1)} KB`, size: "wide", noCancel: true,
-    body: h("pre", { class: "report-text", attrs: { tabindex: "0", "aria-label": `Text of ${r.name}` }, text: view.markdown }),
+    body: h("div", { class: "report-dialog-body", attrs: { "aria-label": `Paginated preview of ${r.name}`, tabindex: "0" } },
+      pageView ? pageView.preview : h("pre", { class: "report-text", text: view.markdown }),
+      pageView ? h("p", { class: "muted", text: `${pageView.pageCount} numbered content pages · ${pageView.tocCount} table-of-contents page(s). The preview and PDF printout share the same layout.` }) : null),
     actions: [
       { label: "Delete", kind: "danger", run: () => "delete" },
+      { label: "Print / PDF", run: () => { if (pageView) pageView.print(); return undefined; } },
       { label: "Download SLDC", run: async () => {
         const file = await store.guard(() => store.api.download(`/export/report/${id}`), "Downloading the report");
         if (file) saveBlob(file.blob, file.filename);
