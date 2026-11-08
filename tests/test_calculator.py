@@ -43,6 +43,20 @@ class Calculator(unittest.TestCase):
         self.assertEqual(v["dimension"], {"L": 3.0})
         self.assertAlmostEqual(v["si_value"], self.p.quantities([self.wall], None)["rows"][0]["volume_m3"])
 
+    def test_stem_parameter_export_excludes_compound_property_keys(self):
+        import re
+        ep = C.element_parameters(self.p, [self.wall])
+        self.assertIn("e1_height", ep["parameters"])
+        self.assertIn("e1_thickness", ep["parameters"])
+        self.assertTrue(all(re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", name)
+                            for name in ep["parameters"]))
+        # Metadata/layer keys may contain colons, dots, UUIDs or spaces; none
+        # may poison an otherwise valid expression's parameter environment.
+        self.assertTrue(all(":" not in name and "." not in name for name in ep["parameters"]))
+        answer = C.evaluate(self.p, {"formulas": {"area": "e1_length * e1_height"},
+                                     "parameters": ep["parameters"]})
+        self.assertAlmostEqual(answer["results"]["area"]["si_value"], 18.0)
+
     def test_constraints_check_dimensions_and_report_each_result(self):
         ep = C.element_parameters(self.p, [self.wall])
         r = C.check_constraints(self.p, {"parameters": ep["parameters"], "constraints": [
