@@ -1462,8 +1462,11 @@ class _Commands:
             raise BadRequest("The Boolean operand must be another drawing entity")
         policy = p.get("policy", "tolerance_controlled" if operation == "boolean" else
                        "display_only" if operation == "bend" else "exact")
+        evaluation_policy = {"mode": policy}
+        if policy == "tolerance_controlled":
+            evaluation_policy["absolute"] = 1e-6
         mid = doc.add_modifier(oid, kind="sdrw." + operation, operands=operands,
-                               parameters=parameters, evaluation_policy={"mode": policy})
+                               parameters=parameters, evaluation_policy=evaluation_policy)
         report = next(row for row in doc.evaluate_modifiers() if row["modifier_id"] == mid)
         if report["status"] != "ok" or report["result"] is None:
             raise BadRequest("The modifier produced empty geometry; nothing was changed")
@@ -1946,9 +1949,12 @@ class _Commands:
             if E.m(other_meta, "category") not in (None, "generic") or E.m(other_meta, "family"):
                 raise BadRequest("Boolean operands cannot be parametrically constrained BIM elements")
         policy = p.get("policy", "display_only" if operation == "bend" else "tolerance_controlled")
+        evaluation_policy = {"mode": policy}
+        if policy == "tolerance_controlled":
+            evaluation_policy["absolute"] = 1e-6
         mid = project.model.add_modifier(oid, kind="sgeo." + operation,
                                          operands=operands, parameters=parameters,
-                                         evaluation_policy={"mode": policy})
+                                         evaluation_policy=evaluation_policy)
         result = next(item for item in project.model.evaluate_modifiers() if item["modifier_id"] == mid)
         if result["status"] != "ok" or not result["result"] or result["result"].get("geometry") is None:
             raise BadRequest("The modifier produced empty geometry; no change was committed")
