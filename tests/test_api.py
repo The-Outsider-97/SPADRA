@@ -208,7 +208,7 @@ class ModifierPreview(ServerCase):
         revision = self.app.require().revision
         original = self.app.require().model.get(wall)
         payload = {"kind": "model", "id": wall, "operation": "split",
-                   "independent_copy": True, "policy": "exact",
+                   "independent_copy": True, "policy": "tolerance_controlled",
                    "parameters": {"origin": [2.5, 0, 1], "normal": [1, 0, 0],
                                   "side": "positive"}}
         preview = api.post("/api/modifier/preview", payload)
