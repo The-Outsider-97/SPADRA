@@ -19,6 +19,7 @@ export type Selection =
   | { kind: "model"; ids: string[] }
   | { kind: "drawing"; view: string; ids: string[] }
   | { kind: "sheet"; id: string }
+  | { kind: "level"; id: string }
   | null;
 
 export interface Tab { ref: OpenRef; title: string; format: "SGEO" | "SDRW" | "Schedule" }
@@ -400,6 +401,7 @@ export class Store {
     } else if (sel.kind === "model" && sel.ids[0]) ref = { model: sel.ids[0] };
     else if (sel.kind === "drawing" && sel.ids[0]) ref = { drawing: sel.view, entity: sel.ids[0] };
     else if (sel.kind === "sheet") ref = { sheet: sel.id };
+    else if (sel.kind === "level") ref = { level: sel.id };
     if (!ref) return;
     // The selected thing may be gone (deleted, or undone away). That is not an error to show: there is just nothing selected now.
     try {
@@ -638,6 +640,7 @@ export class Store {
   /** The Project Browser row that stands for the current selection, so the browser can reveal it. */
   selectedNodeId(): string | null {
     const sel = this.selection;
+    if (sel?.kind === "level") return sel.id;
     if (sel?.kind !== "model" || !sel.ids[0]) return null;
     return flatten(this.tree).find((n) => n.select?.model === sel.ids[0])?.id ?? null;
   }
