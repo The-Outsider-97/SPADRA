@@ -229,6 +229,10 @@ def report_box(project: Any, vp: Mapping[str, Any]) -> dict[str, Any]:
     lines: list[dict[str, Any]] = []
     cut = False
     for block in blocks:
+        # A report viewport embeds report *content*, not its cover and ToC.
+        # Legacy reports without named sections remain supported unchanged.
+        if block.get("section") in ("cover", "front"):
+            continue
         kind = block.get("type")
         text = str(block.get("text", ""))
         if kind == "heading":
