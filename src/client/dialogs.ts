@@ -280,6 +280,7 @@ export function modifierDialog(store: Store, operation: "boolean" | "chamfer" | 
     toast("Select the geometry to modify first.", { kind: "info" }); return;
   }
   const is3d = selection.kind === "model";
+  const drawingId = selection.kind === "drawing" ? selection.view : null;
   if ((operation === "weld" || operation === "subdivision" || operation === "split") && !is3d) {
     toast(`${operation} is available for SGEO geometry only.`, { kind: "info" }); return;
   }
@@ -347,7 +348,7 @@ export function modifierDialog(store: Store, operation: "boolean" | "chamfer" | 
     if (values.some(v => typeof v === "number" && !Number.isFinite(v))) return null;
     return { operation, id: source, ...(operand ? { operand } : {}), parameters,
       ...(policy ? { policy: policy.value } : {}),
-      ...(!is3d ? { drawing: selection.view } : {}) };
+      ...(drawingId ? { drawing: drawingId } : {}) };
   };
   openDialog({
     title: `${operation[0]?.toUpperCase()}${operation.slice(1)} geometry`,
@@ -361,7 +362,7 @@ export function modifierDialog(store: Store, operation: "boolean" | "chamfer" | 
       store.setStatus(`${operation} applied (${result.mode ?? "native"}). ${JSON.stringify(result.diagnostics ?? {})}`);
       if (result.id) {
         if (is3d) await store.select({ kind: "model", ids: [result.id] });
-        else await store.select({ kind: "drawing", view: selection.view, ids: [result.id] });
+        else await store.select({ kind: "drawing", view: drawingId as string, ids: [result.id] });
       }
       return true;
     } }],
