@@ -161,12 +161,12 @@ class Reports(Case):
         self.assertEqual(first[4]["text"], "Made by Engineering Team")
         self.assertEqual(first[1]["style"], "cover_brand")
         self.assertIn("report_h1", doc["styles"]["paragraph"])
-        self.assertEqual(headings[0]["style"], "report_h1")
         self.assertTrue(p.assets)
         self.assertIn(doc["publication"]["cover_asset"], p.assets)
 
         headings = [b for b in doc["blocks"] if b.get("section") == "body" and b["type"] == "heading"]
         self.assertTrue(headings)
+        self.assertEqual(headings[0]["style"], "report_h1")
         self.assertTrue(all(b["attributes"]["page_break_before"] for b in headings))
         self.assertTrue(all(1 <= b["attributes"]["level"] <= 3 for b in headings))
         entries = [b["extensions"]["slai.sldc.toc"] for b in doc["blocks"]
