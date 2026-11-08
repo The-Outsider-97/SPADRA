@@ -799,6 +799,14 @@ def set_downpipe_property(project: Any, meta: Mapping[str, Any], key: str, value
         return {"wall": number(value, key, 0.5, 50) / 1000.0}
     if key == "bottom":
         return {"bottom": number(value, key, -1000, 1000)}
+    if key == "length":
+        # The gutter connection stays fixed; length moves only the outlet.
+        gid = E.m(meta, "gutter")
+        if not gid or not E.alive(project, gid):
+            raise BadRequest("The downpipe has no gutter to measure its length from")
+        g = frame(project, gid)
+        top = rim_at(g, float(E.m(meta, "offset"))) - g["depth"]
+        return {"bottom": top - number(value, "downpipe length (m)", 0.1, 2000)}
     if key == "material":
         return {"material": E._choice(value, GUTTER_MATERIALS, "material")}
     raise BadRequest(f"'{key}' is not an editable downpipe property")
@@ -1071,7 +1079,11 @@ def properties(project: Any, oid: str, out: dict[str, Any], volume: dict[str, An
                   {"key": "wall", "label": "Pipe wall", "type": "number", "unit": "mm", "value": mm(pf["wall"])},
                   {"key": "material", "label": "Material", "type": "choice", "value": E.m(pf["meta"], "material"), "choices": E._choices(GUTTER_MATERIALS)}]
     out["groups"] = [{"title": "Rainwater drainage", "rows": [{"label": "Design flow", "type": "readonly", "value": f"{flow:.3f} l/s" + ("" if flow > 0 else " (not at a low point of the gutter: no water reaches it)")}]},
-                     {"title": "Geometry", "rows": [{"label": "Length", "type": "readonly", "value": f"{pf['top'] - pf['bottom']:.3f} m"}, volume]}]
+                     {"title": "Geometry", "rows": [
+                         {"key": "length", "label": "Downpipe length", "type": "number", "unit": "m", "value": round(pf["top"] - pf["bottom"], 6)},
+                         {"label": "Connected top elevation", "type": "readonly", "value": f"{pf['top']:.3f} m"},
+                         {"key": "bottom", "label": "Bottom elevation", "type": "number", "unit": "m", "value": round(pf["bottom"], 6)},
+                         volume]}]
     return out
 
 
