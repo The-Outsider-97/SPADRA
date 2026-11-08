@@ -39,7 +39,8 @@ export class ModelView {
   private readonly octx: CanvasRenderingContext2D;
   private readonly hud: HTMLElement;
   private readonly layerControls = h("div", { class: "layer-controls", attrs: { "aria-label": "Add layer on selected faces" } });
-  private readonly contextAnchor = h("button", { type: "button", attrs: { "aria-hidden": "true", tabindex: "-1" } });
+  // Anchor only; this is not an actionable control or tab stop.
+  private readonly contextAnchor = h("span", { attrs: { "aria-hidden": "true" } });
   private readonly levelSelect: HTMLSelectElement;
   private hudGroups: HTMLElement[] = [];
   private readonly fields: Record<string, HTMLInputElement | HTMLSelectElement> = {};
