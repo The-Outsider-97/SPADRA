@@ -582,7 +582,7 @@ def modifier_preview(app: SpadraApp, req: Request) -> Any:
             oid = text(params.get("id"), "id", 80)
             before_vertices, before_faces = D.world_mesh(project, oid)
             result = draft.execute(op, {k: v for k, v in params.items() if k != "kind"})["result"]
-            after_vertices, after_faces = D.world_mesh(draft, oid)
+            after_vertices, after_faces = D.world_mesh(draft, result["id"])
             if len(after_faces) > 25000 or len(after_vertices) > 30000:
                 raise LimitExceeded("Modifier preview exceeds the interactive geometry budget")
             return {"revision": project.revision, "result": result,
