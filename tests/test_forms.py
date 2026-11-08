@@ -487,6 +487,24 @@ class NativeModifierCommands(unittest.TestCase):
         lo, hi = self.scene_bounds(source)
         self.assertAlmostEqual(lo[0], -1.0, places=5)
 
+    def test_native_modifier_properties_are_editable_and_undoable(self):
+        source = self.generic_box()
+        response = self.execute("model.modifier", id=source, operation="split",
+                                policy="exact", parameters={
+                                    "origin": [0, 0, 0], "normal": [1, 0, 0], "side": "positive"})
+        mid = response["modifier_id"]
+        props = self.p.properties({"model": source})
+        group = next(g for g in props["groups"] if g["title"] == "Native modifiers")
+        self.assertTrue(any(r.get("key") == f"modifier:{mid}:origin:0" for r in group["rows"]))
+        self.execute("model.set_modifier", id=source, modifier=mid, key="origin:0", value=0.4)
+        self.assertAlmostEqual(self.scene_bounds(source)[0][0], 0.4, places=5)
+        self.assertEqual(self.p.model.modifiers()[0]["parameters"]["origin"][0], 0.4)
+        with self.assertRaises(BadRequest):
+            self.execute("model.set_modifier", id=source, modifier=mid, key="side", value="invalid")
+        self.assertAlmostEqual(self.scene_bounds(source)[0][0], 0.4, places=5)
+        self.p.undo()
+        self.assertAlmostEqual(self.scene_bounds(source)[0][0], 0.0, places=5)
+
     def test_exact_box_boolean_and_save_reopen(self):
         left, right = self.generic_box(0), self.generic_box(1)
         result = self.execute("model.modifier", id=left, operation="boolean",
