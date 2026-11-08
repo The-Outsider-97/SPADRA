@@ -109,6 +109,7 @@ describe("SPADRA in a browser", () => {
   });
 
   it("selects by clicking, shows its properties, moves it by dragging, then undoes and redoes", async () => {
+    await page.getByRole("tab", { name: "Model", exact: true }).click();
     await page.getByRole("button", { name: "Select" }).first().click();
     const line = (await drawing()).entities.find((e) => e.kind === "line");
     const before = line.geometry.end;
@@ -138,6 +139,7 @@ describe("SPADRA in a browser", () => {
 
   it("places walls in 3D by clicking on the ground, selects one, and edits its height", async () => {
     await page.getByRole("button", { name: "3D", exact: true }).click(); await settle();
+    await page.getByRole("tab", { name: "Model", exact: true }).click();
     await page.getByRole("button", { name: "Wall" }).first().click();
     const pts = [[0.4, 0.55], [0.6, 0.55], [0.6, 0.75]];
     for (const [x, y] of pts) await click(".view-overlay", x, y);
@@ -182,6 +184,7 @@ describe("SPADRA in a browser", () => {
     await page.getByRole("button", { name: "Open another view" }).click();
     await page.getByRole("menuitem", { name: "New sheet…" }).click();
     await page.getByLabel("Sheet name").fill("Level 01 Plan"); await page.getByRole("button", { name: "Create" }).click(); await settle();
+    await page.getByRole("tab", { name: "Model", exact: true }).click();
     await page.getByRole("button", { name: "Place View" }).click();
     await page.getByRole("menuitem", { name: "Level 01" }).click(); await settle();
     const svgText = await page.locator(".sheet-wrap svg").innerHTML();
@@ -258,7 +261,7 @@ describe("SPADRA in a browser", () => {
   });
 
   it("opens Roof Level using the same browser navigation as other levels", async () => {
-    await page.getByRole("treeitem", { name: /^Roof Level\b/ }).click();
+    await page.getByRole("treeitem", { name: "Roof Level", exact: true }).first().click();
     await settle();
     const active = page.locator(".doc-tab[aria-selected=true]");
     assert.match(await active.textContent(), /Roof Level/i);
