@@ -184,10 +184,12 @@ export function paginatedReport(view: ReportView): {
         let currentRows = tableRows.slice(0, n), table = makeTable(block, currentRows);
         let inserted = false;
         for (const row of tableRows.slice(n)) {
+          // Measure the new table as a replacement, not beside the old table.
+          // Otherwise every prior row is measured twice and pagination breaks.
+          if (table.isConnected) table.remove();
           const next = makeTable(block, [...currentRows, row], inserted);
           if (!canPlace(current, next)) {
             if (currentRows.length > n) {
-              if (table.isConnected) table.remove();
               current.body.append(table);
               current = newPage("body");
             } else if (current.body.children.length) current = newPage("body");
@@ -197,7 +199,6 @@ export function paginatedReport(view: ReportView): {
             if (!canPlace(current, table)) throw new Error("A report table row is too tall for one page");
             currentRows.push(row); inserted = true;
           } else {
-            if (table.isConnected) table.remove();
             table = next; currentRows.push(row);
             inserted = true;
           }
