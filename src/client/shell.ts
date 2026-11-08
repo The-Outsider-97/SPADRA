@@ -561,7 +561,7 @@ export class Shell {
   private renderStatus(): void {
     const kind = store.tab?.ref.kind;
     const sel = store.selection;
-    const count = sel?.kind === "sheet" ? 0 : sel?.ids.length ?? 0;
+    const count = sel?.kind === "model" || sel?.kind === "drawing" ? sel.ids.length : 0;
     const selection = sel?.kind === "sheet" ? "1 Sheet Selected" : count ? `${count} ${kind === "3d" ? (count === 1 ? "Object" : "Objects") : count === 1 ? "Element" : "Elements"} Selected` : "Nothing Selected";
     const mode = kind === "3d" ? (this.model.cam.ortho ? "Orthographic" : "Perspective") : kind === "sheet" ? "Sheet / 2D" : kind === "schedule" ? "Schedule" : kind === "drawing" ? `${store.tab?.title ?? ""} / 2D` : "";
     const modeBtn = kind === "3d" ? h("button", { type: "button", on: { click: () => this.model.setOrtho(!this.model.cam.ortho) }, attrs: { title: "Switch projection" } }, mode) : h("span", { text: mode });
