@@ -255,7 +255,7 @@ async function removeRow(store: Store, p: Properties, key: string): Promise<void
 export function editCommand(p: Pick<Properties, "kind" | "ref">, key: string, value: string | number): { op: string; params: Record<string, unknown> } | null {
   const ref = p.ref;
   if (p.kind === "model") return { op: "model.set_property", params: { id: ref["model"], key, value } };
-  if (p.kind === "level" && ["name", "elevation", "height"].includes(key)) return { op: "level.set", params: { id: ref["level"], [key]: value } };
+  if (p.kind === "level" && ["name", "description", "elevation", "height"].includes(key)) return { op: "level.set", params: { id: ref["level"], [key]: value } };
   if (p.kind === "sheet") {
     if (key.startsWith("vp:")) { const [, viewport, field] = key.split(":"); return { op: "sheet.set_viewport", params: { id: ref["sheet"], viewport, key: field, value } }; }
     if (key.startsWith("note:")) return { op: "sheet.set_note", params: { id: ref["sheet"], note: key.slice(5), key: "text", value } };
