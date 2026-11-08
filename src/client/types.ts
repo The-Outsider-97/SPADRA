@@ -225,7 +225,16 @@ export interface SyncStatus {
 export interface FamilyParam { name: string; label: string; type: string; unit: string; required: boolean; default: number | null; min: number | null; max: number | null; expression: string | null; description: string }
 export interface FamilyInfo { id: string; name: string; shape: string; instances: number; parameters: FamilyParam[] }
 export interface FamiliesResponse { families: FamilyInfo[]; shapes: Record<string, string[]>; types: string[]; levels: Level[] }
-export interface ReportView { report: { id: string; name: string; created: string; revision: number; sections: string[]; bytes: number; sha256: string; blocks: number }; markdown: string; container: Record<string, unknown> }
+export interface ReportView {
+  report: { id: string; name: string; created: string; revision: number; sections: string[]; bytes: number;
+    sha256: string; blocks: number; author?: string; paper?: string; orientation?: string };
+  markdown: string; container: Record<string, unknown>;
+  /** Native SLDC source: semantic blocks drive the preview and TOC. */
+  document?: { blocks: Array<{ id: string; type: string; section?: string; text: string;
+    attributes?: { level?: number; page_break_before?: boolean };
+    table?: { columns: number; header_rows: number; rows: Array<Array<{ text: string; colspan?: number; rowspan?: number }>> } }>;
+    sections: Array<Record<string, unknown>>; metadata: Record<string, string> };
+}
 export interface CommandResult { revision: number; result: Record<string, unknown>; project: ProjectSummary }
 export interface Issue { severity: "error" | "warning" | "info"; ref: string; message: string; category?: string }
 export interface CheckResult { revision: number; issues: Issue[]; ok: boolean; scope: string; counts?: Record<string, number>; limitations?: string[] }
