@@ -402,3 +402,23 @@ class RequestedDrainageRegressions(Case):
         roof_top = E.level_elevation(self.p, self.roof_level) + float(E.m(meta, "thickness"))
         zcentre = sum(v[2] for v in verts[:4]) / 4
         self.assertAlmostEqual(zcentre, roof_top - float(E.m(meta, "thickness")) / 2, places=6)
+
+    def test_explicit_core_alignment_ignores_new_outer_finish(self):
+        from applications.SPADRA import layers as LY
+        roof = self.roof(kind="flat")
+        accessory = self.run_("model.add_roof_accessory", roof=roof, kind="roof_edge", edge=1)["id"]
+        initial = self.bounds(accessory)
+        original = LY.stack(self.p, roof)[0]
+        self.run_("model.set_property", id=roof, key=f"layer:{original['id']}:role", value="core")
+        self.run_("model.add_layer", id=roof, side="outside", thickness=20,
+                  material="Timber", role="non_core")
+        now = self.bounds(accessory)
+        self.assertAlmostEqual((now[0][2] + now[1][2]) / 2,
+                               (initial[0][2] + initial[1][2]) / 2, places=6)
+        roles = [row["role"] for row in LY.stack(self.p, roof)]
+        self.assertEqual(roles, ["non_core", "core"])
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "structural-core.spadra"
+            self.p.save(target)
+            restored = Project.open(target)
+            self.assertEqual([row["role"] for row in LY.stack(restored, roof)], roles)
