@@ -559,6 +559,44 @@ def verify_sheet_export(app: SpadraApp, req: Request) -> Any:
         return SH.verify_sldc(project, data, req.params["sheet"])
 
 
+@router.route("POST", "/api/modifier/preview")
+def modifier_preview(app: SpadraApp, req: Request) -> Any:
+    """Read-only native modifier preview evaluated on the project's scratch copy.
+
+    A preview uses exactly the production command and kernel; it cannot change
+    the source revision or undo stack, and it returns bounded derived geometry.
+    """
+    from . import documentation as D
+    from ..tools.errors import LimitExceeded
+    with app.lock:
+        project = app.require()
+        params = req.json()
+        if not isinstance(params, dict):
+            raise BadRequest("Modifier preview must be an object")
+        kind = params.get("kind")
+        op = "model.modifier" if kind == "model" else "draw.modifier" if kind == "drawing" else ""
+        if not op:
+            raise BadRequest("Preview kind must be model or drawing")
+        draft = project.scratch()
+        if kind == "model":
+            oid = text(params.get("id"), "id", 80)
+            before_vertices, before_faces = D.world_mesh(project, oid)
+            result = draft.execute(op, {k: v for k, v in params.items() if k != "kind"})["result"]
+            after_vertices, after_faces = D.world_mesh(draft, oid)
+            if len(after_faces) > 25000 or len(after_vertices) > 30000:
+                raise LimitExceeded("Modifier preview exceeds the interactive geometry budget")
+            return {"revision": project.revision, "result": result,
+                    "before": {"vertices": before_vertices, "faces": before_faces},
+                    "after": {"vertices": after_vertices, "faces": after_faces}}
+        view = text(params.get("drawing"), "drawing", 80)
+        source = text(params.get("id"), "id", 80)
+        previous = project.drawing(view).get(source)
+        result = draft.execute(op, {k: v for k, v in params.items() if k != "kind"})["result"]
+        current = draft.drawing(view).get(result["id"])
+        return {"revision": project.revision, "result": result,
+                "before": previous, "after": current}
+
+
 @router.route("GET", "/api/model/{id}/layers/{layer}/preview")
 def layer_preview(app: SpadraApp, req: Request) -> Any:
     """What a layer would be cut by if its openings were set like this (``?openings=all|none|selected&ids=a,b``): read-only, nothing is changed."""
