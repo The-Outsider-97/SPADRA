@@ -114,6 +114,7 @@ describe("a persistent array in a browser", () => {
     await page.keyboard.press("v");
     await clickAt([400, 0]);                                        // the wall, not its door
     await page.getByRole("tab", { name: "Insert", exact: true }).click(); await settle();
+    await page.getByRole("tab", { name: "Modifier", exact: true }).click();
     await page.getByRole("button", { name: "Array", exact: true }).first().click(); await settle();
     await page.getByLabel("Directions").selectOption("Y");
     await page.getByLabel("Y: number of items").fill("3");
@@ -174,6 +175,7 @@ describe("a persistent array in a browser", () => {
     const [first, , third] = await walls();
     await clickAt([400, third.a[1]]);
     await page.getByRole("tab", { name: "Insert", exact: true }).click(); await settle();
+    await page.getByRole("tab", { name: "Modifier", exact: true }).click();
     await page.getByRole("button", { name: "Release array", exact: true }).first().click(); await settle();
     assert.equal(await arrayId(), undefined);
     assert.equal((await walls()).length, 4);

@@ -211,7 +211,7 @@ describe("sections, elevations and schedules in a browser", () => {
     await page.locator("table.schedule tbody tr").first().waitFor(); await settle();
     const rows = page.locator("table.schedule tbody tr");
     assert.equal(await rows.count(), 2);
-    assert.deepEqual(await page.locator("table.schedule thead th").allInnerTexts(), ["No.", "Name", "Level", "Host wall", "Width (mm)", "Height (mm)", "Area (m²)", "Material", "Hinge", "Swing", "NL-SfB"]);
+    assert.deepEqual(await page.locator("table.schedule thead th").allInnerTexts(), ["No.", "Name", "Level", "Host wall", "Width (mm)", "Height (mm)", "Area (m²)", "Material", "Hinge", "Swing", "Assembly Code (UniFormat)", "OmniClass T21", "OmniClass T23", "IFC Type Product", "IFC PredefinedType", "NL-SfB"]);
     assert.match(await page.locator("table.schedule tfoot").innerText(), /Total\s+3\.99/);
     const first = async () => (await rows.first().locator("td").nth(4).innerText());
     assert.equal(await first(), "900");
@@ -248,7 +248,9 @@ describe("sections, elevations and schedules in a browser", () => {
     }
     const svg = page.locator(".sheet-wrap svg");
     await svg.locator("[data-viewport]").nth(3).waitFor();                       // the last view takes a moment to be drawn; count only once it is there
-    assert.equal(await svg.locator("[data-viewport]").count(), 4);
+    // Each viewport has an outer and inner SVG group with the same ID; count actual viewports, not DOM wrappers.
+    const placedIds = await svg.locator("[data-viewport]").evaluateAll(nodes => [...new Set(nodes.map(node => node.getAttribute("data-viewport")))]);
+    assert.equal(placedIds.length, 4);
     assert.ok(await svg.locator("[data-cut]").count() >= 2, "the section's cut is drawn");
     assert.ok(await svg.locator("[data-element]").count() > 4, "the elevation and section surfaces are drawn");
     const text = await svg.innerHTML();

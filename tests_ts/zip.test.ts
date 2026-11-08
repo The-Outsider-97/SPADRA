@@ -17,7 +17,7 @@ test("a ZIP made here is read back byte for byte by Python's zipfile, which also
   const dir = mkdtempSync(join(tmpdir(), "zip-"));
   const file = join(dir, "t.zip");
   writeFileSync(file, zipStore(entries, new Date(2026, 10, 2, 13, 55, 30)));
-  const script = "import sys, zipfile\nz = zipfile.ZipFile(sys.argv[1])\nassert z.testzip() is None\nprint('|'.join(f'{i.filename}:{len(z.read(i))}' for i in z.infolist()))\n";
+  const script = "import sys, zipfile\nz = zipfile.ZipFile(sys.argv[1])\nassert z.testzip() is None\nsys.stdout.buffer.write('|'.join(f'{i.filename}:{len(z.read(i))}' for i in z.infolist()).encode('utf-8'))\n";
   const out = execFileSync("python3", ["-I", "-c", script, file]).toString().trim();
   assert.equal(out, `frame_0001.png:${png.length}|frame_0002.png:${png.length}|readme é.txt:5`);
   const check = "import sys, zipfile\nz = zipfile.ZipFile(sys.argv[1])\nsys.stdout.buffer.write(z.read('frame_0002.png'))\n";

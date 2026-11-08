@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
+import json
 
 import unittest
 
@@ -186,8 +187,9 @@ class Reports(ServerCase):
         a.post("/api/project/new", {"name": "R", "unit": "mm"})
         rid = a.cmd("report.create", {"name": "Status"})["result"]["id"]
         view = a.get(f"/api/report/{rid}")
-        self.assertIn("# Status", view["markdown"])
-        self.assertEqual(view["container"]["version"], "1.0.0")
+        self.assertIn("Status", view["markdown"])
+        self.assertEqual(view["document"]["metadata"]["model_revision"], "0")
+        self.assertEqual(view["container"]["version"], "1.1.0")
         status, headers, raw = a.raw("GET", f"/api/export/report/{rid}")
         self.assertEqual(status, 200)
         self.assertEqual(sldc.loads_package(raw).document["title"], "Status")
@@ -347,12 +349,15 @@ class Interop(ServerCase):
         self.assertEqual(status, 200)
         report = a.get(f"/api/export/drawing/{plan}?report=1")["report"]
         self.assertIn("accuracy_class", report)
-        status, body = a.call("GET", f"/api/export/drawing/{plan}?format=dxf")
+        # A successful DXF export is CAD text, not a JSON envelope.
+        status, headers, raw = a.raw("GET", f"/api/export/drawing/{plan}?format=dxf")
         if caps["exportDrawing"]["dxf"]["available"]:
             self.assertEqual(status, 200)
+            self.assertTrue(raw, "Available DXF adapter must produce a non-empty drawing")
+            self.assertIn(b"SECTION", raw)
         else:
             self.assertIn(status, (400, 424, 501, 503))
-            self.assertIn("ezdxf", body["error"]["message"])
+            self.assertIn("ezdxf", json.loads(raw)["error"]["message"])
         self.assertEqual(a.call("GET", f"/api/export/drawing/{plan}?format=dwg")[0], 400)
 
 

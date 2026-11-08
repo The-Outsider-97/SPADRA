@@ -13,7 +13,7 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "tsx --test tests_ts/*.test.ts",
     "test:py": "python -m unittest discover -s tests -t ../.. -v",
-    "test:e2e": "node --test tests_e2e/*.e2e.test.mjs",
+    "test:e2e": "node --test --test-concurrency=1 tests_e2e/*.e2e.test.mjs",
     "test:all": "npm run typecheck && npm test && npm run test:py && npm run test:e2e"
   },
   "devDependencies": {

@@ -15,6 +15,7 @@ Each result carries the model revision it was computed for (the app marks it out
 from __future__ import annotations
 
 import math
+import re
 from typing import Any, Mapping, Sequence
 
 from ..tools.errors import BadRequest, DependencyMissing
@@ -136,7 +137,14 @@ def element_parameters(project: Any, ids: Sequence[str]) -> dict[str, Any]:
         label = props.get("title") or oid
         for r in [*props.get("top", []), *[x for g in props.get("groups", []) for x in g["rows"]]]:
             key, unit, value = r.get("key"), r.get("unit"), r.get("value")
-            if r.get("type") == "number" and key and isinstance(value, (int, float)) and unit in unit_symbol and unit_symbol[unit]:
+            # Properties also contain compound keys such as layer:uuid:thickness,
+            # which cannot be valid identifiers in the STEM expression parser.
+            # Export only stable, expression-safe names; do not alter their
+            # labels or invent aliases that would hide which property was used.
+            if (r.get("type") == "number" and isinstance(key, str)
+                    and re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", key)
+                    and isinstance(value, (int, float)) and not isinstance(value, bool)
+                    and unit in unit_symbol and unit_symbol[unit]):
                 name = f"e{i}_{key}"
                 params[name] = {"value": float(value), "unit": unit_symbol[unit]}
                 rows.append({"name": name, "element": oid, "label": f"{label} - {r['label']}", "value": float(value), "unit": unit})
