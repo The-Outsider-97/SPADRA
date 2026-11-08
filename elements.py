@@ -2107,10 +2107,18 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
         if cat == "downpipe":
             from . import gutters as GU
             try:
-                if GU.pipe_on_level(project, oid, level_id):
-                    out.append(GU.pipe_plan_item(project, oid, f))
+                pipe = GU.pipe_frame(project, oid)
+                cut = pipe["bottom"] - 1e-9 <= cut_z <= pipe["top"] + 1e-9
+                projected = (m(meta, "level") == level_id and
+                             pipe["top"] >= depth_z - 1e-9 and
+                             pipe["bottom"] <= top_z + 1e-9)
+                if cut or projected:
+                    item = GU.pipe_plan_item(project, oid, f)
+                    item["cut"] = cut
+                    item["overhead"] = not cut and pipe["bottom"] > cut_z
+                    out.append(item)
             except BadRequest:
-                pass                                                                     # a downpipe without its gutter is reported by the model check, not drawn
+                pass  # Missing gutter: model checking reports the broken association.
             continue
         if cat in ("grid", "array") or cat in OPENINGS:
             # Grids are level-independent, openings are emitted with their
@@ -2123,7 +2131,7 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
             if not 0.0 <= relative_cut < frame["height"]:
                 continue
             wall_cuts[oid] = relative_cut
-        elif cat not in ("room", "gutter"):
+        elif cat != "room":
             # Imported/legacy metadata groups can also be non-geometric.
             # They are not drawable, but must not make a sheet digest or the
             # entire Project Browser fail. Geometry validation is separate.
