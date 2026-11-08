@@ -56,8 +56,14 @@ class Diagnose(unittest.TestCase):
             (Path(tmp) / "d.log").write_text("not json\n" + json.dumps({"source": "ok"}) + "\n")
             self.assertEqual([e["source"] for e in log.recent()], ["ok"])          # a damaged line is skipped
         DG.Diagnostics(None).record("x", BadRequest("y"))                           # no log file: nothing happens
-        DG.Diagnostics(Path("/proc/none/impossible.log")).record("x", BadRequest("y"))   # an unwritable one: nothing happens either
-        self.assertEqual(DG.Diagnostics(Path("/proc/none/impossible.log")).recent(), [])
+        # /proc is not a protected filesystem path on Windows; use a file
+        # as a parent directory to guarantee this write is impossible on every OS.
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / "regular-file"
+            parent.write_text("file", encoding="utf-8")
+            blocked = DG.Diagnostics(parent / "impossible.log")
+            blocked.record("x", BadRequest("y"))
+            self.assertEqual(blocked.recent(), [])
 
 
 class ParsedFiles(unittest.TestCase):
