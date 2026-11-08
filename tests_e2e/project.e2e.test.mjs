@@ -164,7 +164,7 @@ describe("project properties, backups and recovery", () => {
 
 
   it("places Modifier between Model and Annotate and relocates the requested tools", async () => {
-    const labels = (await page.getByRole("tablist", { name: "Ribbon tabs" }).getByRole("tab").allTextContents()).map(s => s.trim());
+    const labels = (await page.locator(".menubar [role='tab']").allTextContents()).map(s => s.trim());
     assert.deepEqual(labels.slice(labels.indexOf("Model"), labels.indexOf("Annotate") + 1),
                      ["Model", "Modifier", "Annotate"]);
     const tools = (await page.locator(".ribbon .tool").allTextContents()).map(s => s.trim());
