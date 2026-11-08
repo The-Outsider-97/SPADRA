@@ -59,7 +59,12 @@ async function scene(build) {
   fitted = ([wx, wy]) => [box.x + box.width / 2 + (wx - (lo[0] + hi[0]) / 2) * k, box.y + box.height / 2 - (wy - (lo[1] + hi[1]) / 2) * k];
 }
 const at = async (world) => { const [x, y] = fitted(world); await page.mouse.move(x, y, { steps: 3 }); await page.mouse.click(x, y); await settle(); };
-const tool = (name) => page.getByRole("button", { name, exact: true }).first().click();
+const tool = async (name) => {
+  const ribbon = ["Line", "Polyline", "Rectangle", "Circle", "Offset", "Fillet"].includes(name)
+    ? "Annotate" : name === "Trim" ? "Modifier" : "Model";
+  await page.getByRole("tab", { name: ribbon, exact: true }).click();
+  await page.getByRole("button", { name, exact: true }).first().click();
+};
 const dialog = () => page.getByRole("dialog");
 
 before(async () => {
