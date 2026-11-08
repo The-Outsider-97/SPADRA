@@ -43,7 +43,12 @@ const command = (op, params) => api("/command", { method: "POST", body: JSON.str
 const settle = () => page.waitForTimeout(350);
 const planId = async () => (await api("/project/tree")).tree.sections[0].children[1].children[0].id;
 const drawing = async () => api(`/drawing/${await planId()}`);
-const tool = (name) => page.getByRole("button", { name, exact: true }).first().click();
+const tool = async (name) => {
+  const ribbon = ["Array", "Release array", "Extrude", "Void", "Sweep", "Make void"].includes(name)
+    ? "Modifier" : "Model";
+  await page.getByRole("tab", { name: ribbon, exact: true }).click();
+  await page.getByRole("button", { name, exact: true }).first().click();
+};
 const canvas = () => page.locator("canvas[aria-label='Drawing canvas']");
 const view = (fn, arg) => canvas().evaluate((el, [f, a]) => new Function("v", "a", `return (${f})(v, a)`)(el.spadraView, a), [fn.toString(), arg]);
 
@@ -130,7 +135,7 @@ describe("extrude, void, sweep and array in a browser", () => {
     const [made] = await items("extrusion");
     await page.keyboard.press("v");
     await clickAt([9000, 1000]);
-    await page.getByRole("button", { name: "Make void", exact: true }).first().click(); await settle();
+    await tool("Make void"); await settle();
     assert.equal((await items("extrusion")).length, 0);
     assert.equal((await items("void")).filter((m) => m.id === made.id).length, 1, "the same element is now a void");
   });
@@ -157,7 +162,7 @@ describe("extrude, void, sweep and array in a browser", () => {
     await page.keyboard.press("v");
     await clickAt([1500, 12000]);
     await page.getByRole("tab", { name: "Insert", exact: true }).click(); await settle();
-    await page.getByRole("button", { name: "Array", exact: true }).first().click(); await settle();
+    await tool("Array"); await settle();
     await page.getByLabel("Directions").selectOption("Y");
     await page.getByLabel("Y: number of items").fill("3");
     await page.getByLabel(/Y: spacing/).fill("2000");
