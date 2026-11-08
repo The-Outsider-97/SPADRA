@@ -193,7 +193,7 @@ describe("project properties, backups and recovery", () => {
     const native = await api(`/report/${report}`);
     assert.equal(native.document.metadata.author, "Test Author");
     await page.reload(); await settle();
-    await page.getByRole("treeitem", { name: "Pagination QA", exact: true }).click(); await settle();
+    await page.getByRole("treeitem", { name: /Pagination QA/ }).first().click(); await settle();
     const dialog = page.getByRole("dialog", { name: /Pagination QA/ });
     await dialog.waitFor();
     const pages = dialog.locator(".report-preview .report-page");
