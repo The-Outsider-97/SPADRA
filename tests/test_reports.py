@@ -159,6 +159,9 @@ class Reports(Case):
                          ["SPADRA", "Intelligent CAD, BIM & Engineering powered by SLAI",
                           "Envelope Compliance"])
         self.assertEqual(first[4]["text"], "Made by Engineering Team")
+        self.assertEqual(first[1]["style"], "cover_brand")
+        self.assertIn("report_h1", doc["styles"]["paragraph"])
+        self.assertEqual(headings[0]["style"], "report_h1")
         self.assertTrue(p.assets)
         self.assertIn(doc["publication"]["cover_asset"], p.assets)
 
