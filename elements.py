@@ -1263,6 +1263,17 @@ def _roof_edge_mesh(project: Any, roof: Mapping[str, Any], edge: int, width: flo
 
     facets = roof_facets(project, roof)
     thickness = float(m(roof, "thickness"))
+    # The roof assembly is ordered outer/top to inner/bottom. Locate
+    # the structural core from explicit consecutive layer roles, or fall
+    # back to the complete legacy assembly when no core has been assigned.
+    cursor, core_ranges = 0.0, []
+    for layer in m(roof, "layers") or []:
+        t = float(layer["thickness"])
+        if layer.get("role") == "core":
+            core_ranges.append((cursor, cursor + t))
+        cursor += t
+    core_depth = ((core_ranges[0][0] + core_ranges[-1][1]) / 2
+                  if core_ranges else thickness / 2)
     ridge = roof_ridge(roof)
     def facet_distance_sq(poly: list[tuple[float, float]], x: float, y: float) -> float:
         return min((lambda dx, dy: dx * dx + dy * dy)(x - (p[0] + t * vx), y - (p[1] + t * vy))
@@ -1324,15 +1335,13 @@ def _roof_edge_mesh(project: Any, roof: Mapping[str, Any], edge: int, width: flo
         # Upper rails follow the roof top exactly; lower rails converge beneath
         # the ridge instead of leaving two colliding square-cut members.
         for side, lower in ((-0.5, False), (0.5, False), (0.5, True), (-0.5, True)):
-            # The profile reference is the midpoint of its section, anchored
-            # to the roof core's mid-thickness plane at this boundary station.
-            # Current roof layers do not identify a separate structural core:
-            # use the entire roof thickness until a core designation exists.
+            # Constrain the profile section midpoint to the roof core
+            # reference, or the legacy assembly midpoint if no core exists.
             # Subtract half the downward section vector on both rails so
             # pitched gable ends remain centred in XY as well as elevation.
             v = [centre[j] + horizontal[j] * (lateral_offset + side * width)
                  + downward[j] * ((depth if lower else 0.0) - depth / 2)
-                 - (thickness / 2 if j == 2 else 0.0) for j in range(3)]
+                 - (core_depth if j == 2 else 0.0) for j in range(3)]
             verts.append(v)
     faces: list[list[int]] = [[0, 2, 1], [0, 3, 2]]
     for i in range(len(stations) - 1):
