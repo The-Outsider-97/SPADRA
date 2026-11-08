@@ -269,3 +269,101 @@ export async function releaseArray(store: Store): Promise<void> {
   const out = await store.run("model.release_array", { id: sel.ids[0] });
   if (out) toast("The array is released: its copies are ordinary elements now.", { kind: "info" });
 }
+
+
+/** A single contextual editor for the existing SGEO/SDRW geometry kernels.
+ *  Values shown in metres or degrees are explicitly converted at the boundary;
+ *  there are no duplicate frontend implementations of any modifier. */
+export function modifierDialog(store: Store, operation: "boolean" | "chamfer" | "weld" | "subdivision" | "bend" | "split"): void {
+  const selection = store.selection;
+  if (!selection || (selection.kind !== "model" && selection.kind !== "drawing") || !selection.ids.length) {
+    toast("Select the geometry to modify first.", { kind: "info" }); return;
+  }
+  const is3d = selection.kind === "model";
+  if ((operation === "weld" || operation === "subdivision" || operation === "split") && !is3d) {
+    toast(`${operation} is available for SGEO geometry only.`, { kind: "info" }); return;
+  }
+  if (operation === "boolean" && selection.ids.length < 2) {
+    toast("Select a source and an operand for Boolean.", { kind: "info" }); return;
+  }
+  const box = h("div", { css: { display: "grid", gap: ".8rem" } });
+  const number = (label: string, initial: string, step = "any"): HTMLInputElement => {
+    const field = h("input", { type: "number", value: initial, attrs: { step, "aria-label": label } }) as HTMLInputElement;
+    box.append(labelled(label, field));
+    return field;
+  };
+  const choice = (label: string, options: Array<[string, string]>): HTMLSelectElement => {
+    const field = h("select", { attrs: { "aria-label": label } }, ...options.map(([value, text]) => h("option", { value, text }))) as HTMLSelectElement;
+    box.append(labelled(label, field));
+    return field;
+  };
+  const source = selection.ids[0] as string;
+  let operand = selection.ids[1] ?? "";
+  let mode: HTMLSelectElement | null = null;
+  if (operation === "boolean") {
+    mode = choice("Boolean operation", [["union", "Union"], ["subtract", "Difference / Subtract"], ["intersect", "Intersection"]]);
+    box.append(h("p", { class: "muted", text: `First selected: ${source}; operand: ${operand}. Difference subtracts the second from the first.` }));
+  }
+  const amount = operation === "chamfer" ? number("First chamfer distance (m)", "0.05") : null;
+  const depth = operation === "chamfer" ? number("Second chamfer distance (m)", "0.05") : null;
+  const segmentCount = operation === "chamfer" || operation === "bend" ?
+    number(operation === "bend" ? "Bend segments" : "Chamfer segments", operation === "bend" ? "16" : "1", "1") : null;
+  const weldDecimals = operation === "weld" ? choice("Vertex matching", [["exact", "Exact coordinates"], ["12", "12 decimal places"], ["9", "9 decimal places"], ["6", "6 decimal places"]]) : null;
+  const maxEdge = operation === "subdivision" ? number("Maximum mesh edge (m)", "0.5") : null;
+  const axis = operation === "bend" ? choice("Bend axis", is3d ? [["x", "X"], ["y", "Y"], ["z", "Z"]] : [["x", "X"], ["y", "Y"]]) : null;
+  const start = operation === "bend" ? number("Bend start coordinate (m)", "0") : null;
+  const end = operation === "bend" ? number("Bend end coordinate (m)", "3") : null;
+  const angle = operation === "bend" ? number("Bend angle (degrees)", "30") : null;
+  const split = operation === "split" ? [
+    number("Plane origin X (m)", "0"), number("Plane origin Y (m)", "0"), number("Plane origin Z (m)", "0"),
+    number("Plane normal X", "1"), number("Plane normal Y", "0"), number("Plane normal Z", "0")
+  ] : null;
+  const side = operation === "split" ? choice("Keep split side", [["positive", "Positive side"], ["negative", "Negative side"]]) : null;
+  const defaultPolicy = operation === "bend" ? "display_only" : "tolerance_controlled";
+  const policy = operation === "boolean" || operation === "chamfer" || operation === "split"
+    ? choice("Evaluation policy", [["tolerance_controlled", "Validated tolerance-controlled"], ["exact", "Exact (only when supported)"], ["display_only", "Display-grade approximation"]]) : null;
+  if (policy) policy.value = defaultPolicy;
+  const note = h("p", { class: "muted", text: is3d
+    ? operation === "weld" || operation === "subdivision"
+      ? "This mesh operation permanently updates the selected geometry and is reversible through Undo. BIM hosts cannot be modified this way."
+      : "The native SGEO modifier remains editable and non-destructive. Only independent generic geometry is eligible."
+    : "A native SDRW evaluation is committed as drawing geometry and can be undone." });
+  box.append(note);
+
+  const payload = (): Record<string, unknown> | null => {
+    const finite = (field: HTMLInputElement | null): number => field ? Number(field.value) : NaN;
+    let parameters: Record<string, unknown>;
+    switch (operation) {
+      case "boolean": parameters = { operation: mode?.value }; break;
+      case "chamfer": parameters = { amount: finite(amount), depth: finite(depth), segments: finite(segmentCount) }; break;
+      case "weld": parameters = { decimals: weldDecimals?.value === "exact" ? null : Number(weldDecimals?.value) }; break;
+      case "subdivision": parameters = { max_edge: finite(maxEdge) }; break;
+      case "bend": parameters = { axis: axis?.value, start: finite(start), end: finite(end),
+        angle: finite(angle) * Math.PI / 180, segments: finite(segmentCount) }; break;
+      case "split": parameters = { origin: split?.slice(0, 3).map(x => Number(x.value)),
+        normal: split?.slice(3).map(x => Number(x.value)), side: side?.value }; break;
+    }
+    const values = Object.values(parameters).flatMap(v => Array.isArray(v) ? v : [v]);
+    if (values.some(v => typeof v === "number" && !Number.isFinite(v))) return null;
+    return { operation, id: source, ...(operand ? { operand } : {}), parameters,
+      ...(policy ? { policy: policy.value } : {}),
+      ...(!is3d ? { drawing: selection.view } : {}) };
+  };
+  openDialog({
+    title: `${operation[0]?.toUpperCase()}${operation.slice(1)} geometry`,
+    size: "narrow", body: box,
+    actions: [{ label: "Apply modifier", kind: "primary", run: async () => {
+      const params = payload();
+      if (!params) { toast("Modifier parameters must be finite numbers.", { kind: "error" }); return undefined; }
+      const done = await store.run(is3d ? "model.modifier" : "draw.modifier", params);
+      if (!done) return undefined;
+      const result = done.result as { id?: string; mode?: string; diagnostics?: Record<string, unknown> };
+      store.setStatus(`${operation} applied (${result.mode ?? "native"}). ${JSON.stringify(result.diagnostics ?? {})}`);
+      if (result.id) {
+        if (is3d) await store.select({ kind: "model", ids: [result.id] });
+        else await store.select({ kind: "drawing", view: selection.view, ids: [result.id] });
+      }
+      return true;
+    } }],
+  });
+}
