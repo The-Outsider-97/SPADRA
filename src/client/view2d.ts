@@ -867,6 +867,11 @@ export class DrawingView {
     if ((e.key === "+" || e.key === "=") && !e.ctrlKey && !e.metaKey) { e.preventDefault(); this.zoom(1.25); return; }
     if (e.key === "-" && !e.ctrlKey && !e.metaKey) { e.preventDefault(); this.zoom(1 / 1.25); return; }
     if (e.key === "0" && !e.ctrlKey && !e.metaKey) { e.preventDefault(); this.fit(); return; }
+    if (e.shiftKey && (e.key === "F" || e.key === "f") && this.markSel && this.store.tool === "select") {
+      e.preventDefault(); e.stopPropagation();
+      await this.store.run("view.flip_section", { id: this.markSel });
+      this.draw(); return;
+    }
     if (e.key === "Escape") { if (this.edit) { this.edit = null; this.anchor = null; this.draw(); } else if (this.grip) { this.grip = null; this.draw(); } else if (this.pts.length || this.target || this.tagOf) await this.finish(false); else this.store.setTool("select"); return; }
     if (e.key === "Enter" && this.store.tool === "dimension") {
       e.preventDefault();
@@ -1869,7 +1874,7 @@ export class DrawingView {
   private updateHint(): void {
     const n = this.pts.length;
     const hints: Record<Tool, string> = {
-      select: this.data?.projection ? "Click an element to select it. Sections and elevations are drawn from the model: change the model to change them." : "Click to select, drag a window to select several, drag an element to move it. Drag the square grips to stretch a wall or a section line, the round one to rotate. Click a wall's length to type a new one. Double-click a section line to open that section.",
+      select: this.data?.projection ? "Click an element to select it. Sections and elevations are drawn from the model: change the model to change them." : "Click to select, drag a window to select several, drag an element to move it. Drag the square grips to stretch a wall or a section line, the round one to rotate. Click a wall's length to type a new one. Shift+double-click selects connected walls. Double-click a section line to open it; select the line and press Shift+F to reverse the actual cut direction.",
       line: n ? "Pick the next point. Shift keeps it horizontal or vertical. Esc ends the chain." : "Pick the first point of the line.",
       polyline: n ? "Pick the next point. Enter or double-click finishes, C closes it, Esc cancels." : "Pick the first point of the polyline.",
       rectangle: n ? "Pick the opposite corner." : "Pick the first corner.",
