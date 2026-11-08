@@ -348,12 +348,15 @@ class Interop(ServerCase):
         self.assertEqual(status, 200)
         report = a.get(f"/api/export/drawing/{plan}?report=1")["report"]
         self.assertIn("accuracy_class", report)
-        status, body = a.call("GET", f"/api/export/drawing/{plan}?format=dxf")
+        # A successful DXF export is CAD text, not a JSON envelope.
+        status, headers, raw = a.raw("GET", f"/api/export/drawing/{plan}?format=dxf")
         if caps["exportDrawing"]["dxf"]["available"]:
             self.assertEqual(status, 200)
+            self.assertTrue(raw, "Available DXF adapter must produce a non-empty drawing")
+            self.assertIn(b"SECTION", raw)
         else:
             self.assertIn(status, (400, 424, 501, 503))
-            self.assertIn("ezdxf", body["error"]["message"])
+            self.assertIn("ezdxf", json.loads(raw)["error"]["message"])
         self.assertEqual(a.call("GET", f"/api/export/drawing/{plan}?format=dwg")[0], 400)
 
 
