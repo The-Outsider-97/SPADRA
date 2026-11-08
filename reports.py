@@ -133,7 +133,7 @@ def _blocks(project: Any, sections: list[str]) -> list[dict[str, Any]]:
 
 def _page_spec(paper: str, orientation: str) -> dict[str, Any]:
     """One physical page definition shared by the native SLDC and print preview."""
-    if paper not in ("A5", "A4", "A3", "A2", "A1", "Letter", "Legal"):
+    if paper not in ("A5", "A4", "A3", "B5", "Letter", "Legal", "Tabloid"):
         raise BadRequest("Unsupported report paper size")
     if orientation not in ("portrait", "landscape"):
         raise BadRequest("Report orientation must be portrait or landscape")
@@ -177,7 +177,7 @@ def build(project: Any, name: str, sections: list[str], *, author: str = "",
         S.make_block("paragraph", "Intelligent CAD, BIM & Engineering powered by SLAI", section="cover"),
         S.make_block("paragraph", name, section="cover"),
         S.make_block("paragraph", f"Made by {author or '—'}", section="cover"),
-        S.make_block("paragraph", created.replace("T", " ") + " UTC", section="cover"),
+        S.make_block("paragraph", created.replace("T", " "), section="cover"),
     ]
     metadata = {"project": project.name, "model_revision": str(revision),
                 "sections": ",".join(sections), "author": author,
@@ -186,7 +186,7 @@ def build(project: Any, name: str, sections: list[str], *, author: str = "",
         {"id": "cover", "role": "cover", "page": page, "numbering": {"show": False}},
         {"id": "front", "role": "front_matter", "page": page, "numbering": {"show": False}},
         {"id": "body", "role": "body", "page": page,
-         "numbering": {"show": True, "start": 1, "format": "arabic"},
+         "numbering": {"show": True, "start": 1, "format": "decimal"},
          "footer": {"left": name, "right": "Page {page} of {pages}"}},
     ]
     try:
