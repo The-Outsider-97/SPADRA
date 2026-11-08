@@ -38,6 +38,7 @@ function makeTable(b: ReportBlock, rows: ReturnType<typeof rowsOf>, continuation
     const tr = el("tr");
     cells.forEach(cell => {
       const c = el(index < count ? "th" : "td", "", cell.text);
+      if (index >= count && /^[-+]?\s*(?:\d[\d.,\s]*|\d+(?:\.\d+)?\s*%)$/.test(cell.text)) c.classList.add("report-numeric");
       if (cell.colspan && cell.colspan > 1) c.colSpan = cell.colspan;
       if (cell.rowspan && cell.rowspan > 1) c.rowSpan = cell.rowspan;
       tr.append(c);
