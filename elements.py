@@ -1305,16 +1305,9 @@ def _roof_edge_mesh(project: Any, roof: Mapping[str, Any], edge: int, width: flo
     normals = [outward(edge - 1), *([outward(edge)] * max(0, len(stations) - 2)), outward(edge + 1)]
     this_normal = outward(edge)
 
-    def direction(p: tuple[float, float, float], q: tuple[float, float, float]) -> tuple[float, float, float]:
-        d = tuple(q[i] - p[i] for i in range(3))
-        n = math.sqrt(sum(v * v for v in d))
-        if n < 1e-7:
-            raise BadRequest("A roof edge or its adjoining roof boundary is too short")
-        return tuple(v / n for v in d)  # type: ignore[return-value]
-
-    def cross(u: tuple[float, float, float], v: tuple[float, float, float]) -> tuple[float, float, float]:
-        return (u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0])
-
+    # Roof thickness is explicitly vertical in SPADRA's roof solid. A fascia
+    # following its roof-end must therefore have vertical section edges too;
+    # an edge-tangent cross product makes those edges lean in plan on slopes.
     def mitre(u: tuple[float, float, float], v: tuple[float, float, float]) -> tuple[float, float, float]:
         """The offset-line intersection: both incident sections project to one mitre."""
         d = 1 + sum(u[i] * v[i] for i in range(3))
@@ -1329,19 +1322,14 @@ def _roof_edge_mesh(project: Any, roof: Mapping[str, Any], edge: int, width: flo
         prev_normal = normals[i] if i == 0 else this_normal
         next_normal = normals[i] if i == len(stations) - 1 else this_normal
         horizontal = mitre(prev_normal, next_normal)
-        incoming = cross(direction(prev, centre), prev_normal)
-        outgoing = cross(direction(centre, nxt), next_normal)
-        downward = mitre(incoming, outgoing)
-        # All four rails share the same core-centred section reference.
-        # The ridge station is continuous, avoiding capped and overlapping members.
+        # Keep every profile upright in world coordinates. Stations still
+        # rise and fall along the exact gable/hip roof boundary, and XY corner
+        # mitres come from the adjoining *plan* edges. Top and bottom corners
+        # of each station must share XY; the end cap is never a slanted fascia.
         for side, lower in ((-0.5, False), (0.5, False), (0.5, True), (-0.5, True)):
-            # Constrain the profile section midpoint to the roof core
-            # reference, or the legacy assembly midpoint if no core exists.
-            # Subtract half the downward section vector on both rails so
-            # pitched gable ends remain centred in XY as well as elevation.
-            v = [centre[j] + horizontal[j] * (lateral_offset + side * width)
-                 + downward[j] * ((depth if lower else 0.0) - depth / 2)
-                 - (core_depth if j == 2 else 0.0) for j in range(3)]
+            v = [centre[0] + horizontal[0] * (lateral_offset + side * width),
+                 centre[1] + horizontal[1] * (lateral_offset + side * width),
+                 centre[2] + (depth / 2 if not lower else -depth / 2) - core_depth]
             verts.append(v)
     faces: list[list[int]] = [[0, 2, 1], [0, 3, 2]]
     for i in range(len(stations) - 1):

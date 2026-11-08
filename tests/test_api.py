@@ -196,6 +196,57 @@ class Reports(ServerCase):
         self.assertEqual(a.call("GET", "/api/report/nope")[0], 404)
 
 
+
+class ModifierPreview(ServerCase):
+    def test_host_preview_is_read_only_and_apply_can_create_an_independent_copy(self):
+        api = self.api
+        api.post("/api/project/new", {"name": "Preview", "unit": "mm"})
+        level = api.get("/api/project/tree")["levels"][0]["id"]
+        wall = api.cmd("model.add_wall", {"level": level, "start": [0, 0],
+                                          "end": [5000, 0], "height": 3,
+                                          "thickness": 250})["result"]["id"]
+        revision = self.app.require().revision
+        original = self.app.require().model.get(wall)
+        payload = {"kind": "model", "id": wall, "operation": "split",
+                   "independent_copy": True, "policy": "tolerance_controlled",
+                   "parameters": {"origin": [2.5, 0, 1], "normal": [1, 0, 0],
+                                  "side": "positive"}}
+        preview = api.post("/api/modifier/preview", payload)
+        self.assertEqual(preview["revision"], revision)
+        self.assertNotEqual(preview["result"]["id"], wall)
+        self.assertTrue(preview["before"]["faces"])
+        self.assertTrue(preview["after"]["faces"])
+        self.assertEqual(self.app.require().revision, revision)
+        self.assertEqual(self.app.require().model.get(wall), original)
+        self.assertEqual(len(self.app.require().model.modifiers()), 0)
+        created = api.cmd("model.modifier", {k: v for k, v in payload.items()
+                                            if k != "kind"})["result"]
+        self.assertNotEqual(created["id"], wall)
+        self.assertTrue(preview["result"]["id"], "the scratch result identifies its prospective geometry")
+        self.assertEqual(created["derived_from"], wall)
+        self.assertEqual(self.app.require().revision, revision + 1)
+        self.assertEqual(self.app.require().model.get(wall), original)
+        self.assertEqual(len(self.app.require().model.modifiers()), 1)
+        api.post("/api/undo")
+        self.assertEqual(self.app.require().model.get(wall), original)
+        self.assertFalse(self.app.require().model.modifiers())
+
+    def test_invalid_modifier_preview_exposes_native_diagnostic_without_committing(self):
+        api = self.api
+        api.post("/api/project/new", {"name": "Diagnostic", "unit": "mm"})
+        level = api.get("/api/project/tree")["levels"][0]["id"]
+        wall = api.cmd("model.add_wall", {"level": level, "start": [0, 0],
+                                          "end": [5000, 0], "height": 3,
+                                          "thickness": 250})["result"]["id"]
+        revision = self.app.require().revision
+        status, reply = api.call("POST", "/api/modifier/preview", {
+            "kind": "model", "id": wall, "operation": "split", "policy": "exact",
+            "parameters": {"origin": [2.5, 0, 1], "normal": [1, 0, 0],
+                           "side": "positive"}})
+        self.assertEqual(status, 400)
+        self.assertIn("BIM host", reply["error"]["message"])
+        self.assertEqual(self.app.require().revision, revision)
+
 class Interchange(ServerCase):
     def test_inspect_then_import_native_and_obj_over_http(self):
         import base64

@@ -1897,11 +1897,11 @@ class _Commands:
     def model__modifier(project: Project, p: dict[str, Any]) -> dict[str, Any]:
         """Use the SLAI SGEO modifier kernel, preserving a non-destructive DAG.
 
-        Semantically constrained BIM elements cannot be modified free-form
-        without invalidating their host, dimensions or construction layers.
-        They must first be converted through an explicit, supported workflow.
-        Weld and subdivision use existing mesh kernels and are explicitly
-        committed as destructive mesh edits; both remain undoable.
+        Semantic BIM hosts still require their dedicated parametric editing
+        commands. Independent generic *family instances* may use non-destructive
+        modifiers: the family definition, parameter formulas, and generated
+        base geometry remain authoritative and editable. Baked mesh edits are
+        reserved for independent non-family objects.
         """
         operation = choice_of(p.get("operation"),
                               ("boolean", "chamfer", "bend", "split", "weld", "subdivision"),
@@ -1910,11 +1910,43 @@ class _Commands:
         source = project.model.get(oid)
         meta = source.get("metadata", {})
         cat = E.m(meta, "category")
-        if cat not in (None, "generic") or E.m(meta, "family") or source.get("parent"):
-            raise BadRequest("Free-form modifiers require independent generic geometry",
-                             hint="Use the BIM element's parametric Properties, or an explicit geometry conversion that releases its host relationships")
+        # Family instances have native, parameter-generated SGEO geometry.
+        # They do not lose their family link when a modifier DAG is layered
+        # over that geometry; only destructive baking would break that link.
+        if cat not in (None, "generic") and not p.get("independent_copy", False):
+            raise BadRequest("This BIM host has construction or attachment semantics",
+                             hint="Edit its native parameters or enable 'Create independent editable copy' to apply modifiers without changing the BIM family or host.")
         if source.get("geometry") is None:
-            raise BadRequest("Choose a solid or mesh with real geometry")
+            raise BadRequest("Choose a geometric object or a family instance with generated geometry")
+        detached_from = None
+        independent_copy = p.get("independent_copy", False)
+        if type(independent_copy) is not bool:
+            raise BadRequest("Independent copy must be true or false")
+        if independent_copy:
+            # Explicit, reversible conversion in this same Project transaction.
+            # The original BIM object/family and its host relationships are NOT
+            # modified. A standalone mesh can receive every native operation.
+            from .documentation import world_mesh
+            previous_id = oid
+            vertices, faces = world_mesh(project, oid)
+            if not vertices or not faces:
+                raise BadRequest("The chosen element has no geometric surface to copy")
+            oid = project.model.add_mesh(vertices, faces,
+                                         name=source.get("name", "Geometry") + " · editable copy")
+            # Retain display and schedule identity without copying hosting,
+            # opening, layer, attachment or family constraints.
+            copy_info = {"category": "generic", "derived_from": previous_id}
+            for key in ("level", "material", "color"):
+                if E.m(meta, key) is not None:
+                    copy_info[key] = E.m(meta, key)
+            E._attach(project, oid, copy_info)
+            detached_from = previous_id
+            source = project.model.get(oid)
+            cat = "generic"
+        family_instance = "family_id" in source
+        if family_instance and operation in ("weld", "subdivision"):
+            raise BadRequest("Weld and Subdivision would overwrite this family's generated geometry",
+                             hint="Use Split, Boolean, Chamfer or Bend as a non-destructive modifier, or make an independent copy before baking.")
         parameters = p.get("parameters")
         if not isinstance(parameters, dict):
             raise BadRequest("Modifier parameters must be an object")
@@ -1939,15 +1971,17 @@ class _Commands:
                 diagnostics = {"backend": "conforming edge subdivision", "approximate": False,
                                "vertices": len(vertices), "faces": len(faces)}
             project.model.set_geometry(oid, result)
-            return {"id": oid, "operation": operation, "mode": "baked", "diagnostics": diagnostics}
+            return {"id": oid, "operation": operation, "mode": "baked", "diagnostics": diagnostics,
+                    "derived_from": detached_from}
         operands = [text(p.get("operand"), "operand", 80)] if operation == "boolean" else []
         if operands:
             operand = project.model.get(operands[0])
-            if operands[0] == oid or operand.get("geometry") is None:
+            if operands[0] == (detached_from or oid) or operand.get("geometry") is None:
                 raise BadRequest("Select a distinct geometric Boolean operand")
-            other_meta = operand.get("metadata", {})
-            if E.m(other_meta, "category") not in (None, "generic") or E.m(other_meta, "family"):
-                raise BadRequest("Boolean operands cannot be parametrically constrained BIM elements")
+            # The operand is read-only in the SGEO modifier DAG. It may be a
+            # hosted BIM element or family instance without duplication,
+            # conversion, or loss of native parametric relationships. Only the
+            # target is edited (or explicitly cloned) by this operation.
         policy = p.get("policy", "display_only" if operation == "bend" else "tolerance_controlled")
         evaluation_policy = {"mode": policy}
         if policy == "tolerance_controlled":
@@ -1959,7 +1993,7 @@ class _Commands:
         if result["status"] != "ok" or not result["result"] or result["result"].get("geometry") is None:
             raise BadRequest("The modifier produced empty geometry; no change was committed")
         return {"id": oid, "modifier_id": mid, "operation": operation, "mode": "non_destructive",
-                "diagnostics": result.get("diagnostics", {})}
+                "derived_from": detached_from, "diagnostics": result.get("diagnostics", {})}
 
     @staticmethod
     @command(_model_target("Edit SGEO modifier"))

@@ -81,8 +81,14 @@ before(async () => {
 after(async () => {
   assert.deepEqual(problems, [], "no console errors or page errors");
   await browser?.close();
-  server?.kill();
-  if (dataDir) rmSync(dataDir, { recursive: true, force: true });
+  if (server && server.exitCode === null) {
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, 5000);
+      server.once("exit", () => { clearTimeout(timer); resolve(); });
+      server.kill();
+    });
+  }
+  if (dataDir) rmSync(dataDir, { recursive: true, force: true, maxRetries: 12, retryDelay: 250 });
 });
 
 const selectInBrowser = async (label) => { await page.locator(".browser, nav, aside").getByText(label, { exact: true }).first().click(); await settle(); };
@@ -93,7 +99,8 @@ describe("the assistant panel", () => {
     await page.getByRole("button", { name: "Assistant", exact: true }).click();
     await panel().waitFor();
     assert.match(await panel().innerText(), /pattern interpreter, not a language model/);
-    assert.ok(await panel().locator(".ap-chip").count() >= 3);
+    await panel().locator(".ap-chip").first().waitFor();
+    assert.ok(await panel().locator(".ap-chip").count() >= 3, "real example capabilities are loaded");
   });
 
   it("answers an unsupported request honestly and changes nothing", async () => {

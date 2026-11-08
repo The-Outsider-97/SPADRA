@@ -127,7 +127,7 @@ describe("roofs, gutters and profiles in a browser", () => {
     const rows = (await props(roofId)).groups.flatMap((g) => g.rows).concat((await props(roofId)).top);
     assert.ok(Math.abs(rows.find((r) => r.key === "pitch").value - 45) < 1e-6, "slope and pitch are the same thing said two ways");
     assert.ok((await rise()) > before + 0.5, "the roof is steeper");
-    await page.getByLabel("Roof type", { exact: true }).selectOption("hip"); await settle();
+    await page.getByRole("region", { name: "Properties" }).getByLabel("Roof type").selectOption("hip"); await settle();
     assert.equal((await props(roofId)).top.find((r) => r.key === "roof").value, "hip");
     assert.equal((await ofCategory("roof")).length, 1);
   });

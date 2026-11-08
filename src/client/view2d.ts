@@ -1156,7 +1156,11 @@ export class DrawingView {
           "aria-label": `Edit wall corner connection at ${join.endpoint}`,
           "aria-expanded": active ? "true" : "false", "data-focus-key": `join:${key}` },
         on: { click: (e) => { e.stopPropagation(); this.openedJoin = active ? null : { wall: wall.id, other: join.other, endpoint: join.endpoint }; this.draw(); } } });
-        icon.style.left = `${x}px`; icon.style.top = `${y}px`;
+        // Keep the actual corner free for its square endpoint grip and
+        // overlapping-element selection. The connection button is a nearby
+        // contextual affordance, not a pointer blocker on top of geometry.
+        icon.style.left = `${Math.max(16, Math.min(this.width - 16, x + 21))}px`;
+        icon.style.top = `${Math.max(16, Math.min(this.height - 16, y - 21))}px`;
         this.junctionControls.appendChild(icon);
         if (!active) continue;
         const menu = h("div", { class: "junction-menu", attrs: { role: "group", "aria-label": "Wall corner connection type" } });

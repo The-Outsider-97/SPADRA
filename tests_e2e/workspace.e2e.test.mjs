@@ -162,10 +162,10 @@ describe("levels, families and reports", () => {
     await page.getByRole("button", { name: "Make report" }).click();
     const view = page.getByRole("dialog", { name: "Handover status" });
     await view.waitFor({ timeout: 20000 });
-    const text = await view.getByLabel("Text of Handover status").innerText();
+    const text = await view.locator(".report-preview").innerText();
     assert.match(text, /Project and model summary/);
     assert.match(text, /What this check does not do/);
-    await view.locator(".btn.primary").click(); await settle();
+    await view.getByRole("button", { name: "Close" }).click(); await settle();
     const entry = (await nodes()).find((n) => n.report);
     assert.ok(entry, "the report is in the Project Browser");
     await page.getByRole("treeitem", { name: /Handover status/ }).click({ button: "right" });

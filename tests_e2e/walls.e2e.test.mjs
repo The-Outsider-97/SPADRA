@@ -169,6 +169,7 @@ describe("walls at an angle in a browser", () => {
 
   it("requires Enter to commit a dimension; double-click alone cannot finalize", async () => {
     const canvas = page.locator(".view-canvas").first();
+    await page.getByRole("tab", { name: "Annotate", exact: true }).click(); await settle();
     await tool("Dimension"); await settle();
     const box = await canvas.boundingBox();
     const point = async (p) => {
