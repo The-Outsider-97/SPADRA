@@ -288,6 +288,10 @@ export class DrawingView {
     c.addEventListener("dblclick", (e) => {
       if (this.store.tool === "polyline" || this.store.tool === "floor" || this.store.tool === "roof" || this.store.tool === "room" || this.store.tool === "extrude" || this.store.tool === "void" || this.store.tool === "sweep") { void this.finish(true); return; }
       if (this.store.tool === "wall") { void this.finish(false); return; }
+      if (this.store.tool === "select" && e.shiftKey && !this.data?.projection) {
+        const wall = this.wallAt(this.toWorld(...this.local(e)));
+        if (wall) { e.preventDefault(); void this.store.select({ kind: "model", ids: this.connectedWalls(wall) }); return; }
+      }
       const mark = this.store.tool === "select" ? this.markAt(this.toWorld(...this.local(e))) : null;       // double-click a section line to open that section
       if (mark) void this.store.openTab({ kind: "drawing", id: mark.id }, mark.name);
     });
@@ -451,8 +455,8 @@ export class DrawingView {
         if (await this.store.run("draw.circle", { drawing: view, center: last, radius: dist(last, p) })) this.pts = [];
         break;
       case "dimension":
-        if (this.pts.length < 2) { this.pts = [...this.pts, p]; break; }
-        if (await this.store.run("draw.dimension", { drawing: view, p1: this.pts[0], p2: this.pts[1], dimline_point: p })) this.pts = [];
+        // Only Enter commits: another pointer-up must never finalize a dimension.
+        if (this.pts.length < 2) this.pts = [...this.pts, p];
         break;
       case "text": {
         const value = await promptDialog({ title: "Add text", label: "Text", confirmLabel: "Place", maxLength: 500 });
@@ -745,6 +749,28 @@ export class DrawingView {
     return best;
   }
 
+  /** Walk the server's real wall-join graph, not coincident screen pixels.
+   *  The plan overlay contains only walls relevant to this view, so unrelated
+   *  levels and hidden geometry never enter the resulting selection. */
+  private connectedWalls(seed: string): string[] {
+    const graph = new Map<string, Set<string>>();
+    for (const wall of this.data?.model ?? []) if (wall.category === "wall") {
+      if (!graph.has(wall.id)) graph.set(wall.id, new Set());
+      for (const other of wall.joins ?? []) graph.get(wall.id)?.add(other);
+    }
+    for (const [id, neighbours] of graph) for (const other of neighbours) {
+      if (graph.has(other)) graph.get(other)?.add(id);
+    }
+    const seen = new Set<string>(), pending = [seed];
+    while (pending.length) {
+      const id = pending.pop() as string;
+      if (seen.has(id) || !graph.has(id)) continue;
+      seen.add(id);
+      for (const other of graph.get(id) ?? []) if (!seen.has(other)) pending.push(other);
+    }
+    return [...seen];
+  }
+
   /** The smallest closed shape (closed polyline or circle) that the point is on or inside. */
   private shapeAt(p: Pt): string | null {
     let best: string | null = null, bestArea = Infinity;
@@ -842,6 +868,21 @@ export class DrawingView {
     if (e.key === "-" && !e.ctrlKey && !e.metaKey) { e.preventDefault(); this.zoom(1 / 1.25); return; }
     if (e.key === "0" && !e.ctrlKey && !e.metaKey) { e.preventDefault(); this.fit(); return; }
     if (e.key === "Escape") { if (this.edit) { this.edit = null; this.anchor = null; this.draw(); } else if (this.grip) { this.grip = null; this.draw(); } else if (this.pts.length || this.target || this.tagOf) await this.finish(false); else this.store.setTool("select"); return; }
+    if (e.key === "Enter" && this.store.tool === "dimension") {
+      e.preventDefault();
+      if (this.pts.length === 2 && this.cursor && this.data) {
+        const [a, b] = this.pts as [Pt, Pt];
+        const p = this.cursor;
+        const offset = Math.abs((b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]));
+        if (offset < 1e-9) { toast("Move the cursor away from the measured line before confirming.", { kind: "info" }); return; }
+        if (await this.store.run("draw.dimension", { drawing: this.data.view.id, p1: a, p2: b, dimline_point: p })) this.pts = [];
+        this.updateHint(); this.draw();
+      }
+      return;
+    }
+    if (e.key === "Backspace" && this.store.tool === "dimension" && this.pts.length) {
+      e.preventDefault(); this.pts.pop(); this.updateHint(); this.draw(); return;
+    }
     if (e.key === "Enter" && (this.store.tool === "polyline" || this.store.tool === "floor" || this.store.tool === "roof" || this.store.tool === "room" || this.store.tool === "extrude" || this.store.tool === "void" || this.store.tool === "sweep")) { await this.finish(true); return; }
     if ((e.key === "c" || e.key === "C") && (this.store.tool === "polyline" || this.store.tool === "sweep") && this.pts.length > 2) { await this.finish(true, true); return; }
     const sel = this.store.selection;
@@ -1736,6 +1777,26 @@ export class DrawingView {
       else { const b = this.pts[1] as Pt; this.line(first, b); this.line(first, p); this.line(b, p); }
     }
     ctx.stroke();
+    if (tool === "dimension") {
+      // Temporary construction line: yellow is reserved for the active
+      // measurement guide; it is not a persistent SDRW entity.
+      ctx.save();
+      ctx.beginPath();
+      ctx.strokeStyle = "#FFD400"; ctx.lineWidth = 2; ctx.setLineDash([8, 4]);
+      if (this.pts.length === 1) this.line(first, p);
+      else {
+        const b = this.pts[1] as Pt;
+        const dx = b[0] - first[0], dy = b[1] - first[1];
+        const len = Math.hypot(dx, dy);
+        if (len > 1e-9) {
+          const nx = -dy / len, ny = dx / len;
+          const offset = (p[0] - first[0]) * nx + (p[1] - first[1]) * ny;
+          this.line([first[0] + nx * offset, first[1] + ny * offset],
+                    [b[0] + nx * offset, b[1] + ny * offset]);
+        }
+      }
+      ctx.stroke(); ctx.restore();
+    }
     const readout = this.previewReadout(first, p);
     if (readout) {
       const [sx, sy] = this.toScreen(p);
@@ -1798,7 +1859,7 @@ export class DrawingView {
       polyline: n ? "Pick the next point. Enter or double-click finishes, C closes it, Esc cancels." : "Pick the first point of the polyline.",
       rectangle: n ? "Pick the opposite corner." : "Pick the first corner.",
       circle: n ? "Pick a point on the circle." : "Pick the centre.",
-      dimension: n === 0 ? "Pick the first point to measure." : n === 1 ? "Pick the second point." : "Pick where the dimension line goes.",
+      dimension: n === 0 ? "Pick the first point to measure." : n === 1 ? "Pick the second point." : "Move the yellow guide to position the dimension. Enter confirms; Backspace removes a point; Esc cancels.",
       text: "Click where the text starts.",
       wall: n ? "Pick the next corner of the wall chain. Shift keeps it straight. Double-click, right-click or Esc ends." : "Pick the start of the wall. Walls snap to the ends and middles of other walls.",
       rotate: !this.turnable().length ? "Select what to rotate first, then choose Rotate." : n === 0 ? "Pick the centre of rotation." : n === 1 ? "Pick a point to start the turn from." : "Pick where that direction should end up.",
