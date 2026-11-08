@@ -215,17 +215,17 @@ describe("print", () => {
       `the PDF page is ${mm(widthPt).toFixed(0)} x ${mm(heightPt).toFixed(0)} mm, the paper ${sheetData.width} x ${sheetData.height}`);
     // Verify source drawing text and print isolation in the actual browser
     // rather than using an optional external PDF text extraction executable.
-    const sheetText = await page.locator(".sheet-wrap svg").innerText();
+    const sheetText = await page.locator(".sheet-wrap svg").textContent();
     assert.match(sheetText, /A101/, "the live sheet contains its number");
     assert.match(sheetText, /ground floor plan/i, "the live sheet contains its title");
     await page.emulateMedia({ media: "print" });
     const visibility = await page.evaluate(() => ({
-      sheet: getComputedStyle(document.querySelector(".sheet-wrap")).display,
-      browser: getComputedStyle(document.querySelector(".panel[aria-label='Project Browser']")).display,
+      sheet: getComputedStyle(document.querySelector(".sheet-wrap")).visibility,
+      browser: getComputedStyle(document.querySelector(".panel[aria-label='Project Browser']")).visibility,
     }));
     await page.emulateMedia({ media: null });
-    assert.notEqual(visibility.sheet, "none", "sheet remains printable");
-    assert.equal(visibility.browser, "none", "Project Browser is not in the printable page");
+    assert.equal(visibility.sheet, "visible", "sheet remains printable");
+    assert.equal(visibility.browser, "hidden", "Project Browser is not in the printable page");
   });
 
   it("raised no errors in the browser", () => {
