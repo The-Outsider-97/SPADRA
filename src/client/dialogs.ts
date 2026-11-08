@@ -330,6 +330,68 @@ export function modifierDialog(store: Store, operation: "boolean" | "chamfer" | 
       : "The native SGEO modifier remains editable and non-destructive. Only independent generic geometry is eligible."
     : "A native SDRW evaluation is committed as drawing geometry and can be undone." });
   box.append(note);
+  type Mesh = { vertices: number[][]; faces: number[][] };
+  type DrawingShape = { kind: string; geometry: Record<string, unknown> };
+  type Preview = { revision: number; before: Mesh | DrawingShape; after: Mesh | DrawingShape;
+    result: { diagnostics?: Record<string, unknown> } };
+  const visual = s("svg", { attrs: { viewBox: "0 0 300 200", role: "img", "aria-label": "Computed modifier geometry preview" },
+    css: { width: "100%", height: "200px", border: "1px solid var(--hairline)", background: "var(--surface)", borderRadius: "10px" } });
+  const status = h("p", { class: "muted", text: "Computing the modifier geometry from a scratch project…" });
+  box.append(visual, status);
+  let serial = 0, timeout: ReturnType<typeof setTimeout> | undefined;
+
+  const showPreview = (before: Mesh | DrawingShape, after: Mesh | DrawingShape): void => {
+    const projected = (mesh: Mesh): Array<[number, number]> => mesh.vertices.map(v =>
+      [(v[0] ?? 0) * 0.8660254 - (v[1] ?? 0) * 0.8660254,
+       ((v[0] ?? 0) + (v[1] ?? 0)) * 0.5 - (v[2] ?? 0)]);
+    const drawing = (shape: DrawingShape): { points: Array<[number, number]>; paths: number[][] } => {
+      const g = shape.geometry;
+      const coordinates = (raw: unknown): [number, number] =>
+        Array.isArray(raw) && raw.length === 2 ? [Number(raw[0]), Number(raw[1])] : [0, 0];
+      if (shape.kind === "line") return { points: [coordinates(g["start"]), coordinates(g["end"])], paths: [[0, 1]] };
+      if (shape.kind === "polyline") {
+        const points = (Array.isArray(g["points"]) ? g["points"] : []).map(coordinates);
+        return { points, paths: [points.map((_, i) => i).concat(g["closed"] ? [0] : [])] };
+      }
+      if (shape.kind === "circle") {
+        const center = coordinates(g["center"]), radius = Number(g["radius"]);
+        const points: Array<[number, number]> = Array.from({ length: 64 }, (_, i) => [
+          center[0] + radius * Math.cos(Math.PI * 2 * i / 64),
+          center[1] + radius * Math.sin(Math.PI * 2 * i / 64)]);
+        return { points, paths: [points.map((_, i) => i).concat([0])] };
+      }
+      if (shape.kind === "hatch") {
+        const points: Array<[number, number]> = [], paths: number[][] = [];
+        for (const loop of (Array.isArray(g["boundary"]) ? g["boundary"] : []) as Array<Record<string, unknown>>) {
+          if (loop["kind"] !== "polygon" || !Array.isArray(loop["points"])) continue;
+          const start = points.length;
+          points.push(...loop["points"].map(coordinates));
+          paths.push(Array.from({ length: points.length - start }, (_, i) => start + i).concat([start]));
+        }
+        return { points, paths };
+      }
+      return { points: [], paths: [] };
+    };
+    const renderData = (data: Mesh | DrawingShape) => {
+      if ("vertices" in data) return { points: projected(data),
+        paths: data.faces.slice(0, 2200).map(face => face.concat([face[0] ?? 0])) };
+      return drawing(data);
+    };
+    const b = renderData(before), a = renderData(after);
+    const all = [...b.points, ...a.points].filter(p => p.every(Number.isFinite));
+    if (!all.length) { visual.replaceChildren(); return; }
+    const minX = Math.min(...all.map(p => p[0])), maxX = Math.max(...all.map(p => p[0]));
+    const minY = Math.min(...all.map(p => p[1])), maxY = Math.max(...all.map(p => p[1]));
+    const scale = Math.min(272 / Math.max(1e-9, maxX - minX), 170 / Math.max(1e-9, maxY - minY));
+    const xy = (p: [number, number]): string => `${(150 + (p[0] - (minX + maxX) / 2) * scale).toFixed(2)},${(100 + (p[1] - (minY + maxY) / 2) * scale).toFixed(2)}`;
+    const add = (data: ReturnType<typeof renderData>, color: string, dash: string) => {
+      const path = data.paths.filter(indices => indices.length > 1 && indices.every(i => data.points[i]?.every(Number.isFinite)))
+        .map(indices => `M${indices.map(i => xy(data.points[i] as [number, number])).join("L")}`).join("");
+      if (!path) return null;
+      return s("path", { attrs: { d: path, fill: "none", stroke: color, "stroke-width": "1.1", "stroke-dasharray": dash } });
+    };
+    visual.replaceChildren(add(b, "#8796a5", "3,3"), add(a, "#2677c9", ""));
+  };
 
   const payload = (): Record<string, unknown> | null => {
     const finite = (field: HTMLInputElement | null): number => field ? Number(field.value) : NaN;
@@ -350,12 +412,41 @@ export function modifierDialog(store: Store, operation: "boolean" | "chamfer" | 
       ...(policy ? { policy: policy.value } : {}),
       ...(drawingId ? { drawing: drawingId } : {}) };
   };
-  openDialog({
+  const updatePreview = async (): Promise<boolean> => {
+    const ticket = ++serial;
+    const params = payload();
+    if (!params) { status.textContent = "Enter valid finite numbers before applying the modifier."; visual.replaceChildren(); return false; }
+    status.textContent = "Evaluating native geometry (read-only)…";
+    try {
+      const result = await store.api.post<Preview>("/modifier/preview", { kind: is3d ? "model" : "drawing", ...params });
+      if (ticket !== serial) return false;
+      if (result.revision !== store.project?.revision) {
+        status.textContent = "Project revision changed; recompute before applying."; return false;
+      }
+      showPreview(result.before, result.after);
+      status.textContent = `Verified scratch geometry: dashed = before, blue = after. ${JSON.stringify(result.result.diagnostics ?? {})}`;
+      return true;
+    } catch (error) {
+      if (ticket === serial) { visual.replaceChildren(); status.textContent = `Geometry refused: ${error instanceof Error ? error.message : String(error)}`; }
+      return false;
+    }
+  };
+  const refresh = (): void => {
+    if (timeout) clearTimeout(timeout);
+    timeout = setTimeout(() => { void updatePreview(); }, 180);
+  };
+  box.querySelectorAll("input,select").forEach(control => {
+    control.addEventListener("input", refresh); control.addEventListener("change", refresh);
+  });
+  const handle = openDialog({
     title: `${operation[0]?.toUpperCase()}${operation.slice(1)} geometry`,
-    size: "narrow", body: box,
+    size: "normal", body: box,
     actions: [{ label: "Apply modifier", kind: "primary", run: async () => {
+      if (timeout) clearTimeout(timeout);
+      const ok = await updatePreview();
+      if (!ok) { toast("Correct the geometry preview error before applying this modifier.", { kind: "error" }); return undefined; }
       const params = payload();
-      if (!params) { toast("Modifier parameters must be finite numbers.", { kind: "error" }); return undefined; }
+      if (!params) return undefined;
       const done = await store.run(is3d ? "model.modifier" : "draw.modifier", params);
       if (!done) return undefined;
       const result = done.result as { id?: string; mode?: string; diagnostics?: Record<string, unknown> };
@@ -367,4 +458,6 @@ export function modifierDialog(store: Store, operation: "boolean" | "chamfer" | 
       return true;
     } }],
   });
+  void updatePreview();
+  void handle.result.then(() => { serial++; if (timeout) clearTimeout(timeout); });
 }
