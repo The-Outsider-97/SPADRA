@@ -1406,6 +1406,49 @@ class _Commands:
         return out
 
     @staticmethod
+    @command(_drawing_target("Apply SDRW modifier"))
+    def draw__modifier(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Evaluate a native SDRW operation and commit the derived drawing geometry.
+
+        This is deliberately destructive: SDRW kind changes (line -> polyline,
+        closed region -> hatch) cannot be saved with update() on the same kind.
+        The project transaction supplies undo/redo and preserves source
+        snapshots. Native evaluation refuses invalid or unsupported operands.
+        """
+        doc = project.drawing(p["drawing"])
+        operation = choice_of(p.get("operation"), ("boolean", "chamfer", "bend"), "modifier")
+        oid = text(p.get("id"), "id", 80)
+        source = doc.get(oid)
+        parameters = p.get("parameters")
+        if not isinstance(parameters, dict):
+            raise BadRequest("Modifier parameters must be an object")
+        operands = [text(p.get("operand"), "operand", 80)] if operation == "boolean" else []
+        if operands and (operands[0] == oid or doc.get(operands[0]) is None):
+            raise BadRequest("The Boolean operand must be another drawing entity")
+        policy = p.get("policy", "tolerance_controlled" if operation == "boolean" else
+                       "display_only" if operation == "bend" else "exact")
+        mid = doc.add_modifier(oid, kind="sdrw." + operation, operands=operands,
+                               parameters=parameters, evaluation_policy={"mode": policy})
+        report = next(row for row in doc.evaluate_modifiers() if row["modifier_id"] == mid)
+        if report["status"] != "ok" or report["result"] is None:
+            raise BadRequest("The modifier produced empty geometry; nothing was changed")
+        output = report["result"]
+        doc.remove_modifier(mid)
+        if output["kind"] == source["kind"]:
+            doc.update(oid, geometry=output["geometry"])
+            result_id = oid
+        elif output["kind"] == "hatch":
+            result_id = doc.add_hatch(output["geometry"]["boundary"], pattern="solid", layer=source["layer"])
+        elif output["kind"] == "polyline":
+            result_id = doc.add_polyline(output["geometry"]["points"], closed=output["geometry"].get("closed", False),
+                                         layer=source["layer"])
+            doc.remove([oid])
+        else:
+            raise BadRequest(f"Cannot store a {output['kind']} as editable SDRW geometry")
+        return {"id": result_id, "source": oid, "modifier": operation,
+                "mode": "baked", "diagnostics": report.get("diagnostics", {})}
+
+    @staticmethod
     @command(_drawing_target("Mirror"))
     def draw__mirror(project: Project, p: dict[str, Any]) -> dict[str, Any]:
         """Reflect entities across the line through ``p1`` and ``p2``; ``copy`` keeps the originals (the default)."""
@@ -1809,6 +1852,72 @@ class _Commands:
     def model__add_sweep(project: Project, p: dict[str, Any]) -> dict[str, Any]:
         """A profile swept along the plan path ``points`` (drawing units): ``shape`` with ``width``/``height`` in mm, or a ``section`` of [u, v] metres."""
         return {"id": FX.add_sweep(project, p, MM_PER[project.manifest["unit"]] / 1000.0)}
+
+    @staticmethod
+    @command(_model_target("Apply SGEO modifier"))
+    def model__modifier(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Use the SLAI SGEO modifier kernel, preserving a non-destructive DAG.
+
+        Semantically constrained BIM elements cannot be modified free-form
+        without invalidating their host, dimensions or construction layers.
+        They must first be converted through an explicit, supported workflow.
+        Weld and subdivision use existing mesh kernels and are explicitly
+        committed as destructive mesh edits; both remain undoable.
+        """
+        operation = choice_of(p.get("operation"),
+                              ("boolean", "chamfer", "bend", "split", "weld", "subdivision"),
+                              "modifier")
+        oid = text(p.get("id"), "id", 80)
+        source = project.model.get(oid)
+        meta = source.get("metadata", {})
+        cat = E.m(meta, "category")
+        if cat not in (None, "generic") or E.m(meta, "family") or source.get("parent"):
+            raise BadRequest("Free-form modifiers require independent generic geometry",
+                             hint="Use the BIM element's parametric Properties, or an explicit geometry conversion that releases its host relationships")
+        if source.get("geometry") is None:
+            raise BadRequest("Choose a solid or mesh with real geometry")
+        parameters = p.get("parameters")
+        if not isinstance(parameters, dict):
+            raise BadRequest("Modifier parameters must be an object")
+        if operation in ("weld", "subdivision"):
+            from src.utils.spatial_formats.sgeo.meshing import weld_vertices
+            from src.utils.spatial_formats.sgeo.modifier_ops import _subdivide_conforming
+            geometry = source["geometry"]
+            if operation == "weld":
+                if geometry["kind"] != "mesh":
+                    raise BadRequest("Weld requires an indexed triangle mesh")
+                decimals = parameters.get("decimals")
+                if decimals is not None and (type(decimals) is not int or not 0 <= decimals <= 15):
+                    raise BadRequest("Weld decimals must be an integer between 0 and 15")
+                result, dropped = weld_vertices(geometry, decimals=decimals)
+                diagnostics = {"backend": "SGEO vertex welding", "dropped_faces": dropped, "approximate": decimals is not None}
+            else:
+                size = number(parameters.get("max_edge"), "maximum edge length (m)", 1e-5, 10000)
+                mesh = project.model.tessellate(oid)
+                vertices, faces = _subdivide_conforming(mesh["vertices"], mesh["faces"], max_edge=size)
+                result = {"kind": "mesh", "vertices": [list(v) for v in vertices],
+                          "faces": [list(f) for f in faces]}
+                diagnostics = {"backend": "conforming edge subdivision", "approximate": False,
+                               "vertices": len(vertices), "faces": len(faces)}
+            project.model.set_geometry(oid, result)
+            return {"id": oid, "operation": operation, "mode": "baked", "diagnostics": diagnostics}
+        operands = [text(p.get("operand"), "operand", 80)] if operation == "boolean" else []
+        if operands:
+            operand = project.model.get(operands[0])
+            if operands[0] == oid or operand.get("geometry") is None:
+                raise BadRequest("Select a distinct geometric Boolean operand")
+            other_meta = operand.get("metadata", {})
+            if E.m(other_meta, "category") not in (None, "generic") or E.m(other_meta, "family"):
+                raise BadRequest("Boolean operands cannot be parametrically constrained BIM elements")
+        policy = p.get("policy", "display_only" if operation == "bend" else "tolerance_controlled")
+        mid = project.model.add_modifier(oid, kind="sgeo." + operation,
+                                         operands=operands, parameters=parameters,
+                                         evaluation_policy={"mode": policy})
+        result = next(item for item in project.model.evaluate_modifiers() if item["modifier_id"] == mid)
+        if result["status"] != "ok" or not result["result"] or result["result"].get("geometry") is None:
+            raise BadRequest("The modifier produced empty geometry; no change was committed")
+        return {"id": oid, "modifier_id": mid, "operation": operation, "mode": "non_destructive",
+                "diagnostics": result.get("diagnostics", {})}
 
     @staticmethod
     @command(_model_target("Array elements"))
