@@ -1474,6 +1474,7 @@ class _Commands:
             result_id = oid
         elif output["kind"] == "hatch":
             result_id = doc.add_hatch(output["geometry"]["boundary"], pattern="solid", layer=source["layer"])
+            doc.remove([oid])  # Replace, do not leave the source region superposed on the Boolean result.
         elif output["kind"] == "polyline":
             result_id = doc.add_polyline(output["geometry"]["points"], closed=output["geometry"].get("closed", False),
                                          layer=source["layer"])
