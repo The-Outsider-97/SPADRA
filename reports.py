@@ -202,7 +202,7 @@ def build(project: Any, name: str, sections: list[str], *, author: str = "",
     return data, {"id": new_id(), "name": name, "author": author, "created": created,
                   "paper": paper, "orientation": orientation,
                   "revision": revision, "sections": sections, "bytes": len(data),
-                  "sha256": hashlib.sha256(data).hexdigest(), "blocks": len(body)}
+                  "sha256": hashlib.sha256(data).hexdigest(), "blocks": len([*cover, *toc, *body])}
 
 
 def create(project: Any, p: Mapping[str, Any]) -> dict[str, Any]:
