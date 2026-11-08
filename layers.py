@@ -78,7 +78,11 @@ def total(layers: Sequence[Mapping[str, Any]]) -> float:
 
 
 def _store(project: Any, oid: str, rows: list[dict[str, Any]]) -> None:
-    """Write the stack back: the element's thickness follows the layers, and its material is the first layer's."""
+    """Write validated layer functions and thickness through the shared model transaction."""
+    if E.category(project, oid) == "roof":
+        indices = [i for i, row in enumerate(rows) if row.get("role") == "core"]
+        if indices and indices != list(range(indices[0], indices[-1] + 1)):
+            raise BadRequest("Structural roof core layers must be contiguous")
     E._attach(project, oid, {"layers": [{k: v for k, v in r.items() if k != "offset"} for r in rows], "thickness": total(rows), "material": rows[0]["material"]})
 
 
@@ -221,9 +225,7 @@ def set_field(project: Any, oid: str, key: str, value: Any) -> None:
         if value not in LAYER_ROLES:
             raise BadRequest(f"Layer function must be one of {', '.join(LAYER_ROLES)}")
         row["role"] = str(value)
-        indices = [i for i, r in enumerate(rows) if r["role"] == "core"]
-        if indices and indices != list(range(indices[0], indices[-1] + 1)):
-            raise BadRequest("Structural roof core layers must be contiguous")
+
     elif field == "thickness":
         row["thickness"] = number(value, "thickness (mm)", 1, 5000) / 1000.0
     elif field == "openings":
