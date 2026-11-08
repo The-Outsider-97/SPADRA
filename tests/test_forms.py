@@ -520,6 +520,46 @@ class NativeModifierCommands(unittest.TestCase):
             coordinates = next(o for o in reopened.scene_data()["objects"] if o["id"] == left)["vertices"]
             self.assertAlmostEqual(max(v[0] for v in coordinates), 2.0, places=4)
 
+    def test_a_generic_family_instance_can_be_modified_without_losing_family_parameters(self):
+        definition = self.execute("family.define", name="Adjustable Block", shape="box",
+                                  parameters={"width": {"default": 2000},
+                                              "depth": {"default": 2000},
+                                              "height": {"default": 3000}})["id"]
+        level = self.p.manifest["levels"][0]["id"]
+        oid = self.execute("family.place", family=definition, level=level, point=[0, 0])["id"]
+        source = self.p.model.get(oid)
+        before_revision = self.p.revision
+        response = self.execute("model.modifier", id=oid, operation="split", policy="exact",
+                                parameters={"origin": [0, 0, 0], "normal": [1, 0, 0],
+                                            "side": "positive"})
+        self.assertEqual(response["mode"], "non_destructive")
+        self.assertIsNone(response["derived_from"])
+        self.assertEqual(self.p.revision, before_revision + 1)
+        self.assertEqual(self.p.model.get(oid)["family_id"], definition)
+        self.assertEqual(self.p.model.get(oid)["geometry"], source["geometry"])
+        self.assertEqual(len(self.p.model.modifiers()), 1)
+        self.p.undo()
+        self.assertEqual(self.p.model.get(oid)["family_id"], definition)
+        self.assertEqual(self.p.model.modifiers(), [])
+
+    def test_detached_copy_modifier_preserves_host_and_original_geometry(self):
+        level = self.p.manifest["levels"][0]["id"]
+        wall = self.execute("model.add_wall", level=level, start=[0, 0],
+                            end=[5000, 0], height=3, thickness=250)["id"]
+        before = self.p.model.get(wall)
+        answer = self.execute("model.modifier", operation="split", id=wall, policy="exact",
+                              independent_copy=True, parameters={
+                                  "origin": [0, 0, 1], "normal": [0, 0, 1],
+                                  "side": "positive"})
+        self.assertNotEqual(wall, answer["id"])
+        self.assertEqual(answer["derived_from"], wall)
+        self.assertEqual(self.p.model.get(wall), before)
+        self.assertEqual(E.category(self.p, answer["id"]), "generic")
+        self.assertEqual(len(self.p.model.modifiers()), 1)
+        self.p.undo()
+        self.assertEqual(self.p.model.get(wall), before)
+        self.assertFalse(self.p.model.modifiers())
+
     def test_semantically_hosted_wall_rejects_freeform_modification_atomically(self):
         level = self.p.manifest["levels"][0]["id"]
         wall = self.execute("model.add_wall", level=level, start=[0, 0],
