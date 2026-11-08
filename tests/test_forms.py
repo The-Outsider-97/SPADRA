@@ -453,5 +453,92 @@ class Arrays(Base):
         self.assertEqual(len(self.p.model.query_ids(limit=1000)), n)
 
 
+class NativeModifierCommands(unittest.TestCase):
+    """Regression tests for the existing SLAI SGEO/SDRW modifier integration."""
+
+    def setUp(self):
+        self.p = Project.create("Modifier checks")
+
+    def execute(self, op, **params):
+        return self.p.execute(op, params)["result"]
+
+    def generic_box(self, x=0.0):
+        return self.p.model.add_box(width=2, depth=2, height=2, position=(x, 0, 0), name="Independent solid")
+
+    def scene_bounds(self, oid):
+        obj = next(obj for obj in self.p.scene_data()["objects"] if obj["id"] == oid)
+        return ([min(v[i] for v in obj["vertices"]) for i in range(3)],
+                [max(v[i] for v in obj["vertices"]) for i in range(3)])
+
+    def test_exact_analytic_split_changes_view_not_authoritative_sgeo(self):
+        source = self.generic_box()
+        raw_geometry = self.p.model.get(source)["geometry"]
+        result = self.execute("model.modifier", id=source, operation="split",
+                              policy="exact", parameters={
+                                  "origin": [0, 0, 0], "normal": [1, 0, 0], "side": "positive"})
+        self.assertEqual(result["mode"], "non_destructive")
+        self.assertEqual(self.p.model.get(source)["geometry"], raw_geometry)
+        self.assertEqual(len(self.p.model.modifiers()), 1)
+        lo, hi = self.scene_bounds(source)
+        self.assertAlmostEqual(lo[0], 0.0, places=5)
+        self.assertAlmostEqual(hi[0], 1.0, places=5)
+        self.p.undo()
+        self.assertFalse(self.p.model.modifiers())
+        lo, hi = self.scene_bounds(source)
+        self.assertAlmostEqual(lo[0], -1.0, places=5)
+
+    def test_exact_box_boolean_and_save_reopen(self):
+        left, right = self.generic_box(0), self.generic_box(1)
+        result = self.execute("model.modifier", id=left, operation="boolean",
+                              operand=right, policy="exact",
+                              parameters={"operation": "union"})
+        self.assertEqual(result["diagnostics"]["approximate"], False)
+        self.assertGreater(self.scene_bounds(left)[1][0], 1)
+        with __import__("tempfile").TemporaryDirectory() as tmp:
+            target = __import__("pathlib").Path(tmp) / "modifiers.spadra"
+            self.p.save(target)
+            reopened = Project.open(target)
+            self.assertEqual(len(reopened.model.modifiers()), 1)
+            self.assertGreater(next(o for o in reopened.scene_data()["objects"] if o["id"] == left)["vertices"][-1][0], -2)
+
+    def test_semantically_hosted_wall_rejects_freeform_modification_atomically(self):
+        level = self.p.manifest["levels"][0]["id"]
+        wall = self.execute("model.add_wall", level=level, start=[0, 0],
+                            end=[5000, 0], height=3, thickness=250)["id"]
+        revision = self.p.revision
+        with self.assertRaises(BadRequest):
+            self.execute("model.modifier", id=wall, operation="split",
+                         parameters={"origin": [0, 0, 1], "normal": [0, 0, 1], "side": "positive"})
+        self.assertEqual(self.p.revision, revision)
+        self.assertFalse(self.p.model.modifiers())
+
+    def test_subdivision_bakes_derived_mesh_with_undo(self):
+        source = self.generic_box()
+        original = self.p.model.get(source)["geometry"]
+        self.execute("model.modifier", id=source, operation="subdivision",
+                     parameters={"max_edge": 0.7})
+        output = self.p.model.get(source)["geometry"]
+        self.assertEqual(output["kind"], "mesh")
+        self.assertGreater(len(output["faces"]), 12)
+        self.assertFalse(self.p.model.modifiers())
+        self.p.undo()
+        self.assertEqual(self.p.model.get(source)["geometry"], original)
+
+    def test_sdrw_chamfer_uses_native_kernel_and_is_undoable(self):
+        try:
+            import shapely  # noqa: F401
+        except ImportError:
+            self.skipTest("Native 2D chamfer requires the optional shapely backend")
+        view = next(v["id"] for v in self.p.manifest["views"] if v["kind"] == "plan")
+        source = self.p.drawing(view).add_polyline([[0, 0], [2000, 0], [2000, 2000]], closed=False)
+        original = self.p.drawing(view).get(source)["geometry"]
+        result = self.execute("draw.modifier", drawing=view, id=source, operation="chamfer",
+                              parameters={"amount": 100, "depth": 100, "segments": 1}, policy="exact")
+        self.assertEqual(result["id"], source)
+        self.assertGreater(len(self.p.drawing(view).get(source)["geometry"]["points"]), 3)
+        self.p.undo()
+        self.assertEqual(self.p.drawing(view).get(source)["geometry"], original)
+
+
 if __name__ == "__main__":
     unittest.main()
