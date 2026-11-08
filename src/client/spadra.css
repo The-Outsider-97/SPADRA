@@ -364,6 +364,7 @@ table.schedule tfoot td { font-weight: 700; border-top: 2px solid var(--ink); bo
 .report-table th, .report-table td { border: .2mm solid #b4bdc4; padding: 1.4mm; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
 .report-table th { background: #edf1f4; color: #182b3c; }
 .report-table td:not(:first-child) { font-variant-numeric: tabular-nums; }
+.report-table td.report-numeric { text-align: right; font-variant-numeric: tabular-nums; }
 .report-footer { position: absolute; bottom: 8mm; left: 15mm; right: 15mm; border-top: .2mm solid #bfcbd2;
   padding-top: 2mm; font-size: 8pt; color: #536775; display: flex; justify-content: space-between; gap: 5mm; }
 .report-cover-content { display: grid; justify-items: center; align-content: center; text-align: center; height: 100%; gap: 6mm; }
