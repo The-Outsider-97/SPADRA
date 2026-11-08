@@ -10,6 +10,8 @@ Browser; making or deleting one is a project command, so it is undoable like any
 from __future__ import annotations
 
 import hashlib
+import secrets
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
@@ -41,8 +43,8 @@ def _table(headers: list[str], rows: list[list[Any]], caption: str = "") -> dict
     return S.make_table([headers] + [[_cell(c) for c in row] for row in rows], header_rows=1, caption=caption)
 
 
-def _heading(label: str, level: int = 2) -> dict[str, Any]:
-    return S.make_block("heading", label, attributes={"level": level})
+def _heading(label: str, level: int = 1) -> dict[str, Any]:
+    return S.make_block("heading", label, attributes={"level": level, "page_break_before": True})
 
 
 def _para(label: str) -> dict[str, Any]:
@@ -66,7 +68,7 @@ def _blocks(project: Any, sections: list[str]) -> list[dict[str, Any]]:
                 _table(["Item", "Value"], [["Project", project.name], ["Client", m.get("client", "") or "-"], ["Project number", m.get("number", "") or "-"], ["Unit", m["unit"]],
                                            ["Model revision", project.revision], ["Description", m.get("description", "") or "-"]])]
         count = D.schedule_data(project, "count")
-        out += [_heading("Elements", 3), _schedule_table(count) if count["rows"] else _para("The model has no elements yet.")]
+        out += [_heading("Elements", 2), _schedule_table(count) if count["rows"] else _para("The model has no elements yet.")]
     if "levels" in sections:
         from . import datums as DT
         out += [_heading(SECTIONS["levels"]),
@@ -78,7 +80,7 @@ def _blocks(project: Any, sections: list[str]) -> list[dict[str, Any]]:
             out.append(_para("The project has no schedules. Add one from the Project Browser."))
         for v in views:
             data = D.schedule_data(project, v["category"])
-            out += [_heading(data["title"], 3), _schedule_table(data) if data["rows"] else _para("This schedule is empty.")]
+            out += [_heading(data["title"], 2), _schedule_table(data) if data["rows"] else _para("This schedule is empty.")]
     if "materials" in sections:
         data = D.schedule_data(project, "material")
         out += [_heading(SECTIONS["materials"]), _schedule_table(data) if data["rows"] else _para("The model has no geometry to measure."), _para(data["note"])]
@@ -95,7 +97,7 @@ def _blocks(project: Any, sections: list[str]) -> list[dict[str, Any]]:
             out.append(_table(["Number", "Name", "Paper", "Revision", "Status", "Since last issue", "Changed", "Views"], rows))
             for sheet in m["sheets"]:
                 if sheet["revisions"]:
-                    out += [_heading(f"{sheet['number']} {sheet['name']}".strip(), 3), _table(["Revision", "Date", "Description", "By", "Model revision"],
+                    out += [_heading(f"{sheet['number']} {sheet['name']}".strip(), 2), _table(["Revision", "Date", "Description", "By", "Model revision"],
                                                                                            [[r["rev"], r["date"], r["description"], r["by"], r["model_revision"]] for r in sheet["revisions"]])]
     if "checks" in sections:
         result = project.check()
@@ -105,7 +107,7 @@ def _blocks(project: Any, sections: list[str]) -> list[dict[str, Any]]:
             out.append(_table(["Severity", "Category", "Finding"], [[i["severity"], i.get("category", ""), i["message"]] for i in shown]))
             if len(result["issues"]) > len(shown):
                 out.append(_para(f"{len(result['issues']) - len(shown)} further finding(s) are not listed."))
-        out += [_heading("What this check does not do", 3)] + [S.make_block("list_item", t) for t in result["limitations"]]
+        out += [_heading("What this check does not do", 2)] + [S.make_block("list_item", t) for t in result["limitations"]]
     if "requirements" in sections:
         from . import requirements as RQ
         ils = RQ.ils_report(project)
@@ -113,13 +115,13 @@ def _blocks(project: Any, sections: list[str]) -> list[dict[str, Any]]:
         if not ils["enabled"] and not RQ.listing(project):
             out.append(_para("No information requirements are active: the BIM basis ILS is off and the project holds no IDS file."))
         if ils["enabled"]:
-            out += [_heading(f"BIM basis ILS - {ils['edition']}", 3),
+            out += [_heading(f"BIM basis ILS - {ils['edition']}", 2),
                     _table(["Requirement", "Source", "Grade", "Applies to", "Met", "Not met"],
                            [[f"{r['id']} {r['title']}", r["source"], r["severity"] if r["enabled"] else "off", r["applicable"], r["passed"], r["failed"]] for r in ils["rules"]]),
                     _para(ils["note"])]
         for entry in RQ.listing(project):
             res = RQ.ids_report(project, entry["id"])
-            out.append(_heading(f"IDS - {entry['title']} ({entry['filename']})", 3))
+            out.append(_heading(f"IDS - {entry['title']} ({entry['filename']})", 2))
             if not res["result"]:
                 out.append(_para("This IDS file has not been validated yet."))
                 continue
@@ -129,19 +131,109 @@ def _blocks(project: Any, sections: list[str]) -> list[dict[str, Any]]:
     return out
 
 
-def build(project: Any, name: str, sections: list[str]) -> tuple[bytes, dict[str, Any]]:
-    """The report as SLDC bytes, validated by the SLDC writer, and the entry that describes it."""
-    blocks = [_heading(name, 1), _para(f"Made {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} from model revision {project.revision} of {project.name}. "
-                                       "A report is a snapshot: later changes to the project are not in it.")] + _blocks(project, sections)
+def _page_spec(paper: str, orientation: str) -> dict[str, Any]:
+    """One physical page definition shared by the native SLDC and print preview."""
+    if paper not in ("A5", "A4", "A3", "B5", "Letter", "Legal", "Tabloid"):
+        raise BadRequest("Unsupported report paper size")
+    if orientation not in ("portrait", "landscape"):
+        raise BadRequest("Report orientation must be portrait or landscape")
+    return {"size": paper, "orientation": orientation,
+            "margins_mm": {"left": 15, "right": 15, "top": 20, "bottom": 20}}
+
+
+def build(project: Any, name: str, sections: list[str], *, author: str = "",
+          paper: str = "A4", orientation: str = "portrait") -> tuple[bytes, dict[str, Any]]:
+    """Create an editable, semantically paginated SLDC report of one model revision.
+
+    Cover and front matter have their own unnumbered native sections. The body
+    section owns its numbering and footer; its headings have real page breaks.
+    TOC entries reference stable heading IDs, so an SLDC-aware editor can
+    regenerate destinations if the report is edited later.
+    """
+    page = _page_spec(paper, orientation)
+    created = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    revision = project.revision
+    body = _blocks(project, sections)
+    styles = {"paragraph": {
+        "report_body": {"font_family": "Arial", "font_size_pt": 10, "line_height": 1.45,
+                        "space_after_pt": 7},
+        "report_h1": {"based_on": "report_body", "font_size_pt": 17, "bold": True,
+                      "color": "#172B3D", "keep_with_next": True, "space_after_pt": 14},
+        "report_h2": {"based_on": "report_body", "font_size_pt": 14, "bold": True,
+                      "color": "#172B3D", "keep_with_next": True, "space_after_pt": 11},
+        "report_h3": {"based_on": "report_body", "font_size_pt": 11, "bold": True,
+                      "color": "#172B3D", "keep_with_next": True, "space_after_pt": 9},
+        "cover_brand": {"based_on": "report_body", "font_size_pt": 29, "bold": True,
+                        "align": "center", "color": "#172B3D", "space_before_pt": 18},
+        "cover_tagline": {"based_on": "report_body", "font_size_pt": 11,
+                          "align": "center", "color": "#597083", "space_after_pt": 26},
+        "cover_title": {"based_on": "report_body", "font_size_pt": 20, "bold": True,
+                        "align": "center", "color": "#172B3D", "space_after_pt": 20},
+        "cover_meta": {"based_on": "report_body", "font_size_pt": 10, "align": "center",
+                       "color": "#536775", "space_after_pt": 8},
+        "toc_title": {"based_on": "report_body", "font_size_pt": 17, "bold": True,
+                      "color": "#172B3D", "space_after_pt": 16},
+        "toc_h1": {"based_on": "report_body", "bold": True, "space_after_pt": 5},
+        "toc_h2": {"based_on": "report_body", "indent_mm": 5, "space_after_pt": 5},
+        "toc_h3": {"based_on": "report_body", "indent_mm": 10, "space_after_pt": 5},
+        "report_footer": {"based_on": "report_body", "font_size_pt": 8, "color": "#536775"},
+    }}
+    for item in body:
+        item["section"] = "body"
+        if item["type"] == "heading":
+            item["id"] = S.new_block_id()
+            item["style"] = "report_h" + str(item["attributes"]["level"])
+        elif item["type"] in ("paragraph", "list_item"):
+            item["style"] = "report_body"
+    headings = [b for b in body if b["type"] == "heading" and 1 <= b["attributes"]["level"] <= 3]
+    toc_id = secrets.token_hex(12)
+    toc = [S.make_block("paragraph", "Table of Contents", section="front", style="toc_title",
+                        extensions={"slai.sldc.toc": {"id": toc_id, "role": "title",
+                                                     "depth": 3, "show_page_numbers": True,
+                                                     "leader_dots": True, "refresh_mode": "automatic"}})]
+    toc.extend(S.make_block("paragraph", item["text"], section="front",
+                            style="toc_h" + str(item["attributes"]["level"]),
+                            extensions={"slai.sldc.toc": {"id": toc_id, "role": "entry",
+                                                         "heading": item["id"], "level": item["attributes"]["level"],
+                                                         "source_text": item["text"]}})
+               for item in headings)
+    logo_bytes = (Path(__file__).parent / "assets" / "img" / "spadra_main.png").read_bytes()
+    asset = S.make_asset(logo_bytes)
+    cover = [
+        dict(S.make_figure(asset, "SPADRA official logo", width_mm=36, align="center"), section="cover"),
+        S.make_block("paragraph", "SPADRA", section="cover", style="cover_brand"),
+        S.make_block("paragraph", "Intelligent CAD, BIM & Engineering powered by SLAI", section="cover", style="cover_tagline"),
+        S.make_block("paragraph", name, section="cover", style="cover_title"),
+        S.make_block("paragraph", f"Made by {author or '—'}", section="cover", style="cover_meta"),
+        S.make_block("paragraph", created.replace("T", " "), section="cover", style="cover_meta"),
+    ]
+    metadata = {"project": project.name, "model_revision": str(revision),
+                "sections": ",".join(sections), "author": author,
+                "created": created, "paper": paper, "orientation": orientation}
+    native_sections = [
+        {"id": "cover", "role": "cover", "page": page, "numbering": {"show": False}},
+        {"id": "front", "role": "front_matter", "page": page, "numbering": {"show": False}},
+        {"id": "body", "role": "body", "page": page,
+         "numbering": {"show": True, "start": 1, "format": "decimal"},
+         "footer": {"left": name, "right": "Page {page} of {pages}", "style": "report_footer"}},
+    ]
     try:
-        package = S.new_package(name, blocks, metadata={"project": project.name, "model_revision": str(project.revision), "sections": ",".join(sections)})
+        package = S.new_package(name, [*cover, *toc, *body],
+                                metadata=metadata, publication={"authors": [author] if author else [],
+                                "published": created, "cover_asset": asset.id},
+                                sections=native_sections, styles=styles, assets=[asset])
+        # Managed native ToC and cover roles are SLDC 1.1 features. The
+        # 1.0 package writer correctly refuses them unless upgraded explicitly.
+        package.version = "1.1.0"
         data = S.dumps_package(package)
-    except S.SLDCError as exc:
+    except (S.SLDCError, OSError) as exc:
         raise BadRequest(f"The report could not be written: {exc}") from exc
     if len(data) > MAX_REPORT_BYTES:
         raise LimitExceeded("The report is too large; choose fewer sections")
-    return data, {"id": new_id(), "name": name, "created": datetime.now(timezone.utc).isoformat(timespec="seconds"), "revision": project.revision, "sections": sections,
-                  "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(), "blocks": len(blocks)}
+    return data, {"id": new_id(), "name": name, "author": author, "created": created,
+                  "paper": paper, "orientation": orientation,
+                  "revision": revision, "sections": sections, "bytes": len(data),
+                  "sha256": hashlib.sha256(data).hexdigest(), "blocks": len([*cover, *toc, *body])}
 
 
 def create(project: Any, p: Mapping[str, Any]) -> dict[str, Any]:
@@ -155,7 +247,10 @@ def create(project: Any, p: Mapping[str, Any]) -> dict[str, Any]:
     name = text(p.get("name") or f"{project.name} report {len(entries) + 1}", "name", 80)
     if any(e["name"].lower() == name.lower() for e in entries):
         raise Conflict(f"A report called '{name}' already exists")
-    data, entry = build(project, name, sections)
+    author = text(p.get("author") or project.manifest.get("author") or "", "author", 200, empty=True)
+    paper = text(p.get("paper") or "A4", "paper", 20)
+    orientation = text(p.get("orientation") or "portrait", "orientation", 20)
+    data, entry = build(project, name, sections, author=author, paper=paper, orientation=orientation)
     entries.append(entry)
     project.reports[entry["id"]] = data
     return {"id": entry["id"], "bytes": entry["bytes"]}
@@ -186,6 +281,8 @@ def view(project: Any, report_id: Any) -> dict[str, Any]:
     data, entry = read(project, report_id)
     try:
         package = S.loads_package(data)
-        return {"report": entry, "container": S.inspect_package(data), "markdown": S.to_markdown(package)}
+        return {"report": entry, "container": S.inspect_package(data), "markdown": S.to_markdown(package),
+                "document": {"blocks": package.document["blocks"], "sections": package.document.get("sections", []),
+                             "metadata": package.document.get("metadata", {})}}
     except S.SLDCError as exc:
         raise BadRequest(f"The stored report cannot be read: {exc}") from exc
