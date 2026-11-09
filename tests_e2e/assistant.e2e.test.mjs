@@ -3,7 +3,7 @@
 // The assistant itself needs no agent. Agent-backed dialogs skip (never fake) where their agents are not importable.
 import { after, before, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
@@ -85,7 +85,10 @@ after(async () => {
     await new Promise((resolve) => {
       const timer = setTimeout(resolve, 5000);
       server.once("exit", () => { clearTimeout(timer); resolve(); });
-      server.kill();
+      // On Windows the server may be a launcher with the real interpreter as its child; killing only the launcher leaves the child holding files in dataDir
+      // (the temp folder then cannot be removed: EPERM). `taskkill /t` ends the whole tree.
+      if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(server.pid), "/t", "/f"], { stdio: "ignore" });
+      else server.kill();
     });
   }
   if (dataDir) rmSync(dataDir, { recursive: true, force: true, maxRetries: 12, retryDelay: 250 });

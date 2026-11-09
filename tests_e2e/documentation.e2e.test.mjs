@@ -62,6 +62,15 @@ const pixel = (p) => canvas().evaluate((el, q) => {
   return [d[0], d[1], d[2]];
 }, p);
 const luma = ([r, g, b]) => (r + g + b) / 3;
+/** The darkest pixel (as brightness) in a square of ``r`` pixels either side of a world point. */
+const darkestAround = (p, r = 12) => canvas().evaluate((el, [q, r]) => {
+  const [x, y] = el.spadraView.screenOf(q), dpr = window.devicePixelRatio || 1;
+  const px = Math.max(0, Math.round(x * dpr) - r), py = Math.max(0, Math.round(y * dpr) - r);
+  const d = el.getContext("2d").getImageData(px, py, 2 * r + 1, 2 * r + 1).data;
+  let darkest = 255;
+  for (let i = 0; i < d.length; i += 4) darkest = Math.min(darkest, ((d[i] ?? 255) + (d[i + 1] ?? 255) + (d[i + 2] ?? 255)) / 3);
+  return darkest;
+}, [p, r]);
 
 let walls = [], ids = {};
 
@@ -149,7 +158,9 @@ describe("sections, elevations and schedules in a browser", () => {
     const southWall = data.projection.items.find((i) => i.id === walls[0]);
     const loop = southWall.cut[0];
     const cx = loop.reduce((a, p) => a + p[0], 0) / loop.length, cy = loop.reduce((a, p) => a + p[1], 0) / loop.length;
-    assert.ok(luma(await pixel([cx, cy - 1])) < 90, "the cut wall is filled with ink");
+    // A cut can be hatched (thin antialiased lines with paper between them), so the cut is ink if some pixel around its middle is clearly darker than paper (255),
+    // not if the one pixel at the centre is dark.
+    assert.ok(await darkestAround([cx, cy]) < 140, "the cut wall is drawn in ink (solid, or the lines of its hatch)");
     const [[x0], [x1]] = data.projection.bounds;
     assert.ok(luma(await pixel([(x0 + x1) / 2, 1500])) > 200, "the inside of the room is open");
   });
@@ -247,7 +258,9 @@ describe("sections, elevations and schedules in a browser", () => {
       await page.getByRole("menuitem", { name: label, exact: true }).click(); await settle();
     }
     const svg = page.locator(".sheet-wrap svg");
-    await svg.locator("[data-viewport]").nth(3).waitFor();                       // the last view takes a moment to be drawn; count only once it is there
+    // The last view takes a moment to be drawn. Each viewport is two nested elements with the same id, so waiting for a fourth *element* returns while only two
+    // viewports are there: wait until four different viewport ids exist.
+    await page.waitForFunction(() => new Set([...document.querySelectorAll(".sheet-wrap svg [data-viewport]")].map((n) => n.getAttribute("data-viewport"))).size >= 4);
     // Each viewport has an outer and inner SVG group with the same ID; count actual viewports, not DOM wrappers.
     const placedIds = await svg.locator("[data-viewport]").evaluateAll(nodes => [...new Set(nodes.map(node => node.getAttribute("data-viewport")))]);
     assert.equal(placedIds.length, 4);
@@ -313,8 +326,17 @@ describe("sections, elevations and schedules in a browser", () => {
     const section = await api(`/drawing/${await viewId("Cross section")}`);
     const floor = section.projection.items.find((item) => item.category === "floor" && item.cut.length);
     assert.ok(floor, "the section has a cut through the floor");
-    const middle = (points) => [points.reduce((sum, p) => sum + p[0], 0) / points.length, points.reduce((sum, p) => sum + p[1], 0) / points.length];
-    await clickWorld(middle(floor.cut[0]));
+    // A point that is really inside the cut. The average of a loop's corners is not: for a roof cut (a thick chevron) it falls in the empty space under the ridge.
+    const insideOf = (loop) => {
+      const crosses = ([x, y]) => loop.reduce((n, [x1, y1], i) => { const [x2, y2] = loop[(i + 1) % loop.length]; return n + ((y1 > y) !== (y2 > y) && x < x1 + ((y - y1) * (x2 - x1)) / (y2 - y1) ? 1 : 0); }, 0) % 2 === 1;
+      const clearance = ([x, y]) => Math.min(...loop.map(([x1, y1], i) => { const [x2, y2] = loop[(i + 1) % loop.length]; const dx = x2 - x1, dy = y2 - y1, t = Math.max(0, Math.min(1, ((x - x1) * dx + (y - y1) * dy) / (dx * dx + dy * dy || 1))); return Math.hypot(x - x1 - t * dx, y - y1 - t * dy); }));
+      const candidates = [];
+      for (let i = 0; i < loop.length; i++) for (let j = i + 1; j < loop.length; j++) candidates.push([(loop[i][0] + loop[j][0]) / 2, (loop[i][1] + loop[j][1]) / 2]);
+      const inside = candidates.filter(crosses).sort((u, v) => clearance(v) - clearance(u));
+      assert.ok(inside.length, "the cut has an inside to click");
+      return inside[0];
+    };
+    await clickWorld(insideOf(floor.cut[0]));
     await page.getByRole("button", { name: "Add top floor layer" }).waitFor();
     await page.getByRole("button", { name: "Add bottom floor layer" }).waitFor();
 
@@ -326,7 +348,7 @@ describe("sections, elevations and schedules in a browser", () => {
       const data = await api(`/drawing/${await viewId(label)}`);
       const roof = data.projection.items.find((item) => item.category === "roof" && (item.cut.length || item.tris.length));
       assert.ok(roof, `${label} has real projected roof geometry`);
-      const point = roof.cut[0]?.length ? middle(roof.cut[0]) : middle([[roof.tris[0][0], roof.tris[0][1]], [roof.tris[0][2], roof.tris[0][3]], [roof.tris[0][4], roof.tris[0][5]]]);
+      const point = roof.cut[0]?.length ? insideOf(roof.cut[0]) : [(roof.tris[0][0] + roof.tris[0][2] + roof.tris[0][4]) / 3, (roof.tris[0][1] + roof.tris[0][3] + roof.tris[0][5]) / 3];
       // Roof and fascia may occupy the same projected surface. Clicking the
       // same point cycles the overlap stack; do not assume the first hit wins.
       for (let attempt = 0; attempt < 8; attempt++) {

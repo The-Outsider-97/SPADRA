@@ -209,7 +209,7 @@ describe("project properties, backups and recovery", () => {
     assert.ok(targets.length);
     for (const target of targets)
       assert.equal(await dialog.locator("[id='" + target + "']").count(), 1);
-    await dialog.getByRole("button", { name: "Close" }).click(); await settle();
+    await dialog.locator("button.btn", { hasText: "Close" }).click(); await settle();               // the footer button (the header has an icon button of the same name)
   });
 
   it("had no console errors or page errors", () => { assert.deepEqual(problems, []); });

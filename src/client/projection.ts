@@ -127,11 +127,12 @@ export function cutPath(item: ProjItem, map: (p: Pt) => Pt): string {
   return item.cut.map((loop) => loop.map((p, i) => { const q = map(p); return `${i ? "L" : "M"}${r(q[0])} ${r(q[1])}`; }).join("") + "Z").join("");
 }
 
-/** How a cut material is drawn in a section: fill opacity and the hatch laid over it (concrete diagonal, insulation crossed, granular fill dotted). */
+/** How a cut material is drawn in a section: fill opacity and the hatch laid over it (concrete diagonal, reinforced concrete heavier and crossed, insulation crossed, granular fill dotted). */
 export function cutStyle(material: string): { alpha: number; hatch: "diag" | "cross" | "dots" | "none" } {
   const m = material.toLowerCase();
   if (/(eps|xps|pir|mineral wool|foam glass|insulation)/.test(m)) return { alpha: 0.06, hatch: "cross" };
   if (/(sand|gravel|fill)/.test(m)) return { alpha: 0.12, hatch: "dots" };
+  if (/reinforced/.test(m)) return { alpha: 0.6, hatch: "cross" };                      // declared bars: a darker, crossed hatch than plain concrete
   if (/(concrete|masonry)/.test(m)) return { alpha: 0.45, hatch: "diag" };
   return { alpha: 0.28, hatch: "none" };
 }

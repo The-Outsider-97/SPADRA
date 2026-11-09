@@ -215,6 +215,10 @@ describe("SPADRA in a browser", () => {
     const command = await api("/command", { method: "POST", body: JSON.stringify({ op: "sheet.set_viewport", params: { id: sheetId, viewport: original.id, key: "position", value: [original.x, original.y] } }) });
     assert.ok(command, "numeric position command responded");
     assert.deepEqual([(await api(`/sheet/${sheetId}`)).viewports[0].x, (await api(`/sheet/${sheetId}`)).viewports[0].y], [original.x, original.y]);
+    // That command went to the server directly, so the page does not know the new project revision; a person's next action from the page
+    // (the export below) would rightly be refused as made for an older revision. Load the page afresh and reopen the sheet, as a person would.
+    await page.reload(); await settle();
+    await page.getByRole("treeitem", { name: /^A101/ }).first().click(); await settle();
   });
 
   it("exports a complete vector SLDC sheet and prints PDF at the same physical paper size", async () => {
@@ -252,7 +256,7 @@ describe("SPADRA in a browser", () => {
       assert.ok(now > oldWidth + 25, `${side} panel became wider`);
     }
     const widths = await page.evaluate(() => [getComputedStyle(document.querySelector(".workspace")).getPropertyValue("--browser-width"), getComputedStyle(document.querySelector(".workspace")).getPropertyValue("--properties-width")]);
-    await page.reload(); await settle();
+    await page.reload(); await settle(); await page.waitForSelector(".workspace");      // the page is rebuilt from the server after a reload; wait for it rather than guess how long that takes
     const remembered = await page.evaluate(() => [getComputedStyle(document.querySelector(".workspace")).getPropertyValue("--browser-width"), getComputedStyle(document.querySelector(".workspace")).getPropertyValue("--properties-width")]);
     assert.deepEqual(remembered, widths);
     await page.setViewportSize({ width: 1100, height: 760 });
@@ -261,6 +265,8 @@ describe("SPADRA in a browser", () => {
   });
 
   it("opens Roof Level using the same browser navigation as other levels", async () => {
+    // Tabs are not kept across a page reload (the previous test reloaded), so the sheet is opened first and must still be there afterwards.
+    await page.getByRole("treeitem", { name: /^A101/ }).first().click(); await settle();
     await page.getByRole("treeitem", { name: "Roof Level", exact: true }).first().click();
     await settle();
     const active = page.locator(".doc-tab[aria-selected=true]");

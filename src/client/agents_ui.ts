@@ -80,7 +80,9 @@ export function simulationDialog(store: Store, beamId: string, beamName: string)
       const r = await store.api.post<Obj>("/simulation/beam", body);
       const d = r["derived"], p = r["response"], v = r["verification"], pv = r["provenance"];
       message.textContent = "";
+      const ideal = r["idealization"] as Obj | undefined;
       results.append(
+        h("p", { class: "note", text: `${ideal ? String(ideal["label"]) : "Idealized model"}. ${ideal ? String(ideal["meaning"]) : ""}`.trim() }),
         h("h3", { text: "Response" }), responseChart(r["series"]),
         h("p", { class: "muted", text: "Solid: simulated by the SLAI Simulation Agent. Dotted: the closed-form solution of the same equation." }),
         table("Simulation results", [["Natural frequency", `${sig(d["natural_frequency_hz"])} Hz (period ${sig(d["period_s"])} s)`], ["Static deflection", `${sig(d["static_deflection_m"] * 1000)} mm`],

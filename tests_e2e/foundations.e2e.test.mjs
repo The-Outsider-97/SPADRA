@@ -135,7 +135,7 @@ describe("foundations in a browser", () => {
     assert.ok(Math.abs(b.hi[2]) < 1e-9 && Math.abs(b.lo[2] + 0.5) < 1e-9, "its top meets the wall's base at the level, 500 mm deep");
     await page.locator(".group-head", { hasText: "Constraints" }).first().waitFor();
     await page.getByText("Declared, not designed or verified").waitFor();
-    await page.getByText("Stands on").first().waitFor();
+    await page.getByText("Stands on", { exact: true }).first().waitFor();
   });
 
   it("the strip follows the wall when the wall is stretched, with no other command", async () => {
@@ -168,9 +168,9 @@ describe("foundations in a browser", () => {
     await tool("Foundation");
     const dialog = page.getByRole("dialog");
     await dialog.getByLabel("Kind").selectOption("vloer"); await settle();
-    await dialog.getByLabel("Thickness (mm)").fill("150");
+    await dialog.getByLabel("Thickness (mm)", { exact: true }).fill("150");
     await dialog.getByRole("group", { name: /Layers below the slab/ }).getByRole("button", { name: "Add" }).click();
-    await dialog.getByLabel("Thickness (mm)").nth(1).fill("100");
+    await dialog.getByLabel("Thickness (mm)", { exact: true }).nth(1).fill("100");
     await dialog.getByLabel("λ (W/m·K)").fill("0.036");
     await dialog.getByRole("group", { name: /Reinforcement/ }).getByRole("button", { name: "Add" }).click();
     await dialog.getByRole("button", { name: "Add foundation" }).click(); await settle();
@@ -190,7 +190,7 @@ describe("foundations in a browser", () => {
     const data = await api(`/drawing/${view.id}`);
     const slab = data.projection.items.find((i) => i.category === "foundation" && i.cut_material?.includes("EPS"));
     assert.ok(slab, "the slab's cut is tagged with its layers");
-    assert.deepEqual([...slab.cut_material].sort(), ["Concrete", "EPS"]);
+    assert.deepEqual([...slab.cut_material].sort(), ["EPS", "Reinforced concrete"]);                  // the dialog declared bars, so the concrete is shown as reinforced
     await page.reload(); await settle();
     await page.getByRole("button", { name: "3D", exact: true }).click(); await settle();
     await page.getByRole("button", { name: "Schedule", exact: true }).first().click();
@@ -225,10 +225,84 @@ describe("foundations in a browser", () => {
     await page.mouse.click(x, y); await settle();
     let selected = await c.evaluate((el) => el.spadraView.store.selection?.ids?.[0]);
     assert.equal(selected, wallId, "the wall wins the initial ambiguous pick");
-    await page.mouse.click(x, y); await settle();
-    selected = await c.evaluate((el) => el.spadraView.store.selection?.ids?.[0]);
-    assert.equal(selected, strip.id, "clicking again cycles to the foundation without changing its geometry");
+    // The stack at this spot is the wall plus every foundation whose cut covers it (earlier tests leave a slab here too),
+    // so repeated clicks walk the whole stack; the strip must be reached within one full pass and the wall must come back after it.
+    const seen = [selected];
+    for (let i = 1; i < hits.length && selected !== strip.id; i += 1) {
+      await page.mouse.click(x, y); await settle();
+      selected = await c.evaluate((el) => el.spadraView.store.selection?.ids?.[0]);
+      seen.push(selected);
+    }
+    assert.equal(selected, strip.id, `clicking again cycles to the foundation (visited ${seen.join(", ")})`);
+    assert.equal(new Set(seen).size, seen.length, "each click moves on to a different element");
+  });
+});
+
+describe("foundations under several connected walls", () => {
+  const X = 30000, Y = 30000, W = 6000, H = 4000;                                                     // far from the earlier tests' elements
+  let lvl, walls, floorId, ids;
+  const selectModel = (sel) => overlay().evaluate((el, v) => el.spadraView.store.select({ kind: "model", ids: v }), sel);
+  const floorBox = async () => bbox((await ofCategory("floor")).find((o) => o.id === floorId));
+
+  it("a closed ring of four selected walls gets a strip under each in one dialog, as the screenshot's error asked for, and the floor over them is cut back", async () => {
+    lvl = (await api("/project/tree")).levels.find((l) => l.name === "Level 01").id;
+    const seg = [[[X, Y], [X + W, Y]], [[X + W, Y], [X + W, Y + H]], [[X + W, Y + H], [X, Y + H]], [[X, Y + H], [X, Y]]];
+    walls = [];
+    for (const [a, b] of seg) walls.push((await cmd("model.add_wall", { level: lvl, start: a, end: b, height: 3, thickness: 200 })).id);
+    floorId = (await cmd("model.add_floor", { level: lvl, points: [[X, Y], [X + W, Y], [X + W, Y + H], [X, Y + H]], thickness: 200 })).id;
+    await page.reload(); await settle();
+    await page.getByRole("button", { name: "3D", exact: true }).click(); await settle();
+    await selectModel(walls);
+    await tool("Foundation");
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel("Kind").selectOption("strook"); await settle();
+    await dialog.getByLabel("Height (mm)").fill("500");
+    assert.equal(await dialog.getByLabel("Constrained to the wall or column above").isChecked(), true, "constrained by default");
+    await dialog.getByLabel("Add formwork").check();
+    await dialog.getByLabel("Formwork thickness (mm)").fill("50");
+    await dialog.getByRole("button", { name: "Add foundation" }).click(); await settle();
+    await page.getByRole("dialog").waitFor({ state: "detached" }); await settle();                  // the dialog closes once the server has built all four
+    assert.equal(await page.getByRole("dialog").count(), 0, "the dialog closed: no error about a single wall");
+    const strips = (await ofCategory("foundation")).filter((o) => bbox(o).lo[0] > X / 1000 - 1);
+    assert.equal(strips.length, 4, "a strip under each wall");
+    const fb = await floorBox();
+    assert.ok(Math.abs(fb.lo[0] - (X / 1000 + 0.3)) < 1e-6 && Math.abs(fb.hi[0] - ((X + W) / 1000 - 0.3)) < 1e-6, "the floor was cut back to the strips' inner edges (600 mm wide strips)");
   });
 
+  it("moving a wall moves its strip, and moving it down lowers the strip", async () => {
+    const before = (await ofCategory("foundation")).filter((o) => bbox(o).lo[0] > X / 1000 - 1).map(bbox);
+    await cmd("model.move", { id: walls[0], dx: 0, dy: 0, dz: -0.3 }); await settle();
+    const after = (await ofCategory("foundation")).filter((o) => bbox(o).lo[0] > X / 1000 - 1).map(bbox);
+    const lowered = after.filter((b, i) => Math.abs(b.hi[2] - before[i].hi[2] + 0.3) < 1e-6);
+    assert.ok(lowered.length >= 1, "at least the south strip went down with its wall");
+    await cmd("model.move", { id: walls[0], dx: 0, dy: 0, dz: 0.3 }); await settle();
+  });
+
+  it("Reinforce… after creation declares bars, and the foundation is then shown and hatched as reinforced concrete", async () => {
+    await page.reload(); await settle();                                                                 // the page must know about the moves made through the API
+    await page.getByRole("button", { name: "3D", exact: true }).click(); await settle();
+    const strip = (await ofCategory("foundation")).find((o) => bbox(o).lo[0] > X / 1000 - 1);
+    const colourBefore = strip.color;
+    await selectModel([strip.id]); await settle();
+    await page.getByRole("button", { name: "Reinforce…" }).click(); await settle();                     // the Properties panel's own link
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel("Concrete class").fill("C30/37");
+    await dialog.getByRole("button", { name: "Apply" }).click(); await settle();
+    const reinforced = (await ofCategory("foundation")).find((o) => o.id === strip.id);
+    assert.notEqual(reinforced.color, colourBefore, "the 3D colour changed with the declaration");
+    const view = await cmd("view.add_section", { a: [X + 3000, Y - 1000], b: [X + 3000, Y + 1000], name: "Reinforced strip" });
+    const proj = (await api(`/drawing/${view.id}`)).projection;
+    const item = proj.items.find((i) => i.id === strip.id);
+    assert.ok(item?.cut_material?.includes("Reinforced concrete"), "the section hatches it as reinforced concrete");
+    await page.reload(); await settle();                                                                 // the section was added through the API
+    await page.getByRole("button", { name: "3D", exact: true }).click(); await settle();
+    await selectModel([strip.id]); await settle();
+    await page.getByRole("button", { name: "Reinforce…" }).click(); await settle();
+    await page.getByRole("dialog").getByRole("button", { name: "Remove reinforcement" }).click(); await settle();
+    assert.equal((await ofCategory("foundation")).find((o) => o.id === strip.id).color, colourBefore, "removing the bars restores the shading");
+  });
+});
+
+describe("the page after the several-walls tests", () => {
   it("the page logged no errors", () => { assert.deepEqual(problems, []); });
 });

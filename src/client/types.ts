@@ -222,8 +222,10 @@ export interface SyncStatus {
   sheets: Array<{ id: string; number: string; name: string; state: "not issued" | "current" | "changed"; revision: string; changed: string[] }>;
   detached_tags: Array<{ view: string; view_name: string; entity: string; element: string }>;
 }
-export interface FamilyParam { name: string; label: string; type: string; unit: string; required: boolean; default: number | null; min: number | null; max: number | null; expression: string | null; description: string }
-export interface FamilyInfo { id: string; name: string; shape: string; instances: number; parameters: FamilyParam[] }
+export interface FamilyParam { name: string; label: string; type: string; unit: string; required: boolean; default: number | null; min: number | null; max: number | null; expression: string | null; description: string;
+  scope?: string; read_only?: boolean; depends_on?: string[]; dependents?: string[]; choices?: string[] | null }
+export interface FamilyType { name: string; values: Record<string, unknown>; instances: number }
+export interface FamilyInfo { id: string; name: string; shape: string; instances: number; parameters: FamilyParam[]; types?: FamilyType[]; graph?: { order: string[]; edges: string[][] } }
 export interface FamiliesResponse { families: FamilyInfo[]; shapes: Record<string, string[]>; types: string[]; levels: Level[] }
 export interface ReportView {
   report: { id: string; name: string; created: string; revision: number; sections: string[]; bytes: number;

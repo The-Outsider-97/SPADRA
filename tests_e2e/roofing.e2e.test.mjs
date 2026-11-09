@@ -146,11 +146,22 @@ describe("roofs, gutters and profiles in a browser", () => {
 
     // A real right mouse click on a roof triangle offers exactly the same commands.
     const roof = (await ofCategory("roof"))[0];
-    const triangle = roof.faces.find((face) => face.length >= 3 && face.every((i) => roof.vertices[i][2] > 3));
-    assert.ok(triangle, "the roof has a pickable pitched surface");
-    const point = [0, 1, 2].map((j) => triangle.slice(0, 3).reduce((sum, i) => sum + roof.vertices[i][j] / 3, 0));
-    const screen = await overlay().evaluate((el, q) => el.spadraView.screenOf(q), point);
+    // The ridge beam made above lies along the ridge, and a pitched triangle seen from a low angle can be a sliver on screen. Take the first
+    // pitched triangle whose centre, rounded to the whole pixel a real pointer reports and with two pixels of slack either side, is
+    // for the view's own picking the roof and nothing else.
     const bounds = await overlay().boundingBox();
+    let screen = null;
+    for (const face of roof.faces.filter((f) => f.length >= 3 && f.every((i) => roof.vertices[i][2] > 3))) {
+      const q = [0, 1, 2].map((j) => face.slice(0, 3).reduce((sum, i) => sum + roof.vertices[i][j] / 3, 0));
+      const s = await overlay().evaluate((el, at) => el.spadraView.screenOf(at), q);
+      const px = [Math.round(bounds.x + s[0]), Math.round(bounds.y + s[1])];
+      const local = [px[0] - bounds.x, px[1] - bounds.y];
+      if (local[0] < 20 || local[0] > bounds.width - 20 || local[1] < 20 || local[1] > bounds.height - 20) continue;
+      const roofOnly = await overlay().evaluate((el, at) => [[0, 0], [2, 0], [-2, 0], [0, 2], [0, -2]]
+        .every(([dx, dy]) => el.spadraView.hitCandidates(at[0] + dx, at[1] + dy)[0]?.id === at[2]), [...local, roof.id]);
+      if (roofOnly) { screen = local; break; }
+    }
+    assert.ok(screen, "the roof has a pickable pitched surface that nothing else covers");
     await page.mouse.click(bounds.x + screen[0], bounds.y + screen[1], { button: "right" });
     assert.ok(await page.getByRole("menuitem", { name: "Add Roof Edge" }).isVisible());
     await page.keyboard.press("Escape");
@@ -211,12 +222,17 @@ describe("roofs, gutters and profiles in a browser", () => {
   });
 
   it("draws, selects and reshapes a real roof in the 2D roof-plan viewport", async () => {
+    // The earlier tests changed the project through the API; the page has to learn the current revision before it commands on it
+    // (the server refuses a command made for an older revision, which is the intended optimistic-concurrency rule).
+    await page.reload(); await settle();
     await page.getByRole("treeitem", { name: "Level 01", exact: true }).first().click(); await settle();
     await page.getByRole("button", { name: "2D", exact: true }).click(); await settle();
     const existing = (await ofCategory("roof")).length;
     await tool("Roof");
-    const type = page.locator(".hud-group select[aria-label='Roof type']");
-    assert.ok(await type.isVisible(), "a roof drawn on a plan exposes the real roof options");
+    const type = page.locator("select[aria-label='Roof type']:visible");      // the plan's own option strip (the 3D view keeps a hidden one of its own)
+    const strips = await page.locator("select:visible").evaluateAll((els) => els.map((e) => e.getAttribute("aria-label")));
+    const pressed = await page.locator("button.tool[aria-pressed=true]:visible").evaluateAll((els) => els.map((e) => e.getAttribute("title")));
+    assert.ok(await type.isVisible(), `a roof drawn on a plan exposes the real roof options (visible selects: ${JSON.stringify(strips)}; active tools: ${JSON.stringify(pressed)})`);
     await type.selectOption("flat");
     await page.getByLabel("Roof thickness (mm)").fill("250");
     const surface = page.locator(".view-canvas").first();

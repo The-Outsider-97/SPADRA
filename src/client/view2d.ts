@@ -442,7 +442,10 @@ export class DrawingView {
         if (!last) { this.pts = [p]; break; }
         if (await this.store.run("draw.line", { drawing: view, start: last, end: p })) this.pts = [p];
         break;
-      case "polyline": this.pts = [...this.pts, p]; break;
+      case "polyline":
+        // Coming back to the first point closes the shape, as in other CAD tools.
+        if (this.pts.length >= 3 && this.pts[0] && dist(this.toScreen(p), this.toScreen(this.pts[0])) <= PICK_PX + 2) { await this.finish(true, true); break; }
+        this.pts = [...this.pts, p]; break;
       case "rectangle": {
         if (!last) { this.pts = [p]; break; }
         const r = normaliseRect(last, p);
@@ -1110,8 +1113,12 @@ export class DrawingView {
     } else if (element?.category === "wall" && element.axis) {
       const { a, b, thickness } = element.axis;
       const length = Math.max(dist(a, b), 1e-9), nx = -(b[1] - a[1]) / length, ny = (b[0] - a[0]) / length;
-      const center = mid(a, b), offset = thickness / 2 + 20 / this.scale;
-      points = [{ side: "left", at: [center[0] + nx * offset, center[1] + ny * offset] }, { side: "right", at: [center[0] - nx * offset, center[1] - ny * offset] }];
+      // The round turn handle stands above the middle of the selection, so the "+" buttons are moved along the wall, clear of it
+      // (a quarter of the length, but never closer than 24 screen pixels, nor further than 60), left side towards the start, right towards the end.
+      const centre = mid(a, b), offset = thickness / 2 + 20 / this.scale;
+      const along = Math.min(Math.max(length / 4, 24 / this.scale), 60 / this.scale), ux = (b[0] - a[0]) / length, uy = (b[1] - a[1]) / length;
+      const spot = (side: number, shift: number): Pt => [centre[0] + side * nx * offset + shift * ux * along, centre[1] + side * ny * offset + shift * uy * along];
+      points = [{ side: "left", at: spot(1, -1) }, { side: "right", at: spot(-1, 1) }];
     } else if (element) {
       const bounds = polygonsBounds([element.polygon]);
       if (!bounds) return;

@@ -153,6 +153,8 @@ describe("walls at an angle in a browser", () => {
   it("Shift + double-click selects both connected walls through their join graph", async () => {
     const canvas = page.locator(".view-canvas").first();
     await tool("Select"); await settle();
+    // The earlier tests moved a wall, so the plan may not show it any more: fit the view first so the click lands on the canvas.
+    await page.getByRole("button", { name: "Zoom to fit", exact: true }).first().click(); await settle();
     const d = await drawing();
     const first = d.model.find((v) => v.category === "wall");
     assert.ok(first?.axis, "wall centre-line is available");
@@ -169,6 +171,8 @@ describe("walls at an angle in a browser", () => {
 
   it("requires Enter to commit a dimension; double-click alone cannot finalize", async () => {
     const canvas = page.locator(".view-canvas").first();
+    const open = await page.locator("dialog[open] [id^=dlg-title]").allTextContents();      // name a dialog left open by an earlier step instead of timing out behind it
+    assert.deepEqual(open, [], `a dialog is open before this test starts: ${open.join(", ")}`);
     await page.getByRole("tab", { name: "Annotate", exact: true }).click(); await settle();
     await tool("Dimension"); await settle();
     const box = await canvas.boundingBox();

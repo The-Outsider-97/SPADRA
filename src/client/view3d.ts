@@ -591,7 +591,8 @@ export class ModelView {
     if (!(height > 0) || !(thickness > 0)) { toast("Enter a positive wall height and thickness.", { kind: "error" }); return; }
     const level = this.levelSelect.value;
     const out = await this.store.run("model.add_wall", { start: [start[0] * f, start[1] * f], end: [p[0] * f, p[1] * f], level, height, thickness });
-    if (out) this.wallStart = p;                                // keep the chain going from the new end, as drawing tools do
+    // Keep the chain going from the new end, as drawing tools do, unless it was ended (Esc, another tool) while the server was answering.
+    if (out && this.wallStart === start) this.wallStart = p;
     this.draw();
   }
 

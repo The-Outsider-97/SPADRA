@@ -70,7 +70,7 @@ export class SheetView {
     clone.setAttribute("viewBox", `0 0 ${d.width} ${d.height}`);
     clone.setAttribute("width", `${d.width}mm`);
     clone.setAttribute("height", `${d.height}mm`);
-    clone.setAttribute("style", "font-family:Arial,sans-serif");
+    clone.style.setProperty("font-family", "Arial,sans-serif");           // not setAttribute("style", ...): the page's CSP forbids inline style attributes and logs an error for it
     // Print/PDF and the embedded SLDC vector must be independently readable.
     // CSS custom properties in presentation attributes are not portable to
     // every SVG renderer (including some document editors and PDF converters).

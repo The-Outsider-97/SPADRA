@@ -141,7 +141,8 @@ describe("making an animation", () => {
     await goStart();
     await page.locator("#anim-speed").selectOption("2");
     await page.locator("#anim-play").click();
-    await page.waitForFunction(() => document.querySelector(".tl-time")?.textContent?.startsWith("5.00 s"), null, { timeout: 15000 });
+    await page.waitForFunction(() => document.querySelector(".tl-time")?.textContent?.startsWith("5.00 s"), null, { timeout: 15000 })
+      .catch(async (e) => { throw new Error(`playback did not reach 5.00 s: readout "${await page.locator(".tl-time").textContent()}", button "${await page.locator("#anim-play").textContent()}"; ${e.message}`); });
     await page.waitForFunction(() => document.querySelector("#anim-play")?.textContent === "Play");
     await page.locator("#anim-loop").check(); await settle();
     assert.equal((await api("/animation")).settings.loop, true);

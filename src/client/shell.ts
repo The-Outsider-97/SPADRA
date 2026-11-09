@@ -12,10 +12,11 @@ import { opensShortcutList, shortcutsDialog, toolHotkey } from "./shortcuts.js";
 import { diagnosticsDialog, jobChip, jobsDialog } from "./jobs_ui.js";
 import { exportDialog, importDialog } from "./interchange.js";
 import { familiesDialog, issueDialog, levelsDialog, newReportDialog, reportDialog } from "./project_ui.js";
+import { optimizeDialog, scriptsDialog, stairDesignDialog } from "./parametric_ui.js";
 import { propertiesDialog, recoverDialog } from "./project_dialogs.js";
 import { appearanceDialog, arrayDialog, releaseArray, modifierDialog, ensureClean, newProjectDialog, openProjectDialog, reviewDialog } from "./dialogs.js";
 import { downpipeDialog, drainageDialog, gutterDialog } from "./gutters.js";
-import { foundationDialog, foundationReportDialog } from "./foundations.js";
+import { foundationDialog, foundationReportDialog, reinforceDialog } from "./foundations.js";
 import { renderProperties } from "./properties.js";
 import { ScheduleView } from "./schedule.js";
 import { SheetView } from "./sheet.js";
@@ -183,6 +184,7 @@ export class Shell {
       case "report": if (ref) void reportDialog(store, ref); break;
       case "issue": if (sheet) issueDialog(store, sheet); break;
       case "arrange": if (sheet) void store.arrangeSheet(sheet); break;
+      case "reinforce": void reinforceDialog(store, ref); break;
       case "jobs": jobsDialog(store); break;
       case "diagnostics": void diagnosticsDialog(store); break;
       default: toast(`There is no “${name}” dialog.`, { kind: "error" });
@@ -335,6 +337,7 @@ export class Shell {
           T("downpipe", "Downpipe", "downpipe", !!store.project, { run: () => downpipeDialog(store), note: "Select a gutter, then add a downpipe under it" }),
           T("drainage", "Drainage", "report", !!store.project, { run: () => drainageDialog(store), note: "The rain each roof sends to its gutters and downpipes" }),
           T("foundation", "Foundation", "foundation", !!store.project, { run: () => { void foundationDialog(store); }, note: "Pads, strips, foundation beams, rafts and ground-bearing slabs; select walls or columns to stand them on" }),
+          T("reinforce", "Reinforce foundation", "foundation", !!store.project, { run: () => { void reinforceDialog(store); }, note: "Declare bars, concrete class and cover on the selected foundation, now or later; its shading follows" }),
           T("foundationqty", "Foundation quantities", "report", !!store.project, { run: () => { void foundationReportDialog(store); }, note: "Concrete, build-up, thermal resistance and indicative bars of the selected foundation" }),
           T("beam", "Beam", "beam", kind === "3d", { tool: "beam" }), T("column", "Column", "column", on3dOrPlan, { tool: "column" }),
           T("room", "Room", "room", onPlan, { tool: "room" }),
@@ -349,7 +352,10 @@ export class Shell {
         [T("section", "Section", "section", on3dOrPlan, { tool: "section" }), T("elevation", "Elevation", "elevation", !!store.project, { run: () => this.elevationMenu(this.ribbon) }),
           T("schedule", "Schedule", "table", !!store.project, { run: () => this.scheduleMenu(this.ribbon) })],
         [T("levels", "Levels", "levels", !!store.project, { run: () => levelsDialog(store), note: "Add, rename or move the building's levels" }),
-          T("families", "Families", "family", !!store.project, { run: () => { void familiesDialog(store); }, note: "Define parametric families and see where they are used" })]];
+          T("families", "Families", "family", !!store.project, { run: () => { void familiesDialog(store); }, note: "Define parametric families, their types, formulas and where they are used" }),
+          T("scripts", "Scripts", "table", !!store.project, { run: () => { void scriptsDialog(store); }, note: "Python computations on a copy of the model: versioned, isolated, applied only through a reviewed proposal" }),
+          T("optimize", "Optimize", "table", !!store.project, { run: () => { void optimizeDialog(store); }, note: "Search a family's parameters against formula objectives and constraints" }),
+          T("stairdesign", "Stair design", "stair", !!store.project, { run: () => stairDesignDialog(store), note: "Preview a stair's risers, treads and flights from the rise and the rules" })]];
       case "Annotate": return [[
         T("line", "Line", "line", kind === "drawing", { tool: "line" }),
         T("polyline", "Polyline", "polyline", kind === "drawing", { tool: "polyline" }),

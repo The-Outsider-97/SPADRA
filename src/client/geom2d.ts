@@ -62,10 +62,20 @@ export function hatchLoops(e: Entity): Pt[][] {
   return loops;
 }
 
+/** The corners of a polyline that is closed: flagged closed, or drawn back to its own first point (then the repeated last point is not a corner). Null when it is open. */
+export function closedPolylinePoints(e: Entity): Pt[] | null {
+  const g = e.geometry, points = g["points"];
+  if (e.kind !== "polyline" || !isPts(points)) return null;
+  const same = points.length >= 4 && Math.hypot((points[0] as Pt)[0] - (points[points.length - 1] as Pt)[0], (points[0] as Pt)[1] - (points[points.length - 1] as Pt)[1]) < 1e-9;
+  if (g["closed"] === true && points.length >= 3) return points.map((q) => [q[0], q[1]] as Pt);
+  return same ? points.slice(0, -1).map((q) => [q[0], q[1]] as Pt) : null;
+}
+
 /** The outline of a closed drawing entity as one polygon (a closed polyline, a circle sampled, a hatch with a single outline), or null: what Extrude and Sweep can take as a shape. */
 export function closedLoop(e: Entity): Pt[] | null {
   const g = e.geometry;
-  if (e.kind === "polyline" && g["closed"] === true && isPts(g["points"]) && g["points"].length >= 3) return g["points"].map((q) => [q[0], q[1]] as Pt);
+  const polygon = closedPolylinePoints(e);
+  if (polygon) return polygon;
   if (e.kind === "circle" && isPt(g["center"]) && typeof g["radius"] === "number" && g["radius"] > 0) {
     const [cx, cy] = g["center"], r = g["radius"];
     return Array.from({ length: 48 }, (_, i) => [cx + r * Math.cos((i / 48) * Math.PI * 2), cy + r * Math.sin((i / 48) * Math.PI * 2)] as Pt);

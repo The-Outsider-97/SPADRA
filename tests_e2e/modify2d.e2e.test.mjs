@@ -52,13 +52,14 @@ async function scene(build) {
   await build();
   await page.reload(); await settle();
   await page.getByRole("button", { name: "Zoom to fit", exact: true }).first().click(); await settle();
-  const data = await drawing();
-  const box = await page.locator(".view-canvas").first().boundingBox();
-  const [lo, hi] = data.bounds;
-  const k = Math.min((box.width - 128) / (hi[0] - lo[0]), (box.height - 128) / (hi[1] - lo[1]));
-  fitted = ([wx, wy]) => [box.x + box.width / 2 + (wx - (lo[0] + hi[0]) / 2) * k, box.y + box.height / 2 - (wy - (lo[1] + hi[1]) / 2) * k];
+  // Screen positions come from the view's own projection at the moment of use, not from an assumed symmetrical margin around the fit: choosing a ribbon tab
+  // changes the ribbon's height and so moves the canvas on the page, and the old fixed formula then put a click 10 px off the line it meant.
+  fitted = (world) => page.locator(".view-canvas").first().evaluate((el, [wx, wy]) => {
+    const r = el.getBoundingClientRect(), [x, y] = el.spadraView.screenOf([wx, wy]);
+    return [r.x + x, r.y + y];
+  }, world);
 }
-const at = async (world) => { const [x, y] = fitted(world); await page.mouse.move(x, y, { steps: 3 }); await page.mouse.click(x, y); await settle(); };
+const at = async (world) => { const [x, y] = await fitted(world); await page.mouse.move(x, y, { steps: 3 }); await page.mouse.click(x, y); await settle(); };
 const tool = async (name) => {
   const ribbon = ["Line", "Polyline", "Rectangle", "Circle", "Offset", "Fillet"].includes(name)
     ? "Annotate" : name === "Trim" ? "Modifier" : "Model";
@@ -174,7 +175,7 @@ describe("2D modify tools in a browser", () => {
     assert.ok(lined.strokes.length > 10, "the server computed hatch strokes");
     // The fill is really painted: a pixel inside the solid hatch is not the paper colour, one outside it is.
     const pixel = async ([wx, wy]) => {
-      const [sx, sy] = fitted([wx, wy]);
+      const [sx, sy] = await fitted([wx, wy]);
       return page.evaluate(([x, y]) => {
         const c = document.querySelector(".view-canvas"); const r = c.getBoundingClientRect(); const k = c.width / r.width;
         return Array.from(c.getContext("2d").getImageData(Math.round((x - r.left) * k), Math.round((y - r.top) * k), 1, 1).data);
@@ -210,7 +211,7 @@ describe("2D modify tools in a browser", () => {
     await scene(async () => { await cmd("draw.line", { start: [0, 0], end: [8000, 0] }); await cmd("draw.line", { start: [0, 6000], end: [1, 6000] }); });
     await tool("Select");
     await at([4000, 0]);                                          // select the line
-    const [sx, sy] = fitted([8000, 0]), [tx, ty] = fitted([8000, 3000]);
+    const [sx, sy] = await fitted([8000, 0]), [tx, ty] = await fitted([8000, 3000]);
     await page.mouse.move(sx, sy); await page.mouse.down(); await page.mouse.move(tx, ty, { steps: 8 }); await page.mouse.up(); await settle();
     const moved = (await byKind("line")).find((l) => l.geometry.start[0] === 0 && l.geometry.start[1] === 0);
     assert.ok(Math.abs(moved.geometry.end[1] - 3000) < 60, `end moved up: ${JSON.stringify(moved.geometry)}`);
@@ -223,7 +224,7 @@ describe("2D modify tools in a browser", () => {
     await scene(async () => { await cmd("draw.circle", { center: [5000, 3000], radius: 1000 }); await cmd("draw.line", { start: [0, 0], end: [1, 0] }); await cmd("draw.line", { start: [10000, 6000], end: [10001, 6000] }); });
     await tool("Select");
     await at([5000, 4000]);                                       // the circle's rim
-    const [sx, sy] = fitted([6000, 3000]), [tx, ty] = fitted([7000, 3000]);
+    const [sx, sy] = await fitted([6000, 3000]), [tx, ty] = await fitted([7000, 3000]);
     await page.mouse.move(sx, sy); await page.mouse.down(); await page.mouse.move(tx, ty, { steps: 8 }); await page.mouse.up(); await settle();
     const [c] = await byKind("circle");
     assert.ok(Math.abs(c.geometry.radius - 2000) < 80, `radius ${c.geometry.radius}`);

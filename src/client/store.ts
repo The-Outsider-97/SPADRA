@@ -4,6 +4,7 @@ import { openDialog, openMenu, promptDialog, toast, type MenuEntry } from "../..
 import { h } from "../../../tools/web/src/dom.js";
 import { Emitter } from "../../../tools/web/src/util.js";
 import { oneLine, present, presentUnexpected } from "./errors.js";
+import { closedPolylinePoints } from "./geom2d.js";
 import { importDialog } from "./interchange.js";
 import type {
   AnimationData, Interop, PoseData, InspectResult, Job, LinkTarget, SyncStatus,
@@ -152,8 +153,8 @@ export class Store {
       catch { continue; }
       if (!data) continue;
       for (const entity of data.entities) {
-        const geometry = entity.geometry;
-        if (entity.kind !== "polyline" || geometry["closed"] !== true || !Array.isArray(geometry["points"]) || geometry["points"].length < 3) continue;
+        // Closed by its flag or drawn back to its first point; a drawing that is listed twice in the tree is offered once.
+        if (!closedPolylinePoints(entity) || sources.some((s) => s.drawing === node.open?.id && s.entity === entity.id)) continue;
         sources.push({ drawing: node.open.id, entity: entity.id, label: `${node.label} · ${entity.layer} · ${entity.id.slice(0, 8)}` });
       }
     }

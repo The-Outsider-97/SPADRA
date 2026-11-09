@@ -6,6 +6,7 @@ import { confirmDialog, openDialog, saveBlob, toast } from "../../../tools/web/s
 import type { Store } from "./store.js";
 import type { FamiliesResponse, FamilyInfo, ReportView } from "./types.js";
 import { paginatedReport } from "./report_layout.js";
+import { familyTypesPanel, formulaPanel } from "./parametric_ui.js";
 
 /** Keep a dialog's body in step with the project while it is open: re-draw on every change, stop when it closes. */
 function live(store: Store, handle: { result: Promise<unknown> }, redraw: () => void): void {
@@ -97,8 +98,10 @@ function familyEditor(store: Store, family: FamilyInfo, reload: () => void, clos
   const place = (): void => { store.family = { id: family.id, name: family.name }; closeDialog(); store.setTool("family"); };
   return h("section", { attrs: { "aria-label": `Family ${family.name}` }, css: { display: "grid", gap: ".6rem" } },
     labelled("Name", name),
+    familyTypesPanel(store, family, reload),
     h("table", { class: "schedule", attrs: { "aria-label": `Parameters of ${family.name}` } }, h("thead", {}, h("tr", {}, ["Parameter", "Default", "Formula", "Min", "Max"].map((c) => h("th", { text: c })))), h("tbody", {}, rows.map((r) => r.row))),
     h("p", { class: "muted", text: "Sizes are in millimetres. A formula (for example width / 2) replaces the default. Applying rebuilds every placed element, or refuses and says which one does not fit." }),
+    formulaPanel(store, family),
     h("div", { class: "prop-add" }, h("button", { class: "tool-inline", type: "button", text: "Apply changes", on: { click: () => { void apply(); } } }),
       h("button", { class: "tool-inline", type: "button", text: "Place on a floor plan", on: { click: place } }),
       h("a", { class: "tool-inline", attrs: { href: `/api/families/${family.id}/file`, download: "" }, text: "Download as SGEO" }),

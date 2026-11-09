@@ -175,7 +175,8 @@ describe("building elements in a browser", () => {
 
   it("draws a beam between two clicks", async () => {
     await tool("Beam");
-    await clickFraction(0.3, 0.45); await clickFraction(0.7, 0.45);
+    // Low in the view: the tool's settings panel (the HUD) covers the upper part of this short canvas and swallowed the clicks at 45 % of its height.
+    await clickFraction(0.3, 0.8); await clickFraction(0.7, 0.8);
     await page.keyboard.press("Escape");
     const [beam] = await ofCategory("structural");
     assert.ok(beam);

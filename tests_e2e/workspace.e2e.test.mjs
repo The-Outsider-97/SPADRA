@@ -165,7 +165,7 @@ describe("levels, families and reports", () => {
     const text = await view.locator(".report-preview").innerText();
     assert.match(text, /Project and model summary/);
     assert.match(text, /What this check does not do/);
-    await view.getByRole("button", { name: "Close" }).click(); await settle();
+    await view.locator("button.btn", { hasText: "Close" }).click(); await settle();               // the footer button (the header has an icon button of the same name)
     const entry = (await nodes()).find((n) => n.report);
     assert.ok(entry, "the report is in the Project Browser");
     await page.getByRole("treeitem", { name: /Handover status/ }).click({ button: "right" });
