@@ -295,3 +295,238 @@ export async function releaseArray(store) {
     if (out)
         toast("The array is released: its copies are ordinary elements now.", { kind: "info" });
 }
+/** A single contextual editor for the existing SGEO/SDRW geometry kernels.
+ *  Values shown in metres or degrees are explicitly converted at the boundary;
+ *  there are no duplicate frontend implementations of any modifier. */
+export function modifierDialog(store, operation) {
+    const selection = store.selection;
+    if (!selection || (selection.kind !== "model" && selection.kind !== "drawing") || !selection.ids.length) {
+        toast("Select the geometry to modify first.", { kind: "info" });
+        return;
+    }
+    const is3d = selection.kind === "model";
+    const drawingId = selection.kind === "drawing" ? selection.view : null;
+    if ((operation === "weld" || operation === "subdivision" || operation === "split") && !is3d) {
+        toast(`${operation} is available for SGEO geometry only.`, { kind: "info" });
+        return;
+    }
+    if (operation === "boolean" && selection.ids.length < 2) {
+        toast("Select a source and an operand for Boolean.", { kind: "info" });
+        return;
+    }
+    const box = h("div", { css: { display: "grid", gap: ".8rem" } });
+    const number = (label, initial, step = "any") => {
+        const field = h("input", { type: "number", value: initial, attrs: { step, "aria-label": label } });
+        box.append(labelled(label, field));
+        return field;
+    };
+    const choice = (label, options) => {
+        const field = h("select", { attrs: { "aria-label": label } }, ...options.map(([value, text]) => h("option", { value, text })));
+        box.append(labelled(label, field));
+        return field;
+    };
+    const source = selection.ids[0];
+    let operand = selection.ids[1] ?? "";
+    let mode = null;
+    if (operation === "boolean") {
+        mode = choice("Boolean operation", [["union", "Union"], ["subtract", "Difference / Subtract"], ["intersect", "Intersection"]]);
+        box.append(h("p", { class: "muted", text: `First selected: ${source}; operand: ${operand}. Difference subtracts the second from the first.` }));
+    }
+    const amount = operation === "chamfer" ? number("First chamfer distance (m)", "0.05") : null;
+    const depth = operation === "chamfer" ? number("Second chamfer distance (m)", "0.05") : null;
+    const segmentCount = operation === "chamfer" || operation === "bend" ?
+        number(operation === "bend" ? "Bend segments" : "Chamfer segments", operation === "bend" ? "16" : "1", "1") : null;
+    const weldDecimals = operation === "weld" ? choice("Vertex matching", [["exact", "Exact coordinates"], ["12", "12 decimal places"], ["9", "9 decimal places"], ["6", "6 decimal places"]]) : null;
+    const maxEdge = operation === "subdivision" ? number("Maximum mesh edge (m)", "0.5") : null;
+    const axis = operation === "bend" ? choice("Bend axis", is3d ? [["x", "X"], ["y", "Y"], ["z", "Z"]] : [["x", "X"], ["y", "Y"]]) : null;
+    const start = operation === "bend" ? number("Bend start coordinate (m)", "0") : null;
+    const end = operation === "bend" ? number("Bend end coordinate (m)", "3") : null;
+    const angle = operation === "bend" ? number("Bend angle (degrees)", "30") : null;
+    const split = operation === "split" ? [
+        number("Plane origin X (m)", "0"), number("Plane origin Y (m)", "0"), number("Plane origin Z (m)", "0"),
+        number("Plane normal X", "1"), number("Plane normal Y", "0"), number("Plane normal Z", "0")
+    ] : null;
+    const side = operation === "split" ? choice("Keep split side", [["positive", "Positive side"], ["negative", "Negative side"]]) : null;
+    const defaultPolicy = operation === "bend" ? "display_only" : "tolerance_controlled";
+    const policy = operation === "boolean" || operation === "chamfer" || operation === "split"
+        ? choice("Evaluation policy", [["tolerance_controlled", "Validated tolerance-controlled"], ["exact", "Exact (only when supported)"], ["display_only", "Display-grade approximation"]]) : null;
+    if (policy)
+        policy.value = defaultPolicy;
+    const note = h("p", { class: "muted", text: is3d
+            ? operation === "weld" || operation === "subdivision"
+                ? "Mesh baking requires independent geometry. Family instances can instead use non-destructive modifiers, or a separate editable copy."
+                : "Generic parametric family instances keep their family link and formulas under native modifiers. BIM hosts require a separate editable copy to preserve native constraints."
+            : "A native SDRW evaluation is committed as drawing geometry and can be undone." });
+    box.append(note);
+    const independentCopy = is3d ? h("input", { type: "checkbox", attrs: {
+            "aria-label": "Create independent editable copy"
+        } }) : null;
+    if (independentCopy)
+        box.append(labelled("Create independent editable copy (original BIM element and family remain unchanged)", independentCopy));
+    const visual = s("svg", { attrs: { viewBox: "0 0 300 200", role: "img", "aria-label": "Computed modifier geometry preview" },
+        css: { width: "100%", height: "200px", border: "1px solid var(--hairline)", background: "var(--surface)", borderRadius: "10px" } });
+    const status = h("p", { class: "muted", text: "Computing the modifier geometry from a scratch project…" });
+    box.append(visual, status);
+    let serial = 0, timeout;
+    const showPreview = (before, after) => {
+        const projected = (mesh) => mesh.vertices.map(v => [(v[0] ?? 0) * 0.8660254 - (v[1] ?? 0) * 0.8660254,
+            ((v[0] ?? 0) + (v[1] ?? 0)) * 0.5 - (v[2] ?? 0)]);
+        const drawing = (shape) => {
+            const g = shape.geometry;
+            const coordinates = (raw) => Array.isArray(raw) && raw.length === 2 ? [Number(raw[0]), Number(raw[1])] : [0, 0];
+            if (shape.kind === "line")
+                return { points: [coordinates(g["start"]), coordinates(g["end"])], paths: [[0, 1]] };
+            if (shape.kind === "polyline") {
+                const points = (Array.isArray(g["points"]) ? g["points"] : []).map(coordinates);
+                return { points, paths: [points.map((_, i) => i).concat(g["closed"] ? [0] : [])] };
+            }
+            if (shape.kind === "circle") {
+                const center = coordinates(g["center"]), radius = Number(g["radius"]);
+                const points = Array.from({ length: 64 }, (_, i) => [
+                    center[0] + radius * Math.cos(Math.PI * 2 * i / 64),
+                    center[1] + radius * Math.sin(Math.PI * 2 * i / 64)
+                ]);
+                return { points, paths: [points.map((_, i) => i).concat([0])] };
+            }
+            if (shape.kind === "hatch") {
+                const points = [], paths = [];
+                for (const loop of (Array.isArray(g["boundary"]) ? g["boundary"] : [])) {
+                    if (loop["kind"] !== "polygon" || !Array.isArray(loop["points"]))
+                        continue;
+                    const start = points.length;
+                    points.push(...loop["points"].map(coordinates));
+                    paths.push(Array.from({ length: points.length - start }, (_, i) => start + i).concat([start]));
+                }
+                return { points, paths };
+            }
+            return { points: [], paths: [] };
+        };
+        const renderData = (data) => {
+            if ("vertices" in data)
+                return { points: projected(data),
+                    paths: data.faces.slice(0, 2200).map(face => face.concat([face[0] ?? 0])) };
+            return drawing(data);
+        };
+        const b = renderData(before), a = renderData(after);
+        const all = [...b.points, ...a.points].filter(p => p.every(Number.isFinite));
+        if (!all.length) {
+            visual.replaceChildren();
+            return;
+        }
+        const minX = Math.min(...all.map(p => p[0])), maxX = Math.max(...all.map(p => p[0]));
+        const minY = Math.min(...all.map(p => p[1])), maxY = Math.max(...all.map(p => p[1]));
+        const scale = Math.min(272 / Math.max(1e-9, maxX - minX), 170 / Math.max(1e-9, maxY - minY));
+        const xy = (p) => `${(150 + (p[0] - (minX + maxX) / 2) * scale).toFixed(2)},${(100 + (p[1] - (minY + maxY) / 2) * scale).toFixed(2)}`;
+        const add = (data, color, dash) => {
+            const path = data.paths.filter(indices => indices.length > 1 && indices.every(i => data.points[i]?.every(Number.isFinite)))
+                .map(indices => `M${indices.map(i => xy(data.points[i])).join("L")}`).join("");
+            if (!path)
+                return null;
+            return s("path", { attrs: { d: path, fill: "none", stroke: color, "stroke-width": "1.1", "stroke-dasharray": dash } });
+        };
+        const paths = [add(b, "#8796a5", "3,3"), add(a, "#2677c9", "")];
+        visual.replaceChildren(...paths.filter((node) => node !== null));
+    };
+    const payload = () => {
+        const finite = (field) => field ? Number(field.value) : NaN;
+        let parameters;
+        switch (operation) {
+            case "boolean":
+                parameters = { operation: mode?.value };
+                break;
+            case "chamfer":
+                parameters = { amount: finite(amount), depth: finite(depth), segments: finite(segmentCount) };
+                break;
+            case "weld":
+                parameters = { decimals: weldDecimals?.value === "exact" ? null : Number(weldDecimals?.value) };
+                break;
+            case "subdivision":
+                parameters = { max_edge: finite(maxEdge) };
+                break;
+            case "bend":
+                parameters = { axis: axis?.value, start: finite(start), end: finite(end),
+                    angle: finite(angle) * Math.PI / 180, segments: finite(segmentCount) };
+                break;
+            case "split":
+                parameters = { origin: split?.slice(0, 3).map(x => Number(x.value)),
+                    normal: split?.slice(3).map(x => Number(x.value)), side: side?.value };
+                break;
+        }
+        const values = Object.values(parameters).flatMap(v => Array.isArray(v) ? v : [v]);
+        if (values.some(v => typeof v === "number" && !Number.isFinite(v)))
+            return null;
+        return { operation, id: source, ...(operand ? { operand } : {}), parameters,
+            ...(policy ? { policy: policy.value } : {}),
+            ...(independentCopy?.checked ? { independent_copy: true } : {}),
+            ...(drawingId ? { drawing: drawingId } : {}) };
+    };
+    const updatePreview = async () => {
+        const ticket = ++serial;
+        const params = payload();
+        if (!params) {
+            status.textContent = "Enter valid finite numbers before applying the modifier.";
+            visual.replaceChildren();
+            return false;
+        }
+        status.textContent = "Evaluating native geometry (read-only)…";
+        try {
+            const result = await store.api.post("/modifier/preview", { kind: is3d ? "model" : "drawing", ...params });
+            if (ticket !== serial)
+                return false;
+            if (result.revision !== store.project?.revision) {
+                status.textContent = "Project revision changed; recompute before applying.";
+                return false;
+            }
+            showPreview(result.before, result.after);
+            status.textContent = `Verified scratch geometry: dashed = before, blue = after. ${JSON.stringify(result.result.diagnostics ?? {})}`;
+            return true;
+        }
+        catch (error) {
+            if (ticket === serial) {
+                visual.replaceChildren();
+                status.textContent = `Geometry refused: ${error instanceof Error ? error.message : String(error)}`;
+            }
+            return false;
+        }
+    };
+    const refresh = () => {
+        if (timeout)
+            clearTimeout(timeout);
+        timeout = setTimeout(() => { void updatePreview(); }, 180);
+    };
+    box.querySelectorAll("input,select").forEach(control => {
+        control.addEventListener("input", refresh);
+        control.addEventListener("change", refresh);
+    });
+    const handle = openDialog({
+        title: `${operation[0]?.toUpperCase()}${operation.slice(1)} geometry`,
+        size: "normal", body: box,
+        actions: [{ label: "Apply modifier", kind: "primary", run: async () => {
+                    if (timeout)
+                        clearTimeout(timeout);
+                    const ok = await updatePreview();
+                    if (!ok) {
+                        toast("The modifier cannot be applied; read the geometry diagnostic below the preview.", { kind: "error" });
+                        return undefined;
+                    }
+                    const params = payload();
+                    if (!params)
+                        return undefined;
+                    const done = await store.run(is3d ? "model.modifier" : "draw.modifier", params);
+                    if (!done)
+                        return undefined;
+                    const result = done.result;
+                    store.setStatus(`${operation} applied (${result.mode ?? "native"}). ${JSON.stringify(result.diagnostics ?? {})}`);
+                    if (result.id) {
+                        if (is3d)
+                            await store.select({ kind: "model", ids: [result.id] });
+                        else
+                            await store.select({ kind: "drawing", view: drawingId, ids: [result.id] });
+                    }
+                    return true;
+                } }],
+    });
+    void updatePreview();
+    void handle.result.then(() => { serial++; if (timeout)
+        clearTimeout(timeout); });
+}

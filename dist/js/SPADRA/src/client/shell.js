@@ -12,8 +12,9 @@ import { opensShortcutList, shortcutsDialog, toolHotkey } from "./shortcuts.js";
 import { diagnosticsDialog, jobChip, jobsDialog } from "./jobs_ui.js";
 import { exportDialog, importDialog } from "./interchange.js";
 import { familiesDialog, issueDialog, levelsDialog, newReportDialog, reportDialog } from "./project_ui.js";
+import { optimizeDialog, scriptsDialog, stairDesignDialog } from "./parametric_ui.js";
 import { propertiesDialog, recoverDialog } from "./project_dialogs.js";
-import { appearanceDialog, arrayDialog, releaseArray, ensureClean, newProjectDialog, openProjectDialog, reviewDialog } from "./dialogs.js";
+import { appearanceDialog, arrayDialog, releaseArray, modifierDialog, ensureClean, newProjectDialog, openProjectDialog, reviewDialog } from "./dialogs.js";
 import { downpipeDialog, drainageDialog, gutterDialog } from "./gutters.js";
 import { foundationDialog, foundationReportDialog } from "./foundations.js";
 import { renderProperties } from "./properties.js";
@@ -23,7 +24,7 @@ import { flatten, openable, store } from "./store.js";
 import { DrawingView } from "./view2d.js";
 import { ModelView } from "./view3d.js";
 import { Timeline } from "./timeline.js";
-const MENUS = ["File", "Edit", "View", "Insert", "Model", "Annotate", "Analyze", "Collaborate"];
+const MENUS = ["File", "Edit", "View", "Insert", "Model", "Modifier", "Annotate", "Analyze", "Collaborate"];
 const T = (id, label, icon, implemented, extra = {}) => ({ id, label, icon, implemented, ...extra });
 const NOT_YET = "Not implemented yet.";
 /** A control that is shown for the layout but does nothing yet, with the reason (or where the same thing is done today). */
@@ -286,7 +287,7 @@ export class Shell {
         const tool = toolHotkey(e);
         if (tool) {
             // The tool may live on another tab (Grid is under Insert, Tag under Annotate): show that tab so the pressed tool is visible.
-            const home = [this.menu, "Model", "Insert", "Annotate"].find((m) => this.tools(m).flat().some((d) => d.tool === tool && d.implemented));
+            const home = [this.menu, "Model", "Modifier", "Insert", "Annotate"].find((m) => this.tools(m).flat().some((d) => d.tool === tool && d.implemented));
             if (home) {
                 e.preventDefault();
                 this.menu = home;
@@ -443,21 +444,59 @@ export class Shell {
                     T("autorooms", store.project?.auto_rooms ? "Auto rooms: on" : "Auto rooms: off", "room", !!store.project, { run: () => this.toggleAutoRooms(), note: "Make a room wherever walls close a space (no roof needed), and keep it in step with the walls" }),
                     T("stair", "Stair", "stair", onPlan, { tool: "stair" }), T("grid", "Grid", "grid", onPlan, { tool: "grid" }),
                     T("family", "Family", "family", onPlan, { tool: "family" })],
-                [T("extrude", "Extrude", "extrude", onPlan, { tool: "extrude", note: "Draw an outline and stand it up to a depth" }),
-                    T("void", "Void", "void", onPlan, { tool: "void", note: "Draw an outline that cuts the floors, extrusions and walls it passes through" }),
-                    T("sweep", "Sweep", "sweep", onPlan, { tool: "sweep", note: "Carry a profile along a path drawn in plan" }),
-                    T("attachroof", "Attach to roof", "attach-roof", !!store.project, { run: () => this.attachWalls("roof"), note: "Select the walls and a roof: the top of each wall follows the underside of the roof" }),
+                [T("attachroof", "Attach to roof", "attach-roof", !!store.project, { run: () => this.attachWalls("roof"), note: "Select the walls and a roof: the top of each wall follows the underside of the roof" }),
                     T("detachroof", "Detach from roof", "detach-roof", !!store.project, { run: () => this.detachWalls("roof"), note: "Free the selected walls from the roof; they keep the height they had" }),
                     T("extendlevel", "Extend to upper level", "extend-level", !!store.project, { run: () => this.attachWalls("level"), note: "Raise the selected walls to the next level up and keep them there" }),
                     T("disconnectlevel", "Disconnect from level", "disconnect-level", !!store.project, { run: () => this.detachWalls("level"), note: "Free the selected walls from the level; they keep the height they had" }),
-                    T("makevoid", "Make void", "void", !!store.project, { run: () => this.makeVoid(), note: "Turn the selected extrusions into voids that cut" }),
-                    T("array", "Array", "array", !!store.project, { run: () => arrayDialog(store), note: "Repeat the selection along X, Y, Z or round a point, and keep the pattern editable" }), T("releasearray", "Release array", "array", !!store.project, { run: () => releaseArray(store), note: "Keep the copies of the selected array as ordinary elements and drop the pattern" })],
+                ],
                 [T("section", "Section", "section", on3dOrPlan, { tool: "section" }), T("elevation", "Elevation", "elevation", !!store.project, { run: () => this.elevationMenu(this.ribbon) }),
                     T("schedule", "Schedule", "table", !!store.project, { run: () => this.scheduleMenu(this.ribbon) })],
                 [T("levels", "Levels", "levels", !!store.project, { run: () => levelsDialog(store), note: "Add, rename or move the building's levels" }),
-                    T("families", "Families", "family", !!store.project, { run: () => { void familiesDialog(store); }, note: "Define parametric families and see where they are used" })]];
-            case "Annotate": return [[T("dim", "Dimension", "dimension", kind === "drawing", { tool: "dimension" }), T("text", "Text", "text", kind === "drawing", { tool: "text" }),
+                    T("families", "Families", "family", !!store.project, { run: () => { void familiesDialog(store); }, note: "Define parametric families, their types, formulas and where they are used" }),
+                    T("scripts", "Scripts", "table", !!store.project, { run: () => { void scriptsDialog(store); }, note: "Python computations on a copy of the model: versioned, isolated, applied only through a reviewed proposal" }),
+                    T("optimize", "Optimize", "table", !!store.project, { run: () => { void optimizeDialog(store); }, note: "Search a family's parameters against formula objectives and constraints" }),
+                    T("stairdesign", "Stair design", "stair", !!store.project, { run: () => stairDesignDialog(store), note: "Preview a stair's risers, treads and flights from the rise and the rules" })]];
+            case "Annotate": return [[
+                    T("line", "Line", "line", kind === "drawing", { tool: "line" }),
+                    T("polyline", "Polyline", "polyline", kind === "drawing", { tool: "polyline" }),
+                    T("rectangle", "Rectangle", "rectangle", kind === "drawing", { tool: "rectangle" }),
+                    T("circle", "Circle", "circle", kind === "drawing", { tool: "circle" }),
+                    T("offset", "Offset", "offset", kind === "drawing", { tool: "offset" }),
+                    T("fillet", "Fillet", "fillet", kind === "drawing", { tool: "fillet" })
+                ], [T("dim", "Dimension", "dimension", kind === "drawing", { tool: "dimension" }),
+                    T("text", "Text", "text", kind === "drawing", { tool: "text" }),
                     T("tag", "Tag", "tag", kind === "drawing", { tool: "tag", note: "Tag an element: its mark, name, type or size follows the model" })]];
+            case "Modifier": {
+                const models = store.selection?.kind === "model" ? store.selection.ids : [];
+                const drawings = store.selection?.kind === "drawing" ? store.selection.ids : [];
+                const onDrawing = kind === "drawing" && !store.drawing?.projection;
+                const modelPick = kind === "3d" && models.length === 1;
+                const twoPicked = kind === "3d" ? models.length >= 2 : onDrawing && drawings.length >= 2;
+                const choose = (op) => () => modifierDialog(store, op);
+                return [
+                    [T("boolean", "Boolean", "boolean", !!store.project && twoPicked, { run: choose("boolean"),
+                            note: "Select source then operand; Union, Subtract or Intersection through the native SGEO/SDRW evaluator" }),
+                        T("trim", "Trim", "trim", onDrawing, { tool: "trim", note: "Trim eligible 2D linework against intersecting boundaries" }),
+                        T("split", "Split", "split", modelPick, { run: choose("split"),
+                            note: "Cut the selected independent 3D solid with a plane; keep the chosen half" })],
+                    [T("chamfer", "Chamfer", "chamfer", modelPick || (onDrawing && drawings.length === 1), { run: choose("chamfer"),
+                            note: "Bevel an eligible 3D box or 2D polyline using the native geometry engine" }),
+                        T("weld", "Weld", "weld", modelPick, { run: choose("weld"),
+                            note: "Weld exact or near-coincident vertices of an independent triangle mesh" }),
+                        T("subdivision", "Subdivision", "subdivision", modelPick, { run: choose("subdivision"),
+                            note: "Conforming adaptive edge splitting on an independent mesh" })],
+                    [T("bend", "Bend", "bend", modelPick || (onDrawing && drawings.length === 1), { run: choose("bend"),
+                            note: "Controlled nonlinear deformation around an axis and span" })],
+                    [T("array", "Array", "array", !!store.project, { run: () => arrayDialog(store),
+                            note: "Repeat the selection along X, Y, Z or around a centre" }),
+                        T("releasearray", "Release array", "array", !!store.project, { run: () => releaseArray(store),
+                            note: "Detach the selected linked pattern and retain its copies" })],
+                    [T("extrude", "Extrude", "extrude", onPlan, { tool: "extrude" }),
+                        T("void", "Void", "void", onPlan, { tool: "void" }),
+                        T("sweep", "Sweep", "sweep", onPlan, { tool: "sweep" }),
+                        T("makevoid", "Make void", "void", !!store.project, { run: () => this.makeVoid() })],
+                ];
+            }
             case "Analyze": {
                 const beam = store.selection?.kind === "model" && store.properties?.kind === "model" && store.properties.category === "structural" ? store.selection.ids[0] : undefined;
                 const engineering = !!store.boot?.capabilities.engineering;
@@ -494,7 +533,6 @@ export class Shell {
                     T("downpipe", "Downpipe", "downpipe", true, { run: () => downpipeDialog(store), note: "Select a gutter, then add a downpipe under it" }),
                     T("drainage", "Drainage", "report", true, { run: () => drainageDialog(store), note: "The rain each roof sends to its gutters and downpipes" }),
                     T("foundation", "Foundation", "foundation", true, { run: () => { void foundationDialog(store); }, note: "Pads, strips, foundation beams, rafts and ground-bearing slabs; select walls or columns to stand them on" })], [T("beam", "Beam", "beam", true, { tool: "beam" }), T("column", "Column", "column", true, { tool: "column" })], [nope("dim3", "Dimension", "dimension")],
-                [T("makevoid", "Make void", "void", true, { run: () => this.makeVoid(), note: "Turn the selected extrusions into voids that cut" }), T("array", "Array", "array", true, { run: () => arrayDialog(store), note: "Repeat the selection along X, Y, Z or round a point, and keep the pattern editable" }), T("releasearray", "Release array", "array", !!store.project, { run: () => releaseArray(store), note: "Keep the copies of the selected array as ordinary elements and drop the pattern" })],
                 [T("snapshot", "Snapshot", "cube", true, { run: () => this.snapshotMenu(this.ribbon), note: "Put a picture of this 3D view on a sheet" })],
                 [T("section", "Section", "section", true, { tool: "section" }), T("elevation", "Elevation", "elevation", true, { run: () => this.elevationMenu(this.ribbon) }), T("schedule", "Schedule", "table", true, { run: () => this.scheduleMenu(this.ribbon) })]];
         if (kind === "schedule")
@@ -514,18 +552,19 @@ export class Shell {
                             issueDialog(store, sheet); }, note: "Issue a revision of this sheet" })],
                 [T("print", "Print / PDF", "print", true, { run: () => this.sheet.print(), note: "Print the sheet, or choose Save as PDF in the print dialog" })]];
         }
-        return [[sel], [T("line", "Line", "line", kind === "drawing", { tool: "line" }), T("polyline", "Polyline", "polyline", kind === "drawing", { tool: "polyline" }),
-                T("rectangle", "Rectangle", "rectangle", kind === "drawing", { tool: "rectangle" }), T("circle", "Circle", "circle", kind === "drawing", { tool: "circle" }),
-                T("offset", "Offset", "offset", kind === "drawing", { tool: "offset" }), T("trim", "Trim", "trim", kind === "drawing", { tool: "trim" }),
-                T("extend", "Extend", "extend", kind === "drawing", { tool: "extend" }), T("fillet", "Fillet", "fillet", kind === "drawing", { tool: "fillet" }),
-                T("mirror", "Mirror", "mirror", kind === "drawing", { tool: "mirror" }), T("hatch", "Hatch", "hatch", kind === "drawing", { tool: "hatch" }),
-                T("rotate", "Rotate", "rotate", onPlan, { tool: "rotate", note: "Turn the selected walls, columns, floors, rooms … about a point you pick" }),
-                T("array", "Array", "array", !!store.project, { run: () => arrayDialog(store), note: "Repeat the selection along X, Y, Z or round a point, and keep the pattern editable" }), T("releasearray", "Release array", "array", !!store.project, { run: () => releaseArray(store), note: "Keep the copies of the selected array as ordinary elements and drop the pattern" })],
-            [T("dimension", "Dimension", "dimension", kind === "drawing", { tool: "dimension" }), T("text", "Text", "text", kind === "drawing", { tool: "text" })],
-            [T("wall", "Wall", "wall", onPlan, { tool: "wall" }), T("door", "Door", "door", onPlan, { tool: "door" }), T("window", "Window", "window", onPlan, { tool: "window" }), T("floor", "Floor", "floor", onPlan, { tool: "floor" }), T("roof", "Roof", "roof", onPlan, { tool: "roof" })],
-            [T("extrude", "Extrude", "extrude", onPlan, { tool: "extrude" }), T("void", "Void", "void", onPlan, { tool: "void" }), T("sweep", "Sweep", "sweep", onPlan, { tool: "sweep" }),
-                T("makevoid", "Make void", "void", !!store.project, { run: () => this.makeVoid(), note: "Turn the selected extrusions into voids that cut" })],
-            [T("section", "Section", "section", onPlan, { tool: "section" }), T("elevation", "Elevation", "elevation", true, { run: () => this.elevationMenu(this.ribbon) }), T("schedule", "Schedule", "table", true, { run: () => this.scheduleMenu(this.ribbon) }),
+        return [[sel],
+            [T("mirror", "Mirror", "mirror", kind === "drawing", { tool: "mirror" }),
+                T("hatch", "Hatch", "hatch", kind === "drawing", { tool: "hatch" }),
+                T("extend", "Extend", "extend", kind === "drawing", { tool: "extend" }),
+                T("rotate", "Rotate", "rotate", onPlan, { tool: "rotate" })],
+            [T("wall", "Wall", "wall", onPlan, { tool: "wall" }),
+                T("door", "Door", "door", onPlan, { tool: "door" }),
+                T("window", "Window", "window", onPlan, { tool: "window" }),
+                T("floor", "Floor", "floor", onPlan, { tool: "floor" }),
+                T("roof", "Roof", "roof", onPlan, { tool: "roof" })],
+            [T("section", "Section", "section", onPlan, { tool: "section" }),
+                T("elevation", "Elevation", "elevation", true, { run: () => this.elevationMenu(this.ribbon) }),
+                T("schedule", "Schedule", "table", true, { run: () => this.scheduleMenu(this.ribbon) }),
                 ...(isDoc ? [T("delview", "Delete view", "close", true, { run: () => this.deleteView() })] : [])]];
     }
     // ------------------------------------------------------------------------------------------------------------- render
@@ -559,7 +598,8 @@ export class Shell {
         }));
     }
     renderRibbon() {
-        const groups = this.tools().map((g) => h("div", { class: "group" }, g.map((d) => {
+        const names = this.menu === "Modifier" ? ["Boolean & Cutting", "Edge & Topology", "Deformation", "Transform & Pattern", "Form & Volume"] : [];
+        const groups = this.tools().map((g, index) => h("div", { class: "group" }, ...[names[index] ? h("span", { class: "ribbon-group-title", text: names[index] }) : null], ...g.map((d) => {
             const pressed = d.tool !== undefined && store.tool === d.tool;
             return h("button", {
                 class: "tool", type: "button", disabled: !d.implemented, attrs: { "aria-pressed": d.tool ? String(pressed) : undefined, title: d.implemented ? d.note || d.label : `${d.label}: ${d.note ?? NOT_YET}` },
@@ -628,7 +668,7 @@ export class Shell {
     renderStatus() {
         const kind = store.tab?.ref.kind;
         const sel = store.selection;
-        const count = sel?.kind === "sheet" ? 0 : sel?.ids.length ?? 0;
+        const count = sel?.kind === "model" || sel?.kind === "drawing" ? sel.ids.length : 0;
         const selection = sel?.kind === "sheet" ? "1 Sheet Selected" : count ? `${count} ${kind === "3d" ? (count === 1 ? "Object" : "Objects") : count === 1 ? "Element" : "Elements"} Selected` : "Nothing Selected";
         const mode = kind === "3d" ? (this.model.cam.ortho ? "Orthographic" : "Perspective") : kind === "sheet" ? "Sheet / 2D" : kind === "schedule" ? "Schedule" : kind === "drawing" ? `${store.tab?.title ?? ""} / 2D` : "";
         const modeBtn = kind === "3d" ? h("button", { type: "button", on: { click: () => this.model.setOrtho(!this.model.cam.ortho) }, attrs: { title: "Switch projection" } }, mode) : h("span", { text: mode });

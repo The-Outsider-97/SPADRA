@@ -110,7 +110,8 @@ export class Browser {
         const tab = this.store.tab, sel = this.store.selection;
         if (n.open && !n.id.startsWith("scene-") && tab && tab.ref.id === n.open.id && !n.id.startsWith("model-") && !n.id.startsWith("drawing-"))
             return true;
-        return !!(n.select && sel?.kind === "model" && sel.ids.includes(n.select.model));
+        return (sel?.kind === "level" && sel.id === n.id) ||
+            !!(n.select && sel?.kind === "model" && sel.ids.includes(n.select.model));
     }
     node(n, query, depth) {
         if (query && !this.matches(n, query))
@@ -227,16 +228,21 @@ export class Browser {
             this.store.openDialog?.(n.dialog, n.ref);
             return;
         }
-        if (n.open) {
-            await this.store.openTab(n.open, n.label);
+        // A level opens its plan and remains selected in Properties, including
+        // legacy roof levels whose plan is created on demand.
+        if (this.store.levels.some((level) => level.id === n.id)) {
+            if (n.open)
+                await this.store.openTab(n.open, n.label);
+            else {
+                const made = await this.store.run("level.ensure_plan", { id: n.id });
+                if (typeof made?.result["id"] === "string")
+                    await this.store.openTab({ kind: "drawing", id: made.result["id"] }, String(made.result["name"] ?? n.label));
+            }
+            await this.store.select({ kind: "level", id: n.id });
             return;
         }
-        // Legacy projects may have a level without a plan (notably Roof Level).
-        // Create its SDRW view once through the same transactional command as other project edits.
-        if (this.store.levels.some((level) => level.id === n.id)) {
-            const made = await this.store.run("level.ensure_plan", { id: n.id });
-            if (typeof made?.result["id"] === "string")
-                await this.store.openTab({ kind: "drawing", id: made.result["id"] }, String(made.result["name"] ?? n.label));
+        if (n.open) {
+            await this.store.openTab(n.open, n.label);
             return;
         }
         if (n.select) {

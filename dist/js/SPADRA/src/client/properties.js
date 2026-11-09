@@ -24,6 +24,8 @@ export function iconFor(p) {
         return p.category === "section" ? "section" : p.category === "elevation" ? "elevation" : p.category === "schedule" ? "table" : "plan";
     if (p.kind === "sheet")
         return "page";
+    if (p.kind === "level")
+        return "grid";
     if (p.kind === "entity")
         return p.category === "tag" ? "tag" : p.category === "dimension" ? "dimension" : p.category === "text" ? "text" : p.category === "circle" ? "circle" : "line";
     const byCategory = { wall: "wall", door: "door", window: "window", floor: "floor", roof: "roof", gutter: "gutter", downpipe: "downpipe", foundation: "foundation", structural: "beam", beam: "beam", column: "column", room: "room", stair: "stair", grid: "grid", generic: "family" };
@@ -121,6 +123,12 @@ function rowEl(store, p, row) {
         });
         const reset = h("button", { type: "button", class: "iconbtn remove", attrs: { title: `Reset ${row.label}`, "aria-label": `Reset ${row.label}` }, on: { click: () => void commit(store, p, key, "", "text") } }, glyph("close"));
         return h("div", { class: "prop-row" }, label, h("div", { class: "color-controls" }, h("div", { class: "color-controls-main" }, picker, hex, reset), rgb));
+    }
+    if (row.type === "multiline") {
+        const input = h("textarea", { id, attrs: { rows: 3, maxlength: 2000, "aria-label": row.label } });
+        input.value = String(row.value ?? "");
+        input.addEventListener("change", () => { void commit(store, p, key, input.value, "multiline"); });
+        return h("div", { class: "prop-row" }, label, input);
     }
     if (row.type === "sfb")
         return sfbRow(store, p, row, id, label);
@@ -283,8 +291,16 @@ async function removeRow(store, p, key) {
 /** Which command carries an edit of a row, and its parameters; null when the row is not editable here. Exported so a test can pin every mapping. */
 export function editCommand(p, key, value) {
     const ref = p.ref;
+    if (p.kind === "model" && key.startsWith("modifier:")) {
+        const [, modifier, ...parts] = key.split(":");
+        if (!modifier || !parts.length)
+            return null;
+        return { op: "model.set_modifier", params: { id: ref["model"], modifier, key: parts.join(":"), value } };
+    }
     if (p.kind === "model")
         return { op: "model.set_property", params: { id: ref["model"], key, value } };
+    if (p.kind === "level" && ["name", "description", "elevation", "height"].includes(key))
+        return { op: "level.set", params: { id: ref["level"], [key]: value } };
     if (p.kind === "sheet") {
         if (key.startsWith("vp:")) {
             const [, viewport, field] = key.split(":");
@@ -298,8 +314,8 @@ export function editCommand(p, key, value) {
         return { op: "view.set_cut_plane", params: { id: ref["view"], key, value } };
     if (p.kind === "view" && key === "name")
         return { op: "view.rename", params: { id: ref["view"], name: value } };
-    if (p.kind === "view" && key === "depth")
-        return { op: "view.set_section", params: { id: ref["view"], depth: value } };
+    if (p.kind === "view" && (key === "depth" || key === "angle"))
+        return { op: "view.set_section", params: { id: ref["view"], [key]: value } };
     if (p.kind === "view" && (key === "opening_direction" || key === "material_hatching"))
         return { op: "view.set_option", params: { id: ref["view"], key, value } };
     if (p.kind === "view" && key.startsWith("hatch:"))

@@ -15,7 +15,7 @@ const DRAG_PX = 4;
 const TOOL_KINDS = {
     offset: ["line", "polyline", "circle"], trim: ["line", "polyline"], extend: ["line", "polyline"], fillet: ["line"],
 };
-const PAINT_ORDER = ["foundation", "floor", "roof", "room", "extrusion", "sweep", "generic", "stair", "wall", "structural", "window", "door", "column", "gutter", "downpipe", "void", "grid"];
+const PAINT_ORDER = ["foundation", "floor", "roof", "room", "extrusion", "sweep", "generic", "stair", "wall", "structural", "window", "door", "opening_profile", "column", "gutter", "downpipe", "void", "grid"];
 const CURVE_TOOLS = new Set(["offset", "trim", "extend", "fillet", "hatch"]);
 const TURN_OFFSET_PX = 30;
 const PIVOTS = ["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"];
@@ -305,6 +305,14 @@ export class DrawingView {
                 void this.finish(false);
                 return;
             }
+            if (this.store.tool === "select" && e.shiftKey && !this.data?.projection) {
+                const wall = this.wallAt(this.toWorld(...this.local(e)));
+                if (wall) {
+                    e.preventDefault();
+                    void this.store.select({ kind: "model", ids: this.connectedWalls(wall) });
+                    return;
+                }
+            }
             const mark = this.store.tool === "select" ? this.markAt(this.toWorld(...this.local(e))) : null; // double-click a section line to open that section
             if (mark)
                 void this.store.openTab({ kind: "drawing", id: mark.id }, mark.name);
@@ -505,6 +513,11 @@ export class DrawingView {
                     this.pts = [p];
                 break;
             case "polyline":
+                // Coming back to the first point closes the shape, as in other CAD tools.
+                if (this.pts.length >= 3 && this.pts[0] && dist(this.toScreen(p), this.toScreen(this.pts[0])) <= PICK_PX + 2) {
+                    await this.finish(true, true);
+                    break;
+                }
                 this.pts = [...this.pts, p];
                 break;
             case "rectangle": {
@@ -530,12 +543,9 @@ export class DrawingView {
                     this.pts = [];
                 break;
             case "dimension":
-                if (this.pts.length < 2) {
+                // Only Enter commits: another pointer-up must never finalize a dimension.
+                if (this.pts.length < 2)
                     this.pts = [...this.pts, p];
-                    break;
-                }
-                if (await this.store.run("draw.dimension", { drawing: view, p1: this.pts[0], p2: this.pts[1], dimline_point: p }))
-                    this.pts = [];
                 break;
             case "text": {
                 const value = await promptDialog({ title: "Add text", label: "Text", confirmLabel: "Place", maxLength: 500 });
@@ -952,6 +962,35 @@ export class DrawingView {
         }
         return best;
     }
+    /** Walk the server's real wall-join graph, not coincident screen pixels.
+     *  The plan overlay contains only walls relevant to this view, so unrelated
+     *  levels and hidden geometry never enter the resulting selection. */
+    connectedWalls(seed) {
+        const graph = new Map();
+        for (const wall of this.data?.model ?? [])
+            if (wall.category === "wall") {
+                if (!graph.has(wall.id))
+                    graph.set(wall.id, new Set());
+                for (const other of wall.joins ?? [])
+                    graph.get(wall.id)?.add(other);
+            }
+        for (const [id, neighbours] of graph)
+            for (const other of neighbours) {
+                if (graph.has(other))
+                    graph.get(other)?.add(id);
+            }
+        const seen = new Set(), pending = [seed];
+        while (pending.length) {
+            const id = pending.pop();
+            if (seen.has(id) || !graph.has(id))
+                continue;
+            seen.add(id);
+            for (const other of graph.get(id) ?? [])
+                if (!seen.has(other))
+                    pending.push(other);
+        }
+        return [...seen];
+    }
     /** The smallest closed shape (closed polyline or circle) that the point is on or inside. */
     shapeAt(p) {
         let best = null, bestArea = Infinity;
@@ -1093,6 +1132,13 @@ export class DrawingView {
             this.fit();
             return;
         }
+        if (e.shiftKey && (e.key === "F" || e.key === "f") && this.markSel && this.store.tool === "select") {
+            e.preventDefault();
+            e.stopPropagation();
+            await this.store.run("view.flip_section", { id: this.markSel });
+            this.draw();
+            return;
+        }
         if (e.key === "Escape") {
             if (this.edit) {
                 this.edit = null;
@@ -1107,6 +1153,30 @@ export class DrawingView {
                 await this.finish(false);
             else
                 this.store.setTool("select");
+            return;
+        }
+        if (e.key === "Enter" && this.store.tool === "dimension") {
+            e.preventDefault();
+            if (this.pts.length === 2 && this.cursor && this.data) {
+                const [a, b] = this.pts;
+                const p = this.cursor;
+                const offset = Math.abs((b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]));
+                if (offset < 1e-9) {
+                    toast("Move the cursor away from the measured line before confirming.", { kind: "info" });
+                    return;
+                }
+                if (await this.store.run("draw.dimension", { drawing: this.data.view.id, p1: a, p2: b, dimline_point: p }))
+                    this.pts = [];
+                this.updateHint();
+                this.draw();
+            }
+            return;
+        }
+        if (e.key === "Backspace" && this.store.tool === "dimension" && this.pts.length) {
+            e.preventDefault();
+            this.pts.pop();
+            this.updateHint();
+            this.draw();
             return;
         }
         if (e.key === "Enter" && (this.store.tool === "polyline" || this.store.tool === "floor" || this.store.tool === "roof" || this.store.tool === "room" || this.store.tool === "extrude" || this.store.tool === "void" || this.store.tool === "sweep")) {
@@ -1375,8 +1445,12 @@ export class DrawingView {
         else if (element?.category === "wall" && element.axis) {
             const { a, b, thickness } = element.axis;
             const length = Math.max(dist(a, b), 1e-9), nx = -(b[1] - a[1]) / length, ny = (b[0] - a[0]) / length;
-            const center = mid(a, b), offset = thickness / 2 + 20 / this.scale;
-            points = [{ side: "left", at: [center[0] + nx * offset, center[1] + ny * offset] }, { side: "right", at: [center[0] - nx * offset, center[1] - ny * offset] }];
+            // The round turn handle stands above the middle of the selection, so the "+" buttons are moved along the wall, clear of it
+            // (a quarter of the length, but never closer than 24 screen pixels, nor further than 60), left side towards the start, right towards the end.
+            const centre = mid(a, b), offset = thickness / 2 + 20 / this.scale;
+            const along = Math.min(Math.max(length / 4, 24 / this.scale), 60 / this.scale), ux = (b[0] - a[0]) / length, uy = (b[1] - a[1]) / length;
+            const spot = (side, shift) => [centre[0] + side * nx * offset + shift * ux * along, centre[1] + side * ny * offset + shift * uy * along];
+            points = [{ side: "left", at: spot(1, -1) }, { side: "right", at: spot(-1, 1) }];
         }
         else if (element) {
             const bounds = polygonsBounds([element.polygon]);
@@ -1427,8 +1501,11 @@ export class DrawingView {
                         "aria-expanded": active ? "true" : "false", "data-focus-key": `join:${key}`
                     },
                     on: { click: (e) => { e.stopPropagation(); this.openedJoin = active ? null : { wall: wall.id, other: join.other, endpoint: join.endpoint }; this.draw(); } } });
-                icon.style.left = `${x}px`;
-                icon.style.top = `${y}px`;
+                // Keep the actual corner free for its square endpoint grip and
+                // overlapping-element selection. The connection button is a nearby
+                // contextual affordance, not a pointer blocker on top of geometry.
+                icon.style.left = `${Math.max(16, Math.min(this.width - 16, x + 21))}px`;
+                icon.style.top = `${Math.max(16, Math.min(this.height - 16, y - 21))}px`;
                 this.junctionControls.appendChild(icon);
                 if (!active)
                     continue;
@@ -2033,6 +2110,22 @@ export class DrawingView {
             }
             return;
         }
+        if (w.category === "opening_profile") {
+            // Each frame ring comes from a real horizontal SGEO intersection.
+            for (const ring of w.cut_polygons ?? []) {
+                ctx.beginPath();
+                ring.forEach((p, i) => { const [x, y] = this.toScreen(p); if (i)
+                    ctx.lineTo(x, y);
+                else
+                    ctx.moveTo(x, y); });
+                ctx.closePath();
+                ctx.setLineDash([]);
+                ctx.fillStyle = withAlpha(color, selected ? 0.5 : 0.3);
+                ctx.fill("evenodd");
+                ctx.stroke();
+            }
+            return;
+        }
         if (w.category === "foundation") { // below the cut plane, so drawn as hidden outline with a light tint
             trace();
             ctx.setLineDash([9, 4, 2, 4]);
@@ -2118,10 +2211,14 @@ export class DrawingView {
         }
         if (w.category === "downpipe") { // a ring with a dot: a pipe seen end-on, filled where it is cut
             trace();
-            ctx.setLineDash([]);
+            ctx.setLineDash(w.cut === false ? (w.overhead ? [6, 3] : [2, 4]) : []);
             ctx.fillStyle = withAlpha(k.paper, 1);
-            ctx.fill();
+            if (w.cut !== false)
+                ctx.fill();
             ctx.stroke();
+            ctx.setLineDash([]);
+            if (w.cut === false)
+                return;
             const xs = w.polygon.map((p) => this.toScreen(p)[0]), ys = w.polygon.map((p) => this.toScreen(p)[1]);
             const cx = (Math.min(...xs) + Math.max(...xs)) / 2, cy = (Math.min(...ys) + Math.max(...ys)) / 2;
             ctx.beginPath();
@@ -2523,6 +2620,29 @@ export class DrawingView {
             }
         }
         ctx.stroke();
+        if (tool === "dimension") {
+            // Temporary construction line: yellow is reserved for the active
+            // measurement guide; it is not a persistent SDRW entity.
+            ctx.save();
+            ctx.beginPath();
+            ctx.strokeStyle = "#FFD400";
+            ctx.lineWidth = 2;
+            ctx.setLineDash([8, 4]);
+            if (this.pts.length === 1)
+                this.line(first, p);
+            else {
+                const b = this.pts[1];
+                const dx = b[0] - first[0], dy = b[1] - first[1];
+                const len = Math.hypot(dx, dy);
+                if (len > 1e-9) {
+                    const nx = -dy / len, ny = dx / len;
+                    const offset = (p[0] - first[0]) * nx + (p[1] - first[1]) * ny;
+                    this.line([first[0] + nx * offset, first[1] + ny * offset], [b[0] + nx * offset, b[1] + ny * offset]);
+                }
+            }
+            ctx.stroke();
+            ctx.restore();
+        }
         const readout = this.previewReadout(first, p);
         if (readout) {
             const [sx, sy] = this.toScreen(p);
@@ -2626,12 +2746,12 @@ export class DrawingView {
     updateHint() {
         const n = this.pts.length;
         const hints = {
-            select: this.data?.projection ? "Click an element to select it. Sections and elevations are drawn from the model: change the model to change them." : "Click to select, drag a window to select several, drag an element to move it. Drag the square grips to stretch a wall or a section line, the round one to rotate. Click a wall's length to type a new one. Double-click a section line to open that section.",
+            select: this.data?.projection ? "Click an element to select it. Sections and elevations are drawn from the model: change the model to change them." : "Click to select, drag a window to select several, drag an element to move it. Drag the square grips to stretch a wall or a section line, the round one to rotate. Click a wall's length to type a new one. Shift+double-click selects connected walls. Double-click a section line to open it; select the line and press Shift+F to reverse the actual cut direction.",
             line: n ? "Pick the next point. Shift keeps it horizontal or vertical. Esc ends the chain." : "Pick the first point of the line.",
             polyline: n ? "Pick the next point. Enter or double-click finishes, C closes it, Esc cancels." : "Pick the first point of the polyline.",
             rectangle: n ? "Pick the opposite corner." : "Pick the first corner.",
             circle: n ? "Pick a point on the circle." : "Pick the centre.",
-            dimension: n === 0 ? "Pick the first point to measure." : n === 1 ? "Pick the second point." : "Pick where the dimension line goes.",
+            dimension: n === 0 ? "Pick the first point to measure." : n === 1 ? "Pick the second point." : "Move the yellow guide to position the dimension. Enter confirms; Backspace removes a point; Esc cancels.",
             text: "Click where the text starts.",
             wall: n ? "Pick the next corner of the wall chain. Shift keeps it straight. Double-click, right-click or Esc ends." : "Pick the start of the wall. Walls snap to the ends and middles of other walls.",
             rotate: !this.turnable().length ? "Select what to rotate first, then choose Rotate." : n === 0 ? "Pick the centre of rotation." : n === 1 ? "Pick a point to start the turn from." : "Pick where that direction should end up.",

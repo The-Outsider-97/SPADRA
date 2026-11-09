@@ -97,15 +97,21 @@ export async function gutterDialog(store) {
     const request = () => {
         const out = { roof, edges: [...chosen].sort((a, b) => a - b), gutter: kind.value, width: Number(width.value), depth: Number(depth.value), fall: Number(fall.value),
             material: material.value, gap: Number(gap.value), drop: Number(drop.value), ext_start: Number(extStart.value), ext_end: Number(extEnd.value), end_start: endStart.value, end_end: endEnd.value,
-            connect: connect.checked, diameter: Number(diameter.value) };
+            connect: connect.checked, diameter: Number(diameter.value), downpipe: pipe.checked };
         if (fallTo.value)
             out.fall_to = fallTo.value;
         return out;
     };
-    const paint = () => { clear(plan); plan.append(previewPlan(info, latest, outline, chosen, freeSet, (edge) => { const b = boxes.find((x) => x.edge === edge); if (b) {
-        b.box.checked = !b.box.checked;
-        sync();
-    } })); };
+    const paint = () => {
+        clear(plan);
+        // With downpipes off, low points remain defined but no outlet is drawn.
+        const shown = !pipe.checked && latest ? { ...latest,
+            runs: latest.runs.map((r) => ({ ...r, outlets: [] })) } : latest;
+        plan.append(previewPlan(info, shown, outline, chosen, freeSet, (edge) => { const b = boxes.find((x) => x.edge === edge); if (b) {
+            b.box.checked = !b.box.checked;
+            sync();
+        } }));
+    };
     const refresh = async () => {
         const mine = ++seq;
         if (!chosen.size) {
@@ -121,7 +127,7 @@ export async function gutterDialog(store) {
             latest = out.problems.length ? null : out;
             outline = out.outline ?? outline;
             const runs = out.runs;
-            status.textContent = out.problems.length ? out.problems.join(" ") : `${runs.length} run${runs.length === 1 ? "" : "s"}: ${runs.map((r) => `${r.segments.length} piece${r.segments.length === 1 ? "" : "s"}${r.closed ? " in a closed loop" : ""}, ${r.length_m.toFixed(2)} m`).join("; ")}. ${runs.reduce((n, r) => n + r.outlets.length, 0)} downpipe${runs.reduce((n, r) => n + r.outlets.length, 0) === 1 ? "" : "s"} at the low points.`;
+            status.textContent = out.problems.length ? out.problems.join(" ") : `${runs.length} run${runs.length === 1 ? "" : "s"}: ${runs.map((r) => `${r.segments.length} piece${r.segments.length === 1 ? "" : "s"}${r.closed ? " in a closed loop" : ""}, ${r.length_m.toFixed(2)} m`).join("; ")}. ${pipe.checked ? runs.reduce((n, r) => n + r.outlets.length, 0) : 0} downpipe${pipe.checked && runs.reduce((n, r) => n + r.outlets.length, 0) === 1 ? "" : "s"} at the low points.`;
             status.classList.toggle("error", out.problems.length > 0);
         }
         catch (e) {
@@ -146,7 +152,7 @@ export async function gutterDialog(store) {
         width.value = String(t.width);
         depth.value = String(t.depth);
     } sync(); });
-    pipe.addEventListener("change", () => { diameter.disabled = !pipe.checked; });
+    pipe.addEventListener("change", () => { diameter.disabled = !pipe.checked; sync(); });
     for (const el of [width, depth, fall, fallTo, material, gap, drop, extStart, extEnd, endStart, endEnd, connect, diameter, ...boxes.map((b) => b.box)])
         el.addEventListener("change", sync);
     const two = (a, b) => h("div", { css: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" } }, a, b);

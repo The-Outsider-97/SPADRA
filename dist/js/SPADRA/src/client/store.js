@@ -4,6 +4,7 @@ import { openDialog, openMenu, promptDialog, toast } from "../../../tools/web/sr
 import { h } from "../../../tools/web/src/dom.js";
 import { Emitter } from "../../../tools/web/src/util.js";
 import { oneLine, present, presentUnexpected } from "./errors.js";
+import { closedPolylinePoints } from "./geom2d.js";
 import { importDialog } from "./interchange.js";
 const formatOf = (ref) => (ref.kind === "3d" ? "SGEO" : ref.kind === "schedule" ? "Schedule" : "SDRW");
 /** A true/false setting kept in this browser only (a convenience for this person; the project does not depend on it). */
@@ -134,8 +135,8 @@ export class Store {
             if (!data)
                 continue;
             for (const entity of data.entities) {
-                const geometry = entity.geometry;
-                if (entity.kind !== "polyline" || geometry["closed"] !== true || !Array.isArray(geometry["points"]) || geometry["points"].length < 3)
+                // Closed by its flag or drawn back to its first point; a drawing that is listed twice in the tree is offered once.
+                if (!closedPolylinePoints(entity) || sources.some((s) => s.drawing === node.open?.id && s.entity === entity.id))
                     continue;
                 sources.push({ drawing: node.open.id, entity: entity.id, label: `${node.label} · ${entity.layer} · ${entity.id.slice(0, 8)}` });
             }
@@ -348,7 +349,7 @@ export class Store {
     /** After an edit, undo or delete, forget selected things that no longer exist instead of asking the server about them. */
     dropVanishedSelection() {
         const sel = this.selection;
-        if (!sel || sel.kind === "sheet")
+        if (!sel || sel.kind === "sheet" || sel.kind === "level")
             return;
         if (sel.kind === "model" && this.animation?.animation)
             return; // an element the animation hides is not in the picture but is still there; loadProperties drops a really deleted one
@@ -453,6 +454,8 @@ export class Store {
             ref = { drawing: sel.view, entity: sel.ids[0] };
         else if (sel.kind === "sheet")
             ref = { sheet: sel.id };
+        else if (sel.kind === "level")
+            ref = { level: sel.id };
         if (!ref)
             return;
         // The selected thing may be gone (deleted, or undone away). That is not an error to show: there is just nothing selected now.
@@ -729,6 +732,8 @@ export class Store {
     /** The Project Browser row that stands for the current selection, so the browser can reveal it. */
     selectedNodeId() {
         const sel = this.selection;
+        if (sel?.kind === "level")
+            return sel.id;
         if (sel?.kind !== "model" || !sel.ids[0])
             return null;
         return flatten(this.tree).find((n) => n.select?.model === sel.ids[0])?.id ?? null;
