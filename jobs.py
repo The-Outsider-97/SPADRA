@@ -234,11 +234,11 @@ class JobManager:
         except Cancelled:
             job.status, job.message = "cancelled", "Cancelled; nothing was changed"
         except AppError as exc:
-            job.status, job.error, job.message = "failed", describe(exc), exc.message
-            self.diagnostics.record(f"job:{job.kind}", exc, job=job.id)
+            self.diagnostics.record(f"job:{job.kind}", exc, job=job.id)      # recorded first: a caller that sees "failed" can already read the entry
+            job.error, job.message, job.status = describe(exc), exc.message, "failed"
         except Exception as exc:                                   # noqa: BLE001 - a job must always end in a state the interface can show
-            job.status, job.error, job.message = "failed", describe(exc), "Something went wrong inside SPADRA"
             self.diagnostics.record(f"job:{job.kind}", exc, job=job.id)
+            job.error, job.message, job.status = describe(exc), "Something went wrong inside SPADRA", "failed"
         finally:
             job.finished = time.time()
             if job.file is not None and job.status != "done":

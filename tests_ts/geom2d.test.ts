@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { alongFrom, angleBetween, polygonsBounds, rotateAbout, roundAngle, wallBand, distToSegment, entityBounds, formatDimension, pointInPolygon, polygonDistance, entityDistance, fitBox, insideBox, niceStep, normaliseRect, orthoConstrain, segmentIntersection, snapPoint } from "../src/client/geom2d.js";
+import { closedPolylinePoints, closedLoop, alongFrom, angleBetween, polygonsBounds, rotateAbout, roundAngle, wallBand, distToSegment, entityBounds, formatDimension, pointInPolygon, polygonDistance, entityDistance, fitBox, insideBox, niceStep, normaliseRect, orthoConstrain, segmentIntersection, snapPoint } from "../src/client/geom2d.js";
 import type { Entity } from "../src/client/types.js";
 
 const line = (id: string, a: [number, number], b: [number, number]): Entity => ({ id, kind: "line", layer: "0", geometry: { start: a, end: b } });
@@ -136,5 +136,21 @@ describe("turning and stretching", () => {
   it("finds the point at a given length along a wall from its first end", () => {
     close(alongFrom([0, 0], [3, 4], 10), [6, 8]);
     close(alongFrom([1, 1], [1, 5], 2), [1, 3]);
+  });
+});
+
+describe("closed polylines", () => {
+  const poly = (id: string, points: Array<[number, number]>, closed: boolean): Entity => ({ id, kind: "polyline", layer: "0", geometry: { points, closed } });
+  it("treats a flagged polyline and one drawn back to its first point alike, without the repeated corner", () => {
+    const flagged = poly("a", [[0, 0], [10, 0], [10, 10]], true);
+    const looped = poly("b", [[0, 0], [10, 0], [10, 10], [0, 0]], false);
+    assert.deepEqual(closedPolylinePoints(flagged), [[0, 0], [10, 0], [10, 10]]);
+    assert.deepEqual(closedPolylinePoints(looped), [[0, 0], [10, 0], [10, 10]]);
+    assert.deepEqual(closedLoop(looped), [[0, 0], [10, 0], [10, 10]]);
+  });
+  it("leaves an open polyline, a line and too few points open", () => {
+    assert.equal(closedPolylinePoints(poly("c", [[0, 0], [10, 0], [10, 10]], false)), null);
+    assert.equal(closedPolylinePoints(poly("d", [[0, 0], [10, 0], [0, 0]], false)), null);      // a line out and back is not a shape
+    assert.equal(closedPolylinePoints(line("e", [0, 0], [1, 1])), null);
   });
 });

@@ -284,7 +284,7 @@ def classify(project: Any, vid: str) -> list[dict[str, Any]]:
                 rows.append({"id": oid, "name": name, "category": cat, "state": "unsupported", "reason": exc.message})
                 continue
             mine = [n for who, n in notes if who == vid]
-            made = any((c["id"] if isinstance(c, dict) else c[4]) == vid for c in cuts)
+            made = vid in FX.cut_ids(cuts)
             if not made and not mine:
                 continue                                                      # apart from it
             kind = "opening" if cat == "wall" else "notch" if getattr(cuts, "outline", None) else "hole"

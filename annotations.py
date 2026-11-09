@@ -5,8 +5,9 @@ field it shows (``spadra:tag_field``). Its text is *derived*: whenever a command
 same command, so the drawing, the model and the schedules always agree about a door's mark, a room's name or a window's size, and a single
 Undo puts the element and its tags back together.
 
-* Only entities that carry the tag metadata are ever rewritten. Every other note, dimension and line in a drawing is the person's own, and
-  is never touched by a model change (manual annotations are preserved).
+* Only entities that carry the tag metadata are ever rewritten. Every other note and line in a drawing is the person's own, and is never
+  touched by a model change (manual annotations are preserved). The one exception is a dimension point placed on a wall face, which follows
+  that face (see ``dimension_links``).
 * If the tagged element is deleted the tag keeps its last text, is marked detached, and is reported by the model check, so a broken
   association is visible rather than silently wrong. Undo of the deletion re-attaches it.
 """

@@ -190,10 +190,16 @@ def _parsed(kind: str, fmt: str, raw: bytes, name: str, unit: str | None, build:
         if hit is not None:
             _PARSED.move_to_end(key)
     if hit is not None:
-        return hit[0].copy(fresh_id=False), dict(hit[1])
+        doc = hit[0].copy(fresh_id=False)
+        if hasattr(doc, "_source_version"):                      # a copy is a new document: keep what version the file was written as, for the report
+            doc._source_version = getattr(hit[0], "_source_version", None)
+        return doc, dict(hit[1])
     doc, report = build()
+    kept = doc.copy(fresh_id=False)
+    if hasattr(kept, "_source_version"):
+        kept._source_version = getattr(doc, "_source_version", None)
     with _PARSED_LOCK:
-        _PARSED[key] = (doc.copy(fresh_id=False), dict(report))
+        _PARSED[key] = (kept, dict(report))
         while len(_PARSED) > PARSED_ENTRIES:
             _PARSED.popitem(last=False)
     return doc, report
@@ -368,12 +374,15 @@ def import_model(project: Any, fmt: str, raw: bytes, *, name: str, unit: str = "
     check = inspect_file("model", fmt, raw, name=name, unit=unit)
     _require_valid(check)
     source, adapter = _read_model(fmt, raw, name=name, unit=unit)
+    written_as = source.source_version                              # a copy made for the unit change does not carry it
     if source.unit != model.unit:
         source = source.copy(fresh_id=False)
         source.convert_unit(model.unit)
     if len(_page_ids(model)) + len(_page_ids(source)) > MAX_MODEL_OBJECTS:
         raise LimitExceeded(f"The model would hold more than {MAX_MODEL_OBJECTS} objects")
-    if fmt == "sgeo":
+    if fmt == "sgeo" and source.document_kind == "family":
+        counts, lost, warnings, assumptions = _merge_family_file(project, source, written_as)
+    elif fmt == "sgeo":
         counts, lost, warnings, assumptions = _merge_native(project, source, name)
     else:
         counts, lost, warnings, assumptions = _merge_foreign(model, source, name), [], [], []
@@ -381,6 +390,23 @@ def import_model(project: Any, fmt: str, raw: bytes, *, name: str, unit: str = "
                                lost=(adapter.get("dropped") or []) + lost if adapter or lost else lost, warnings=(adapter.get("warnings") or []) + warnings + [i["message"] for i in check["issues"] if i["severity"] == "warning"],
                                assumptions=(adapter.get("assumptions") or []) + assumptions)
     return {"objects": counts["objects"], "report": report}
+
+
+def _merge_family_file(project: Any, source: SGEODocument, written_as: str | None) -> tuple[dict[str, int], list[str], list[str], list[str]]:
+    """A family file (SGEO ``document_kind`` ``family``): its families arrive with their typed parameters, formulas, bounds and named types, no objects."""
+    from . import families as FM
+    rows = FM.import_family_file(project, source)
+    warnings = [f"Family '{r['name']}' was renamed because that name is already used" for r in rows if r["status"] == "renamed"]
+    assumptions = [f"Family '{r['name']}' is already in the project unchanged, so it was not added again" for r in rows if r["status"] == "present"]
+    if written_as and written_as != _current_version():
+        assumptions.append(f"The file was written as SGEO {written_as} and was upgraded in memory; the file itself is unchanged")
+    added = [r for r in rows if r["status"] != "present"]
+    return {"objects": 0, "families": len(added), "family_types": sum(r["types"] for r in added)}, [], warnings, assumptions
+
+
+def _current_version() -> str:
+    from src.utils.spatial_formats.documents import CURRENT_VERSION
+    return CURRENT_VERSION
 
 
 def _hierarchy_order(source: SGEODocument, ids: list[str]) -> list[str]:
@@ -507,7 +533,8 @@ def _merge_native(project: Any, source: SGEODocument, label: str) -> tuple[dict[
             while name.lower() in used:
                 n += 1
                 name = f"{fam['name']} {n}"
-            families[fam["id"]] = model.define_family(name, fam["parameters"], fam["generator"]["kind"], family_id=fam["id"] if fam["id"] not in have else None)
+            families[fam["id"]] = model.define_family(name, fam["parameters"], fam["generator"]["kind"], types=fam.get("types"),
+                                                         family_id=fam["id"] if fam["id"] not in have else None)
         missing_level = 0
         for oid in _hierarchy_order(source, ids):
             obj = source.get(oid)
@@ -565,7 +592,8 @@ def _merge_native(project: Any, source: SGEODocument, label: str) -> tuple[dict[
                 meta[f"{E.NS}:top_to"] = top_to
             options = {"name": obj.get("name") or label, "parent": mapped_ids.get(obj.get("parent")), "transform": obj["transform"], "metadata": meta, "object_id": mapped_ids[oid]}
             if "family_id" in obj:
-                model.instantiate(families[obj["family_id"]], obj.get("parameters") or {}, **options)
+                kind = obj.get("family_type")                      # the named type the instance followed: without it the instance falls back to the family defaults
+                model.instantiate(families[obj["family_id"]], obj.get("parameters") or {}, **({"family_type": kind} if kind else {}), **options)
             elif obj.get("geometry") is None:
                 model.add_group(**options)
             else:
@@ -588,9 +616,39 @@ def _merge_native(project: Any, source: SGEODocument, label: str) -> tuple[dict[
 
 
 # ---------------------------------------------------------------------------------------------------------------------------- model out
+def _project_only_data(project: Any) -> list[str]:
+    """What SPADRA keeps in the project manifest and an SGEO file does not carry. The elements those things made stay in the file as ordinary elements; the
+    recipes, sources and logs that produced them do not, so they stop regenerating or being re-runnable outside the project."""
+    out = []
+    scripts = project.manifest.get("scripts") or []
+    if scripts:
+        out.append(f"{len(scripts)} Python script(s) with {sum(len(s.get('versions', ())) for s in scripts)} version(s) and their approvals (kept in the SPADRA project, not in the SGEO file)")
+    if project.manifest.get("script_applications"):
+        out.append(f"{len(project.manifest['script_applications'])} script provenance record(s) (script, version, source hash, seed, result hash)")
+    groups = project.manifest.get("procedural") or []
+    if groups:
+        out.append(f"{len(groups)} procedural group recipe(s): their generated elements stay as ordinary elements but no longer regenerate when the host wall changes")
+    constraints = project.manifest.get("model_constraints") or []
+    if constraints:
+        out.append(f"{len(constraints)} constraint(s) between walls, beams and columns (kept in the SPADRA project; the elements keep their positions but are no longer held to the relations)")
+    return out
+
+
+def _animation_lost(model: Any, fmt: str) -> list[str]:
+    """The model's animation (a door swing, keyframes) in a format that cannot carry it: said in the report, not dropped quietly."""
+    try:
+        anim = model.animation()
+    except Exception:
+        return []
+    if not anim:
+        return []
+    tracks = len(anim.get("tracks", ())) if isinstance(anim, Mapping) else 0
+    return [f"the animation ({tracks} track(s)): a {fmt.upper()} file written here carries no animation; export SGEO to keep it"]
+
+
 def export_model(project: Any, fmt: str, object_ids: list[str] | None = None) -> tuple[bytes, dict[str, Any]]:
-    """The model as ``fmt`` bytes with its conversion report. ``sgeo`` is native and carries everything: the elements' parameters, families, hierarchy
-    and the levels they stand on. GLB, STL and OBJ are triangle surfaces in world coordinates; the report lists what that loses."""
+    """The model as ``fmt`` bytes with its conversion report. ``sgeo`` is native: it carries the elements' parameters, families (with their types and formulas), hierarchy
+    and the levels they stand on, but not the project-only data ``_project_only_data`` lists, which the report names. GLB, STL and OBJ are triangle surfaces in world coordinates; the report lists what that loses."""
     if fmt not in MODEL_EXPORT:
         raise BadRequest(f"Cannot export the model as '{fmt}'", details={"formats": list(MODEL_EXPORT)})
     model = project.model
@@ -613,6 +671,7 @@ def export_model(project: Any, fmt: str, object_ids: list[str] | None = None) ->
             data = doc.dumps()
             adapter: dict[str, Any] = {}
             counts.update(families=len(model.families()), levels=len(project.manifest["levels"]))
+            adapter["dropped"] = _project_only_data(project)
         else:
             cutters = [i for i in ids if E.m(model.get(i)["metadata"], "category") == "void"]            # a void removes material: it is not a surface of the building
             selected = None if object_ids is None and not cutters else [i for i in ids if i not in cutters]
@@ -638,8 +697,9 @@ def export_model(project: Any, fmt: str, object_ids: list[str] | None = None) ->
         if (project.manifest.get("material_colors") or any(E.m(model.get(i)["metadata"], "color") or
                 any(row.get("color") for row in E.m(model.get(i)["metadata"], "layers", []) or []) for i in ids)):
             unsupported.append(f"SPADRA shared and local material appearance overrides are not mapped to {fmt.upper()} surfaces")
+    lost = list(adapter.get("dropped") or []) + (_animation_lost(model, fmt) if fmt != "sgeo" else [])
     return data, conversion_report(direction="export", fmt=fmt, name=project.name, size=len(data), sha256=hashlib.sha256(data).hexdigest(), target="file", adapter=adapter,
-                                   converted=counts, unsupported=unsupported, lost=adapter.get("dropped") if fmt != "sgeo" else [])
+                                   converted=counts, unsupported=unsupported, lost=lost)
 
 
 # --------------------------------------------------------------------------------------------------------------------------- drawing in

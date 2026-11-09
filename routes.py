@@ -215,6 +215,282 @@ def families(app: SpadraApp, req: Request) -> Any:
         return {"families": FM.listing(project), "shapes": {k: list(v[1]) for k, v in FM.SHAPES.items()}, "types": list(FM.TYPES), "levels": project.manifest["levels"]}
 
 
+@router.route("GET", "/api/families/templates")
+def family_templates(app: SpadraApp, req: Request) -> Any:
+    """The starter families (door, window, beam) that ``family.from_template`` can create. Read-only."""
+    from . import family_templates as FT
+    return {"templates": FT.catalog()}
+
+
+@router.route("POST", "/api/families/formula")
+def family_formula(app: SpadraApp, req: Request) -> Any:
+    """Validate a formula against a family's parameters and preview its value. Read-only: nothing in the project changes."""
+    from . import families as FM
+    body = req.json()
+    with app.lock:
+        return FM.check_formula(app.require(), body)
+
+
+@router.route("GET", "/api/doors/{door}/swing/verify")
+def door_swing_verify(app: SpadraApp, req: Request) -> Any:
+    """Sample the evaluated swing animation and check the smoothstep law, monotone motion, angle bounds and a fixed hinge axis. Read-only; kinematics only."""
+    from . import door_swing as DS
+    with app.lock:
+        try:
+            samples = int(req.query.get("samples", 49))
+        except ValueError:
+            raise BadRequest("samples must be a whole number")
+        project = app.require()
+        return DS.verify_motion(project, project._animatable(req.params["door"]), samples=samples)
+
+
+@router.route("GET", "/api/doors/{door}/swing")
+def door_swing_preview(app: SpadraApp, req: Request) -> Any:
+    """How a door would open (the signed turn, and how far the leaf clears other elements). Read-only; ``degrees`` defaults to 90."""
+    from . import door_swing as DS
+    with app.lock:
+        try:
+            degrees = float(req.query.get("degrees", 90))
+        except ValueError:
+            raise BadRequest("degrees must be a number")
+        try:
+            tolerance = float(req.query.get("tolerance_mm", DS.PENETRATION * 1000))
+        except ValueError:
+            raise BadRequest("tolerance_mm must be a number")
+        return DS.plan(app.require(), req.params["door"], degrees, tolerance_mm=tolerance)
+
+
+@router.route("GET", "/api/scripts")
+def scripts_list(app: SpadraApp, req: Request) -> Any:
+    """The project's scripts with their versions, and what isolation this machine actually enforces."""
+    from . import scripting as SC
+    with app.lock:
+        return SC.describe(app.require())
+
+
+@router.route("GET", "/api/scripts/{script}")
+def script_source(app: SpadraApp, req: Request) -> Any:
+    from . import scripting as SC
+    with app.lock:
+        return SC.source_of(app.require(), req.params["script"], req.query.get("version"))
+
+
+@router.route("POST", "/api/scripts/propose")
+def script_propose(app: SpadraApp, req: Request) -> Any:
+    """Make a reviewable proposal from a previewed script run. Nothing changes until a person approves it through the assistant."""
+    from . import scripting as SC
+    from .assistant import ASSISTANT
+    body = req.json()
+    with app.lock:
+        project = app.require()
+        pl = SC.plan(project, body)
+        rec = pl["run"]
+        steps = pl["steps"] + [{"op": "script.record", "params": {"record": pl["record"]}}]
+        msg = ASSISTANT.propose_commands(project, source=f"script:{rec['name']} v{rec['version']}", title=f"Apply the result of script “{rec['name']}” (version {rec['version']})",
+                                         explanation=(f"The script ran in {rec['isolation']} isolation on a copy of the model at revision {rec['revision']} and returned {len(rec['outputs'])} validated "
+                                                      f"output(s). Approving writes them to {len(pl['steps'])} parameter target(s) and records the script version, source hash, seed and result hash."),
+                                         steps=steps, targets=[s["params"].get("id") for s in pl["steps"] if s["op"] == "model.set_property"],
+                                         evidence={k: pl["record"][k] for k in ("script", "version", "sha256", "seed", "result_sha256")}, evidence_kind="script")
+        return {"message": msg, "project": project.summary()}
+
+
+@router.route("POST", "/api/optimize/family/propose")
+def optimize_propose(app: SpadraApp, req: Request) -> Any:
+    """Run an optimization and, when it found a feasible buildable point, make a reviewable proposal from it. Nothing changes until a person approves."""
+    from . import optimization as OPZ
+    from .assistant import ASSISTANT
+    with app.lock:
+        project = app.require()
+        out = OPZ.optimize_family(project, req.json())
+        prop = out.get("proposal") or {}
+        if not prop.get("commands"):
+            return {"result": out, "message": None}
+        msg = ASSISTANT.propose_commands(project, source="optimization", title="Apply the optimized parameter values",
+                                         explanation=(f"A deterministic search ({out['evaluations']} evaluations, seed {out['seed']}) found values that satisfy the stated constraints. "
+                                                      "It is a search result, not a proof of optimality. Approving changes the family type only."),
+                                         steps=[{"op": c["command"], "params": c["params"]} for c in prop["commands"]], evidence={k: out[k] for k in ("status", "result_sha256", "objectives", "constraints", "seed")},
+                                         evidence_kind="optimization")
+        return {"result": out, "message": msg}
+
+
+@router.route("GET", "/api/model-constraints")
+def model_constraints(app: SpadraApp, req: Request) -> Any:
+    """The stored constraints between walls, beams and columns, with their values in the project's units and whether each reference still resolves."""
+    from . import model_constraints as MC
+    with app.lock:
+        return {"constraints": MC.describe(app.require())}
+
+
+@router.route("POST", "/api/model-constraints/analyze")
+def model_constraints_analyze(app: SpadraApp, req: Request) -> Any:
+    """Solve a copy of the model's constraints and report status, degrees of freedom, conflicts and where elements would move. Read-only."""
+    from . import model_constraints as MC
+    body = req.json()
+    with app.lock:
+        return MC.analyze(app.require(), body.get("fixed") or [])
+
+
+@router.route("POST", "/api/families/draft")
+def family_draft(app: SpadraApp, req: Request) -> Any:
+    """A requirement in words -> a typed family draft, from a fixed set of patterns (no language model; see ``family_nl``). Read-only: it creates nothing, lists what it read,
+    what it could not model and the choices it left open (``overrides`` answers them with values in mm)."""
+    from . import family_nl as NL
+    body = req.json()
+    return NL.interpret(body.get("text"), overrides=body.get("overrides"))
+
+
+@router.route("POST", "/api/families/draft/propose")
+def family_draft_propose(app: SpadraApp, req: Request) -> Any:
+    """Make the draft a reviewable proposal (dry-run on a scratch copy; nothing changes until a person approves). Refused while a blocking choice is neither answered
+    (``overrides``) nor accepted at its template default (``accept``: parameter names, or ``["all"]``)."""
+    from . import family_nl as NL
+    body = req.json()
+    with app.lock:
+        out = NL.propose(app.require(), body.get("text"), accept=body.get("accept") or (), overrides=body.get("overrides"))
+        return {"draft": out["draft"], "message": out["proposal"]}
+
+
+@router.route("POST", "/api/optimize/beam")
+def optimize_beam(app: SpadraApp, req: Request) -> Any:
+    """Minimise a rectangular beam family's volume over its width and height under a declared deflection limit (support, load, line load and modulus must all be given:
+    a missing one gives status ``unavailable``, never a default). With ``propose: true`` a feasible result becomes a reviewable proposal; nothing changes until approved."""
+    from . import optimization as OPZ
+    from .assistant import ASSISTANT
+    body = req.json()
+    with app.lock:
+        project = app.require()
+        out = OPZ.optimize_beam_family(project, body)
+        prop = out.get("proposal") or {}
+        if not body.get("propose") or not prop.get("commands"):
+            return {"result": out, "message": None}
+        msg = ASSISTANT.propose_commands(project, source="optimization", title="Apply the beam section from the deflection-limited search",
+                                         explanation=("A deterministic search found a section that meets the stated deflection limit for the declared support, load and modulus. "
+                                                      "It checks stiffness only: strength, buckling, vibration, connections and codes are not evaluated. Approving changes the family type only."),
+                                         steps=[{"op": c["command"], "params": c["params"]} for c in prop["commands"]],
+                                         evidence={k: out[k] for k in ("status", "result_sha256", "objectives", "constraints", "seed")}, evidence_kind="optimization")
+        return {"result": out, "message": msg}
+
+
+@router.route("POST", "/api/workflows/design")
+def design_workflow(app: SpadraApp, req: Request) -> Any:
+    """Run a typed, revision-aware design workflow for a contract (project, expected revision, family, parameters, objective, budgets, correlation key). Every stage reports
+    success, partial, unavailable, infeasible, timeout, stale or failed with the component and revision that produced it. Nothing changes; with ``propose: true`` a result whose
+    evidence is complete enough becomes a reviewable proposal (approval is still a person's), and a project that moved on since the expected revision is ``stale``."""
+    from . import design_workflow as DW
+    from .assistant import ASSISTANT
+    body = req.json()
+    propose = bool(body.pop("propose", False)) if isinstance(body, dict) else False
+    with app.lock:
+        project = app.require()
+        out = DW.run(project, body)
+        if not propose or not out["commit_allowed"]:
+            return {"result": out, "message": None}
+        prop = out["proposal"]
+        msg = ASSISTANT.propose_commands(project, source="workflow", title="Apply the design workflow's candidate",
+                                         explanation=(f"Workflow {out['correlation_key']} ({out['status']}): a deterministic search found a candidate that satisfies the stated constraints and was "
+                                                      f"re-evaluated independently. Not run: {', '.join(out['not_run_or_unavailable']) or 'nothing'}. Approving changes the family type only."),
+                                         steps=[{"op": c["command"], "params": c["params"]} for c in prop["commands"]],
+                                         evidence={"schema": out["schema"], "status": out["status"], "correlation_key": out["correlation_key"], "contract_sha256": out["contract_sha256"],
+                                                   "stages": [{k: s[k] for k in ("stage", "status", "agent", "revision")} for s in out["stages"]]},
+                                         evidence_kind="optimization")
+        return {"result": out, "message": msg}
+
+
+@router.route("POST", "/api/optimize/family/alternatives")
+def optimize_alternatives(app: SpadraApp, req: Request) -> Any:
+    """Several different feasible, buildable designs (deterministic for a seed). With ``propose: true`` they are offered as one reviewable proposal that adds each as a
+    named type; nothing changes until a person approves."""
+    from . import optimization as OPZ
+    from .assistant import ASSISTANT
+    body = req.json()
+    with app.lock:
+        project = app.require()
+        out = OPZ.alternatives_family(project, body)
+        steps = [{"op": a["command"]["command"], "params": a["command"]["params"]} for a in out["alternatives"] if a.get("command")]
+        if not body.get("propose") or not steps:
+            return {"result": out, "message": None}
+        msg = ASSISTANT.propose_commands(project, source="alternatives", title=f"Add {len(steps)} design option(s) as family types",
+                                         explanation=(f"A deterministic sample ({out['evaluations']} candidates, seed {out['seed']}) gave {len(steps)} different designs that satisfy the stated constraints and can be built. "
+                                                      "They are samples, not a proof that nothing better exists. Approving adds each as a named type; nothing else changes."),
+                                         steps=steps, evidence={k: out[k] for k in ("status", "result_sha256", "objectives", "constraints", "seed")}, evidence_kind="optimization")
+        return {"result": out, "message": msg}
+
+
+@router.route("POST", "/api/scripts/check")
+def script_check(app: SpadraApp, req: Request) -> Any:
+    """Syntax and the conservative scan, without storing or running anything."""
+    from . import scripting as SC
+    return SC.check_source(req.json().get("source"))
+
+
+@router.route("POST", "/api/scripts/run")
+def script_run(app: SpadraApp, req: Request) -> Any:
+    """Preview: run a version on a copy of the model. The project does not change; ``script.apply`` is what commits."""
+    from . import scripting as SC
+    with app.lock:
+        return SC.run(app.require(), req.json())
+
+
+@router.route("POST", "/api/scripts/replay")
+def script_replay(app: SpadraApp, req: Request) -> Any:
+    """Run a recorded run again from its record and report whether the result hash is reproduced, or why the comparison is not fair (the model changed)."""
+    from . import scripting as SC
+    with app.lock:
+        return SC.replay(app.require(), req.json())
+
+
+@router.route("POST", "/api/stairs/design")
+def stair_design(app: SpadraApp, req: Request) -> Any:
+    """Preview a stair design for a rise (mm), without creating anything: the riser interval, every candidate and why it passed or failed."""
+    from . import stairs as SR
+    from ..tools.validation import number
+    body = req.json()
+    rules = SR.rules_from(body.get("rules"))
+    height = number(body.get("height"), "height", 51, 100000) / 1000.0
+    return SR.design(height, rules=rules, risers=int(number(body["risers"], "risers", 2, SR.MAX_RISERS)) if body.get("risers") is not None else None,
+                     tread=number(body["tread"], "tread", 50, 2000) / 1000.0 if body.get("tread") is not None else None,
+                     available=number(body["available"], "available", 100, 1e6) / 1000.0 if body.get("available") is not None else None)
+
+
+@router.route("GET", "/api/stairs/{stair}/headroom")
+def stair_headroom(app: SpadraApp, req: Request) -> Any:
+    from . import stairs as SR
+    with app.lock:
+        minimum = req.query.get("minimum")
+        return SR.headroom(app.require(), req.params["stair"], float(minimum) / 1000.0 if minimum else None)
+
+
+@router.route("GET", "/api/procedural")
+def procedural_list(app: SpadraApp, req: Request) -> Any:
+    from . import procedural as PG
+    with app.lock:
+        return {"groups": PG.describe(app.require())}
+
+
+@router.route("POST", "/api/drawings/constraints/analyze")
+def drawing_constraints_analyze(app: SpadraApp, req: Request) -> Any:
+    """Degrees of freedom, redundant and conflicting constraints and reference states of a drawing's constraints. Read-only."""
+    from ..tools.validation import text
+    body = req.json()
+    with app.lock:
+        doc = app.require().drawing(text(body.get("drawing"), "drawing", 80))
+        return doc.analyze_constraints(body.get("constraints"), fixed_ids=body.get("fixed_ids") or [])
+
+
+@router.route("POST", "/api/optimize/family")
+def optimize_family(app: SpadraApp, req: Request) -> Any:
+    """Search a family's parameters for the best values against formula objectives and constraints. A proposal only: the project does not change."""
+    from . import optimization as OPZ
+    with app.lock:
+        return OPZ.optimize_family(app.require(), req.json())
+
+
+@router.route("GET", "/api/formula/functions")
+def formula_functions(app: SpadraApp, req: Request) -> Any:
+    from . import families as FM
+    return {"functions": FM.functions()}
+
+
 @router.route("GET", "/api/families/{family}/file")
 def family_file(app: SpadraApp, req: Request) -> Any:
     from . import families as FM

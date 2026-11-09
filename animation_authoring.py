@@ -17,6 +17,7 @@ from __future__ import annotations
 import copy
 import math
 import uuid
+
 from typing import Any, Mapping, Sequence
 
 from ..tools.errors import BadRequest
@@ -290,8 +291,33 @@ def apply_preset(spec: dict[str, Any], oid: str, kind: str, params: Mapping[str,
     for prop, a, b in steps:
         notes += set_key(spec, oid, prop, start, spec_value(prop, a), fps=fps, interpolation="smooth" if prop != "visibility" else "step")
         set_key(spec, oid, prop, end, spec_value(prop, b), fps=fps)
+        if prop != "visibility":
+            ease_between(spec, oid, prop, start, end)
     return notes
 
+
+def ease_between(spec: dict[str, Any], oid: str, prop: str, start: float, end: float) -> None:
+    """Give the keys at ``start`` and ``end`` zero slope. A preset is an ease-in / ease-out between two keys; when the motion starts after 0 s the track also has a hold key at 0,
+    and the automatic tangent at the start key would then be the slope of the whole run, which overshoots (the leaf would swing back before it opens)."""
+    track = spec["tracks"][find_track(spec, oid, prop)]
+    if track.get("interpolation") != "cubic":
+        return
+    for k in track["keyframes"]:
+        if abs(k["time"] - start) < _TIME_EPS or abs(k["time"] - end) < _TIME_EPS:
+            zero: Any = [0.0] * len(k["value"]) if isinstance(k["value"], list) else 0.0
+            k["in_tangent"], k["out_tangent"] = zero, (list(zero) if isinstance(zero, list) else zero)
+
+
+def has_preset(spec: Mapping[str, Any], oid: str, kind: str) -> bool:
+    if kind not in PRESETS:
+        raise BadRequest(f"preset must be one of {', '.join(PRESETS)}")
+    if kind == "slide":
+        return find_track(spec, oid, "translation") >= 0
+    if kind == "spin":
+        return find_track(spec, oid, "turn") >= 0
+    if kind == "grow":
+        return find_track(spec, oid, "scale") >= 0
+    return find_track(spec, oid, "visibility") >= 0
 
 # ------------------------------------------------------------------------------------------------------------------------ reading a pose
 def _angle(m: Sequence[float]) -> float:
@@ -324,3 +350,15 @@ def unwrap_turn(decoded: float, spec: Mapping[str, Any], oid: str, seconds: floa
             ref = math.degrees(nearest["value"])
             return decoded + 360.0 * round((ref - decoded) / 360.0)
     return decoded
+
+def read_pose(base: Sequence[float], evaluated: Sequence[float], spec: Mapping[str, Any], oid: str, seconds: float) -> dict[str, Any]:
+    """The animated part of an evaluated transform, relative to the element as built. The turn is unwrapped against the track's own keys."""
+    pose = decode_pose(base, evaluated)
+    pose["turn"] = unwrap_turn(pose["turn"], spec, oid, seconds)
+    return pose
+
+def read_pose_from_transform(base: Sequence[float], evaluated: Sequence[float], spec: Mapping[str, Any], oid: str, seconds: float) -> dict[str, Any]:
+    """The animated part of an evaluated transform, relative to the element as built. The turn is unwrapped against the track's own keys."""
+    pose = decode_pose(base, evaluated)
+    pose["turn"] = unwrap_turn(pose["turn"], spec, oid, seconds)
+    return pose

@@ -74,12 +74,12 @@ def _blocks(project: Any, sections: list[str]) -> list[dict[str, Any]]:
         out += [_heading(SECTIONS["levels"]),
                 _table(["Level", "Elevation (m)", "Elements standing on it"], [[l["name"], l["elevation"], len(DT.users_of(project, l["id"]))] for l in m["levels"]])]
     if "schedules" in sections:
-        views = [v for v in m["views"] if v["kind"] == "schedule" and not D.SCHEDULES[v["category"]].get("summary")]
+        views = [v for v in m["views"] if v["kind"] == "schedule" and not D.is_summary_view(v)]
         out.append(_heading(SECTIONS["schedules"]))
         if not views:
             out.append(_para("The project has no schedules. Add one from the Project Browser."))
         for v in views:
-            data = D.schedule_data(project, v["category"])
+            data = D.view_schedule(project, v)
             out += [_heading(data["title"], 2), _schedule_table(data) if data["rows"] else _para("This schedule is empty.")]
     if "materials" in sections:
         data = D.schedule_data(project, "material")

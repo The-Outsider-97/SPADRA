@@ -38,6 +38,11 @@ from src.utils.spatial_formats.common.errors import ResourceLimitError, SpatialF
 from src.utils.spatial_formats.sdrw.annotations import hatch_lines
 
 from . import animation_authoring as AA
+from . import door_swing as DS
+from . import motion_laws as ML
+from . import family_schedule as FS
+from . import model_constraints as MC
+from . import family_templates as FT
 from . import animation_bridge as AB
 from . import documentation as D
 from . import interop as IO
@@ -54,6 +59,7 @@ from . import structural as ST
 from . import elements as E
 from . import geometry as G
 from . import annotations as AN
+from . import dimension_links as DL
 from . import autorooms as AR
 from . import cutting as CU
 from . import foundations as FD
@@ -61,6 +67,8 @@ from . import forms as FX
 from . import arrays as AY
 from . import datums as DT
 from . import families as FM
+from . import scripting as SC
+from . import procedural as PG
 from . import stairs as SR
 from . import gutters as GU
 from . import sheets as SH
@@ -437,18 +445,24 @@ class Project:
         before = doc.copy(fresh_id=False)
         manifest_before = _clone(self.manifest)
         self._touched = {}
+        self._running_key = key
+        model_edit = key == "model" and op.split(".")[0] not in ("anim", "project", "report", "bim", "script")
         try:
+            if model_edit:
+                DL.bind(self)                                           # dimensions drawn on wall faces are linked to them before the model changes
             result = handler(self, params)
             if key.startswith("drawing:"):
                 E.refresh_opening_profiles_for_drawing(self, key.split(":", 1)[1],
                                                        MM_PER[self.manifest["unit"]] / 1000.0)
-            if key == "model" and op.split(".")[0] not in ("anim", "project", "report", "bim"):
+            if model_edit:
                 FD.reconcile(self)                                      # foundations follow the walls and columns they stand on, and strips re-cut their joints
                 AY.reconcile(self)                                      # linked arrays follow their sources; items a person edited or deleted are let go
+                PG.reconcile(self)                                      # generated façades follow their wall and its openings
                 FX.reconcile(self)                                      # solids follow the voids that cut them
                 AT.reconcile(self)                                      # walls attached to a roof or extended to a level follow it
                 AR.reconcile(self)                                      # rooms follow the walls that enclose them, inside the same command
                 AN.sync_tags(self)                                      # tags follow their elements inside the same command
+                DL.sync(self)                                           # dimensions on wall faces follow the faces (a layer added, a wall moved)
         except Exception as exc:
             self._rollback(key, before, manifest_before)
             if isinstance(exc, (G.GeometryError, SpatialFormatError)):   # the document or the geometry refused: a bad request, not a crash
@@ -466,7 +480,7 @@ class Project:
     def touch(self, key: str) -> None:
         """Say that the running command is about to change a document other than its own (``"model"`` or ``"drawing:<view id>"``), so Undo and a
         failed command put it back together with the rest."""
-        if key not in self._touched:
+        if key != getattr(self, "_running_key", None) and key not in self._touched:    # the command's own document is already saved as `before`: a second, later copy would undo nothing
             doc = self.model if key == "model" else self.drawing(key.split(":", 1)[1])
             self._touched[key] = doc.copy(fresh_id=False)
 
@@ -613,7 +627,7 @@ class Project:
         view = self.view(view_id)
         if view["kind"] != "schedule":
             raise NotFound(f"'{view['name']}' is not a schedule")
-        return {"view": view, "revision": self.revision, **D.schedule_data(self, view["category"])}
+        return {"view": view, "revision": self.revision, **D.view_schedule(self, view)}
 
     def plan_overlay(self, view_id: str) -> list[dict[str, Any]]:
         """What the model contributes to a floor plan: walls (cut around their openings), doors and windows with their symbols, floors and
@@ -656,6 +670,8 @@ class Project:
             layer_colors = ([{"count": int(n), "color": E.m(meta, "color") or lay.get("color") or
                              self.manifest.get("material_colors", {}).get(lay["material"]) or E.MATERIAL_COLORS.get(lay["material"])}
                             for n, lay in zip(counts, layers)] if len(counts) == len(layers) and sum(counts) == len(mesh["faces"]) else [])
+            if category == "foundation":                                       # the concrete, each layer and the formwork in their own colours
+                layer_colors = FD.part_colors(self, meta, len(mesh["faces"]))
             ridge = E.roof_ridge(meta) if category == "roof" else None
             ridge_handle = None
             if ridge:
@@ -982,7 +998,7 @@ class Project:
                                   "projection": None, "section_marks": [], "solid": SV.model_view(self, vp["azimuth"], vp["elevation"], f)})
                 continue
             if view is not None and view["kind"] == "schedule":
-                viewports.append({**vp, **placement, "view": view, "schedule": D.schedule_data(self, view["category"])})
+                viewports.append({**vp, **placement, "view": view, "schedule": D.view_schedule(self, view)})
                 continue
             if vp["view_id"] not in self.drawings or view is None:
                 continue                                              # reported by check(); there is nothing to draw
@@ -1164,8 +1180,8 @@ def _view_properties(project: Project, vid: str) -> dict[str, Any]:
     elif kind == "elevation":
         groups.append({"title": "View", "rows": [{"label": "Looking", "type": "readonly", "value": f"toward {D.compass(*D.SIDES[view['side']])}, from the {view['side']}"}]})
     elif kind == "schedule":
-        groups.append({"title": "Schedule", "rows": [{"label": "Lists", "type": "readonly", "value": view["category"] + "s"},
-                                                      {"label": "Rows", "type": "readonly", "value": str(D.schedule_data(project, view["category"])["count"])}]})
+        groups.append({"title": "Schedule", "rows": [{"label": "Lists", "type": "readonly", "value": ("instances of one family" if view["category"] == "family" else view["category"] + "s")},
+                                                      {"label": "Rows", "type": "readonly", "value": str(D.view_schedule(project, view)["count"])}]})
     if kind in ("plan", "section", "elevation"):
         shown = [{"value": "shown", "label": "Shown"}, {"value": "hidden", "label": "Hidden"}]
         groups.append({"title": "Annotation", "rows": [
@@ -1294,7 +1310,13 @@ class _Commands:
         pts = p.get("points")
         if not isinstance(pts, list) or not 2 <= len(pts) <= MAX_POINTS:
             raise BadRequest(f"A polyline needs 2 to {MAX_POINTS} points")
-        return {"id": doc.add_polyline([_point(q, "point") for q in pts], closed=bool(p.get("closed", False)), **_layer_opts(doc, p))}
+        points = [_point(q, "point") for q in pts]
+        closed = bool(p.get("closed", False))
+        # A polyline drawn back to its own first point *is* closed: store it as a closed polyline, not as an open one that
+        # repeats its start (which every closed-shape command - hatch, extrude, opening profile - would refuse).
+        if not closed and len(points) >= 4 and math.dist(points[0], points[-1]) < 1e-9:
+            points, closed = points[:-1], True
+        return {"id": doc.add_polyline(points, closed=closed, **_layer_opts(doc, p))}
 
     @staticmethod
     @command(_drawing_target("Draw rectangle"))
@@ -1321,7 +1343,9 @@ class _Commands:
         a, b, at = _point(p.get("p1"), "p1"), _point(p.get("p2"), "p2"), _point(p.get("dimline_point"), "dimline_point")
         if a == b:
             raise BadRequest("A dimension needs two different points")
-        return {"id": doc.add_dimension_aligned(a, b, at, **_layer_opts(doc, p))}
+        eid = doc.add_dimension_aligned(a, b, at, **_layer_opts(doc, p))
+        DL.bind(project)                                                # a point placed on a wall face is linked to that face
+        return {"id": eid}
 
     @staticmethod
     @command(_drawing_target("Add text"))
@@ -1555,6 +1579,8 @@ class _Commands:
         else:
             raise BadRequest(f"A {kind} has no handles to edit")
         doc.update(e["id"], geometry=g)
+        if kind == "dimension":
+            DL.bind(project)                                            # a dimension point dropped on a wall face is linked to it; one dragged away is let go
         return {"id": e["id"]}
 
     # -- 3D / BIM ----------------------------------------------------------------------------------------------------------
@@ -2113,14 +2139,19 @@ class _Commands:
         ``start`` and ``end``), plaat (raft) or vloer (ground-bearing slab: ``points`` and ``thickness``, with ``above`` and ``below`` layers of
         ``{name, material, thickness (mm), conductivity (W/m·K)}``). ``top`` (m above the level) defaults to the base of what it stands on. Reinforcement is
         declared (``bars``, ``cover``, ``concrete_class``, ``steel``), never designed."""
-        return {"id": FD.add_foundation(project, p, MM_PER[project.manifest["unit"]] / 1000.0)}
+        to_m = MM_PER[project.manifest["unit"]] / 1000.0
+        if p.get("kind") == "strook" and len(p.get("support") or []) > 1:         # several walls: a strip under each, cut to each other where they meet
+            made = FD.add_under(project, {**{k: v for k, v in p.items() if k not in ("support", "kind")}, "supports": p["support"]}, to_m)
+            return {"id": made[0], "ids": made, "floors": FD.reconcile_floors(project)}
+        oid = FD.add_foundation(project, p, to_m)
+        return {"id": oid, "ids": [oid], "floors": FD.reconcile_floors(project)}
 
     @staticmethod
     @command(_model_target("Add foundations under supports"))
     def model__add_foundations_under(project: Project, p: dict[str, Any]) -> dict[str, Any]:
         """A strip under each wall and a pad under each column in ``supports``, with the same sizes (``width``, ``height`` mm, ``top``, ...); all or none."""
         made = FD.add_under(project, p, MM_PER[project.manifest["unit"]] / 1000.0)
-        return {"ids": made}
+        return {"ids": made, "floors": FD.reconcile_floors(project)}
 
     @staticmethod
     @command(_model_target("Edit foundation"))
@@ -2134,6 +2165,48 @@ class _Commands:
     def model__add_downpipe(project: Project, p: dict[str, Any]) -> dict[str, Any]:
         """A downpipe under ``gutter``, ``offset`` m along it, of ``diameter`` mm, down to ``bottom`` (m, default a little above the lowest level)."""
         return {"id": GU.add_downpipe(project, p, MM_PER[project.manifest["unit"]] / 1000.0)}
+
+    # -- procedural groups -----------------------------------------------------------------------------------------------------
+    @staticmethod
+    @command(_model_target("Generate facade"))
+    def procedural__facade(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Panels on a wall (``wall``; ``panel_width``, ``panel_height``, ``joint``, ``thickness``, ``offset``, ``opening_margin`` in mm; ``side``), cut around its openings."""
+        return PG.add_facade(project, p)
+
+    @staticmethod
+    @command(_model_target("Generate window lights"))
+    def procedural__lights(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Glass panes and mullions inside a window (``opening``): ``panels`` (1-12), ``frame``, ``mullion``, ``glass_thickness``, ``mullion_depth``, ``offset`` in mm.
+        The panes follow the window; a combination that leaves a negative or sliver glazing region is refused."""
+        return PG.add_lights(project, p)
+
+    @staticmethod
+    @command(_model_target("Generate structural frame"))
+    def procedural__frame(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Columns and beams on a grid: ``level``, ``origin`` and bay spacings ``bays_x`` / ``bays_y`` (drawing units), ``column`` and ``beam`` sections (mm)."""
+        return PG.add_frame(project, p, MM_PER[project.manifest["unit"]] / 1000.0)
+
+    @staticmethod
+    @command(_model_target("Edit generated group"))
+    def procedural__update(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        return PG.update(project, p, MM_PER[project.manifest["unit"]] / 1000.0)
+
+    @staticmethod
+    @command(_model_target("Regenerate group"))
+    def procedural__regenerate(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        return PG.regenerate(project, p.get("id"))
+
+    @staticmethod
+    @command(_model_target("Delete generated group"))
+    def procedural__delete(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        return {"removed": PG.delete(project, p.get("id"), boolean(p.get("keep_elements", False), "keep_elements"))}
+
+    @staticmethod
+    @command(_model_target("Design stair"))
+    def model__design_stair(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """A stair from a design: the riser count and tread follow from the rise and the rules (``rules`` in mm; defaults are not a building code); long
+        stairs become equal flights in a line with landings. Refused, with the reason, when no stair fits."""
+        return SR.design_stair(project, p, MM_PER[project.manifest["unit"]] / 1000.0)
 
     @staticmethod
     @command(_model_target("Add stair"))
@@ -2174,12 +2247,79 @@ class _Commands:
     def level__delete(project: Project, p: dict[str, Any]) -> dict[str, Any]:
         return DT.delete_level(project, p)
 
+    # -- drawing constraints ---------------------------------------------------------------------------------------------------
+    @staticmethod
+    @command(_drawing_target("Set constraints"))
+    def draw__constraints_set(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Store the drawing's constraints (``constraints``: kind, entities, value); each reference must exist."""
+        doc = project.drawing(p["drawing"])
+        return {"constraints": len(doc.set_constraints(p.get("constraints") or []))}
+
+    @staticmethod
+    @command(_drawing_target("Solve constraints"))
+    def draw__constraints_solve(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Move the constrained points and lines to satisfy the stored (or given) constraints, keeping ``fixed_ids`` where they are; all or nothing."""
+        doc = project.drawing(p["drawing"])
+        fixed = p.get("fixed_ids") or []
+        if not isinstance(fixed, list) or len(fixed) > 500:
+            raise BadRequest("fixed_ids must be a list of entity ids")
+        sol = doc.solve_constraints(p.get("constraints"), fixed_ids=fixed, commit=True)
+        return {"moved": sorted(sol.geometries), "iterations": sol.iterations, "max_residual": sol.max_residual, "converged": sol.converged}
+
+    # -- scripts ---------------------------------------------------------------------------------------------------------------
+    @staticmethod
+    @command(_model_target("Add script"))
+    def script__add(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Store a Python script (``name``, ``source``, declared ``inputs`` and ``outputs``) as version 1. Nothing runs."""
+        return SC.add(project, p)
+
+    @staticmethod
+    @command(_model_target("Edit script"))
+    def script__update(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Add the next version of a script; it starts unapproved."""
+        return SC.update(project, p)
+
+    @staticmethod
+    @command(_model_target("Approve script"))
+    def script__approve(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Approve one version by its source hash, so it may run where untrusted scripts are not sandboxed."""
+        return SC.approve(project, p)
+
+    @staticmethod
+    @command(_model_target("Revoke script approval"))
+    def script__revoke(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        return SC.revoke(project, p)
+
+    @staticmethod
+    @command(_model_target("Delete script"))
+    def script__delete(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        SC.delete(project, p.get("id"))
+        return {"removed": p.get("id")}
+
+    @staticmethod
+    @command(_model_target("Record script provenance"))
+    def script__record(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Add the provenance of an applied script run (script, version, hash, seed, result hash) to the project; the hash must match a stored version."""
+        return SC.record_application(project, p.get("record") or {})
+
+    @staticmethod
+    @command(_model_target("Apply script result"))
+    def script__apply(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Write a previewed run's outputs into family or element parameters: all or none, one undo step, refused if the project moved on since the run."""
+        return SC.apply(project, p)
+
     # -- families --------------------------------------------------------------------------------------------------------------
     @staticmethod
     @command(_model_target("Define family"))
     def family__define(project: Project, p: dict[str, Any]) -> dict[str, Any]:
         """A parametric family on SGEO's own family mechanism: ``shape`` (box, cylinder, sphere) and its ``parameters`` (lengths in mm)."""
         return {"id": FM.define(project, p)}
+
+    @staticmethod
+    @command(_model_target("Define family from template"))
+    def family__from_template(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """A starter family from the report's worked examples (``template``: door, window or beam; optional ``name``). The result is an ordinary family."""
+        return {"id": FT.define(project, p)}
 
     @staticmethod
     @command(_model_target("Edit family"))
@@ -2192,6 +2332,53 @@ class _Commands:
     def family__delete(project: Project, p: dict[str, Any]) -> dict[str, Any]:
         FM.delete(project, p.get("id"))
         return {"removed": p.get("id")}
+
+    @staticmethod
+    @command(_model_target("Add family type"))
+    def family__type_define(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Add a named type to a family: ``name`` and the ``values`` it fixes (lengths in mm); ``copy_from`` starts from another type."""
+        return FM.type_define(project, p)
+
+    @staticmethod
+    @command(_model_target("Duplicate family type"))
+    def family__type_duplicate(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        return FM.type_duplicate(project, p)
+
+    @staticmethod
+    @command(_model_target("Edit family type"))
+    def family__type_update(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Change the ``values`` a type fixes; the elements that use it are rebuilt, or the whole change is refused."""
+        return FM.type_update(project, p)
+
+    @staticmethod
+    @command(_model_target("Rename family type"))
+    def family__type_rename(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        return FM.type_rename(project, p)
+
+    @staticmethod
+    @command(_model_target("Delete family type"))
+    def family__type_delete(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Remove a type no element uses."""
+        return FM.type_delete(project, p)
+
+    @staticmethod
+    @command(_model_target("Assign family type"))
+    def family__assign_type(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Put an element (``id``) on a named ``type`` of its family (empty: the family defaults); its own overrides are kept."""
+        oid = text(p.get("id"), "id", 80)
+        if not E.alive(project, oid):
+            raise NotFound(f"Element {oid} does not exist")
+        FM.assign_type(project, oid, p.get("type"))
+        return {"id": oid}
+
+    @staticmethod
+    @command(_model_target("Reset element values"))
+    def family__reset_overrides(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Give an element's own parameter values back to its type (all of them, or only ``names``)."""
+        oid = text(p.get("id"), "id", 80)
+        if not E.alive(project, oid):
+            raise NotFound(f"Element {oid} does not exist")
+        return {"id": oid, "reset": FM.reset_overrides(project, oid, p.get("names"))}
 
     @staticmethod
     @command(_model_target("Place family"))
@@ -2377,6 +2564,58 @@ class _Commands:
         return {"notes": notes}
 
     @staticmethod
+    @command(_model_target("Swing door"))
+    def anim__swing_door(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Open a single-leaf door on its hinge between ``start`` and ``end`` seconds: the direction comes from the door's hinge and swing side, and the leaf is swept
+        against the other elements at its height first (an overlap of ``tolerance_mm``, 5 by default, is not counted). Refused if it would hit something before
+        ``degrees`` unless ``allow_obstructed`` is true."""
+        oid = project._animatable(p.get("id"))
+        plan = DS.plan(project, oid, p.get("degrees", 90.0), tolerance_mm=p.get("tolerance_mm", DS.PENETRATION * 1000))
+        if plan["obstructions"] and not p.get("allow_obstructed"):
+            raise Conflict(f"The door would hit {', '.join(plan['obstructions'])} after opening {abs(plan['clear_to_degrees']):g} of {plan['requested_degrees']:g} degrees",
+                           hint="Ask for a smaller angle, move the obstruction, or pass allow_obstructed to animate it anyway")
+        spec, fps = project._authoring_spec(True)
+        start = AA.frame_time(_finite(p.get("start", 0.0), "start"), fps, spec["duration"])
+        end = AA.frame_time(_finite(p.get("end", spec["duration"]), "end"), fps, spec["duration"])
+        notes = AA.apply_preset(spec, oid, "spin", {"degrees": plan["turn_degrees"]}, fps=fps, start=start, end=end)
+        project._commit_animation(spec)
+        return {**plan, "notes": notes}
+
+    @staticmethod
+    @command(_model_target("Motion law"))
+    def anim__law(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """A motion written as a law of time, authored as keys and measured against the law: ``kind`` 'linear' (``velocity`` m/s as three numbers, optional ``offset``, so x(t) = x0 + v t)
+        or 'sinusoid' (``amplitude`` and ``offset`` in degrees, ``period`` in seconds, so theta(t) = theta0 + A sin(2 pi t / period), a turn about the vertical axis), between ``start`` and
+        ``end`` seconds. Refused if the evaluated animation differs from the law by more than ``tolerance`` (metres / degrees). Kinematic only."""
+        return ML.apply(project, project._animatable(p.get("id")), p)
+
+    @staticmethod
+    @command(_model_target("Add model constraint"))
+    def model__constraint_add(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Constrain the plan geometry of walls, beams and columns: ``kind`` (coincident, distance, fixed, parallel, perpendicular, equal_length, angle, horizontal, vertical,
+        point_on_line), ``refs`` (each ``{element, part}``, ``part`` being 'start' or 'end' for a wall or beam end) and ``value`` (mm, degrees) where the kind needs one."""
+        return MC.add(project, p)
+
+    @staticmethod
+    @command(_model_target("Delete model constraint"))
+    def model__constraint_delete(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        return MC.delete(project, p.get("id"))
+
+    @staticmethod
+    @command(_model_target("Solve model constraints"))
+    def model__constraints_solve(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Move the constrained elements so the stored constraints hold, keeping the ``fixed`` elements; refused when they conflict or do not converge, and rolled back if the
+        real elements, measured again, do not meet them."""
+        return MC.solve(project, p)
+
+    @staticmethod
+    @command(_model_target("Resize door about its hinge"))
+    def model__resize_door(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """A door's ``width`` (mm) changed keeping its hinge where it is in the world (``anchor``: 'hinge', the default) or its centre ('centre', what a plain width edit does).
+        The leaf is rebuilt about the same hinge axis, so a swing animation stays on its pivot; the swept-leaf clearance is not re-checked (run anim.swing_door again)."""
+        return DS.resize_hinged(project, project._animatable(p.get("id")), p.get("width"), p.get("anchor", "hinge"))
+
+    @staticmethod
     @command(_model_target("Animation settings"))
     def anim__settings(project: Project, p: dict[str, Any]) -> dict[str, Any]:
         """Frame rate and loop (kept in the project manifest) and the length of the animation (kept in the SGEO animation)."""
@@ -2460,6 +2699,12 @@ class _Commands:
         vid = new_id()
         project.manifest["views"].append({"id": vid, "kind": "schedule", "name": name, "category": category})
         return {"id": vid, "name": name}
+
+    @staticmethod
+    @command(_model_target("Add family schedule"))
+    def view__add_family_schedule(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """A schedule of one family: its typed parameters as columns, one row per placed instance, with the source of every value (instance, type, default or formula)."""
+        return FS.add_view(project, p.get("family"))
 
     @staticmethod
     @command(_model_target("Rename view"))

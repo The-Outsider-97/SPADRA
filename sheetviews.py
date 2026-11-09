@@ -321,7 +321,7 @@ def footprint(project: Any, vp: Mapping[str, Any]) -> tuple[float, float, float,
         return float(vp["width"]), y, 0.0, -y
     view = project.view(vp["view_id"])
     if view["kind"] == "schedule":
-        data = D.schedule_data(project, view["category"])
+        data = D.view_schedule(project, view)
         size, row, pad = 2.6, 5.0, 1.6
         cell = lambda v: "" if v is None else str(v)                                   # noqa: E731
         widths = [max(len(f"{c['label']}{' (' + c['unit'] + ')' if c.get('unit') else ''}"), *(len(cell(r.get(c["key"]))) for r in data["rows"]),

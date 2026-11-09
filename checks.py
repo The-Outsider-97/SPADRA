@@ -39,6 +39,8 @@ def _signature(project: Any, oid: str) -> tuple | None:
     if cat == "structural":
         return ("beam", E.m(meta, "level"), tuple(map(r, E.m(meta, "start"))), tuple(map(r, E.m(meta, "end"))))
     if cat == "generic":
+        if project.model.get(oid).get("family_id") is None:                                                 # generated cladding: its group guarantees one panel per key
+            return None
         return (cat, project.model.get(oid).get("family_id"), E.m(meta, "level"), tuple(map(r, E.m(meta, "point"))), r(E.m(meta, "base_offset", 0.0)))
     if cat in E.OPENINGS:
         return (cat, E.m(meta, "host"), r(E.m(meta, "offset")), r(E.m(meta, "sill", 0.0)))
@@ -83,6 +85,12 @@ def associations(project: Any) -> list[dict[str, str]]:
     return out
 
 
+def _glazes_opening_of(project: Any, piece: str, other: str) -> bool:
+    """True when ``piece`` is a generated window light or mullion and ``other`` is the wall that window is hosted in."""
+    window = E.m(E.meta_of(project, piece), "window")
+    return bool(window) and E.alive(project, window) and E.m(E.meta_of(project, window), "host") == other
+
+
 def clashes(project: Any) -> list[dict[str, str]]:
     """Bounding-box candidates between generic elements / stairs and what they should not stand inside."""
     kinds = {oid: E.category(project, oid) for oid in E.element_ids(project)}
@@ -106,6 +114,8 @@ def clashes(project: Any) -> list[dict[str, str]]:
             ca, cb = kinds[a], kinds[b]
             if not (cb in CLASHING.get(ca, ()) or ca in CLASHING.get(cb, ())):
                 continue
+            if _glazes_opening_of(project, a, b) or _glazes_opening_of(project, b, a):
+                continue                                                    # a window's light stands in the wall's opening by design
             depth = min(min(hi_a[k], hi_b[k]) - max(lo_a[k], lo_b[k]) for k in range(3))
             if depth > PENETRATION:
                 na, nb = project.model.get(a)["name"] or ca, project.model.get(b)["name"] or cb

@@ -14,8 +14,19 @@ saved and undone the same way. What is modelled:
   upwards from the top of the slab and downwards from its soffit. The slab's thermal resistance is the sum of thickness / conductivity of the layers *whose conductivity
   was given*; if one is missing the figure says it is incomplete rather than assuming a value.
 
-``top`` is the top of the concrete in metres above the level. When a foundation is made on a support it starts at the base of that support, and after
-that it is an ordinary parameter: if the support moves up or down the model check says the two no longer meet, it does not silently move the foundation.
+``top`` is the top of the concrete in metres above the level. A foundation that stands on a wall or column is **constrained to it by default**
+(``constrain``): when the support moves sideways, turns, is stretched, goes up or down, or changes level, the foundation goes with it and keeps the vertical gap
+(``top_gap``, 0 unless asked otherwise) between its top and the underside of what it carries. Switching ``constrain`` off leaves the foundation where it is and
+frees it to be moved on its own; switching it on again snaps it back to the support.
+
+**Formwork** is optional (``formwork``: thickness in millimetres, 0 or absent for none; ``formwork_material``). It is modelled as plates of that thickness
+against the vertical edges of the concrete, over the concrete's height, in the same element. Where two strips meet the plates stop at the joint, so a corner
+is not boxed in twice. Formwork under the base is not modelled.
+
+**Floors.** ``floors`` says what happens to an existing floor the foundation overlaps (in plan and in height): ``adjust`` (default) trims the floor's outline back
+to the foundation, ``merge`` lets the floor's outline run over the foundation and lowers the foundation's top to the floor's underside (the foundation keeps
+its underside, so the two together are as deep as the foundation was and nothing is counted twice), ``keep`` leaves both alone. The floor's own outline is
+remembered (``fd_free``), so moving or deleting the foundation gives the floor its outline back.
 
 **Reinforcement and concrete are declared, not designed.** Bar groups (mark, diameter, spacing or count, role, face), the concrete class and the cover
 are metadata the person enters. The *indicative* bar take-off counts the bars those declarations imply (straight bars, no laps, hooks or curtailment) and
@@ -35,6 +46,7 @@ from ..tools.errors import BadRequest, NotFound
 from ..tools.validation import number, text
 from . import elements as E
 from . import geometry as G
+from . import planar as PL
 
 KINDS: dict[str, dict[str, str]] = {
     "poer": {"name": "Pad foundation (poer)", "type": "Pad Foundation", "sfb": "(16.13)"},
@@ -58,6 +70,13 @@ MAX_LAYERS = 12
 MAX_BARS = 100_000
 TOLERANCE = 0.001                       # m: a top this close to the base of what it carries meets it
 MATERIALS = ("Concrete", "Masonry")
+FORMWORK_MATERIALS = ("EPS", "XPS", "Timber", "Plywood", "Steel")
+FORMWORK_DEFAULT_MM = 50
+FLOOR_POLICIES = ("adjust", "merge", "keep")
+REINFORCED = "Reinforced concrete"      # how a concrete foundation with declared bars is shown: its hatch, tint and 3D colour change with the declaration
+PART_COLORS = {"EPS": "#E9E5C8", "XPS": "#9FD4E6", "PIR": "#E8D27A", "Mineral wool": "#E0C95A", "Foam glass": "#B9C9CC", "Sand": "#D9C89A", "Gravel": "#A9A59B",
+               "Blinding concrete": "#C9CACD", "Screed": "#D8D4CB", "Floor finish": "#CBB89A", "Damp-proof membrane": "#2B2B2E", "Timber": "#B3804D",
+               "Plywood": "#C9A56B", "Steel": "#808FA3", "Concrete": "#B8BABF", "Masonry": "#B86B57", REINFORCED: "#8E939B"}
 LAYER_MATERIALS = ("EPS", "XPS", "PIR", "Mineral wool", "Foam glass", "Sand", "Gravel", "Blinding concrete", "Screed", "Concrete", "Floor finish", "Damp-proof membrane")
 
 
@@ -144,10 +163,11 @@ def support_signature(project: Any, ids: Sequence[str]) -> list[Any]:
             sig.append(None)
             continue
         meta = E.meta_of(project, sid)
+        base = round(float(support_base(project, sid) or 0.0), 9)                  # a wall or column that moves up or down changes this
         if E.m(meta, "category") == "wall":
-            sig.append([*E.m(meta, "start"), *E.m(meta, "end"), float(E.m(meta, "thickness")), str(E.m(meta, "level"))])
+            sig.append([*E.m(meta, "start"), *E.m(meta, "end"), float(E.m(meta, "thickness")), str(E.m(meta, "level")), base])
         elif E.is_column(meta):
-            sig.append([*E.m(meta, "point"), float(E.m(meta, "rotation", 0.0)), float(E.m(meta, "width")), float(E.m(meta, "depth")), str(E.m(meta, "level"))])
+            sig.append([*E.m(meta, "point"), float(E.m(meta, "rotation", 0.0)), float(E.m(meta, "width")), float(E.m(meta, "depth")), str(E.m(meta, "level")), base])
         else:
             sig.append("unsupported")
     return sig
@@ -178,19 +198,32 @@ def _need_support(project: Any, kind: str, ids: Sequence[str]) -> None:
             raise BadRequest(f"A {KINDS[kind]['name'].split(' (')[0].lower()} stands on {'a wall' if w == 'wall' else 'a column'}, but {project.model.get(sid)['name'] or sid} is not")
 
 
+def constrained(project: Any, meta: Mapping[str, Any]) -> bool:
+    """Whether the foundation is tied to the wall or column it stands on: it has one that still exists and ``constrain`` has not been switched off."""
+    ids = support_ids(meta)
+    return bool(ids) and E.m(meta, "constrain", True) is not False and all(E.alive(project, sid) for sid in ids)
+
+
 def follow(project: Any, oid: str) -> bool:
-    """Bring the placement a foundation derives from its supports up to date; returns whether anything changed. A support that has been deleted leaves the
-    foundation where it was (the model check reports it)."""
+    """Bring the placement a foundation derives from its supports up to date: where it is in plan, its level and its top (the support's underside plus the
+    vertical gap it was given). Returns whether anything changed. A foundation that is not constrained, or whose support has been deleted, stays where it was
+    (the model check reports a lost support)."""
     meta = E.meta_of(project, oid)
     kind = kind_of(meta)
+    if not constrained(project, meta):
+        return False
     ids = support_ids(meta)
-    if not ids or any(not E.alive(project, s) for s in ids):
-        return False
     sig = support_signature(project, ids)
-    if sig == E.m(meta, "support_sig"):
+    if sig == E.m(meta, "support_sig") and E.m(meta, "top_gap") is not None:
         return False
-    values: dict[str, Any] = {"support_sig": sig}
     sup = [E.meta_of(project, s) for s in ids]
+    level = str(E.m(sup[0], "level"))
+    base = support_base(project, ids[0])
+    gap = E.m(meta, "top_gap")
+    if gap is None:                                                              # made before foundations followed vertically: keep the gap it has now
+        gap = E.level_elevation(project, E.m(meta, "level")) + float(E.m(meta, "top")) - (base if base is not None else 0.0)
+    values: dict[str, Any] = {"support_sig": sig, "top_gap": float(gap), "level": level,
+                              "top": (base if base is not None else E.level_elevation(project, level)) - E.level_elevation(project, level) + float(gap)}
     if kind == "poer":
         values.update(point=list(E.m(sup[0], "point")), rotation=float(E.m(sup[0], "rotation", 0.0)))
     elif kind == "strook":
@@ -292,29 +325,152 @@ def stack(project: Any, meta: Mapping[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
-def loop_materials(project: Any, meta: Mapping[str, Any], loops: Sequence[Sequence[tuple[float, float]]]) -> list[str]:
-    """The material of each cut loop of a vertical section: a loop's height (screen y is height) says which layer of the build-up it is."""
-    parts = stack(project, meta)
-    out = []
-    for loop in loops:
-        mid = (min(p[1] for p in loop) + max(p[1] for p in loop)) / 2
-        hit = next((s for s in parts if s["z0"] - 1e-9 <= mid <= s["z1"] + 1e-9), None)
-        out.append(str(hit["material"]) if hit else str(E.m(meta, "material", "Concrete")))
-    return out
+def display_material(meta: Mapping[str, Any]) -> str:
+    """The material a foundation is *shown* in: concrete with declared bars reads as reinforced concrete (hatch, tint and 3D colour), so declaring or removing
+    reinforcement changes how the foundation looks everywhere without touching its ``material``."""
+    material = str(E.m(meta, "material", "Concrete"))
+    return REINFORCED if material == "Concrete" and E.m(meta, "bars") else material
 
 
-def build_mesh(project: Any, meta: Mapping[str, Any]) -> G.Mesh:
+def formwork_of(meta: Mapping[str, Any]) -> tuple[float, str] | None:
+    """(thickness in metres, material) of the formwork, or None when there is none."""
+    t = E.m(meta, "formwork")
+    if not t or float(t) <= 0:
+        return None
+    return float(t), str(E.m(meta, "formwork_material") or FORMWORK_MATERIALS[0])
+
+
+def _joined_ends(project: Any, oid: str, meta: Mapping[str, Any]) -> tuple[bool, bool]:
+    """Whether the start and the end of a strip meet another strip (end to end, or against its side). The end face of such a strip is inside the joint, so it has no formwork."""
+    if kind_of(meta) not in LINES:
+        return False, False
+    fr = line_frame(meta)
+    level = str(E.m(meta, "level"))
+    out = [False, False]
+    table = _line_table(project, level)
+    for k, point in enumerate((fr["start"], fr["end"])):
+        for xid, row in table.items():
+            if xid == oid:
+                continue
+            if min(math.dist(point, row.start), math.dist(point, row.end)) <= E.JOIN_TOLERANCE:
+                out[k] = True
+                break
+            dist, along = E._distance_to_segment(point, row.start, row.end)
+            if E.JOIN_TOLERANCE < along < math.dist(row.start, row.end) - E.JOIN_TOLERANCE and dist <= row.thickness / 2 + E.JOIN_TOLERANCE:
+                out[k] = True
+                break
+    return out[0], out[1]
+
+
+def formwork_plates(project: Any, oid: str | None, meta: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The formwork as one plate per vertical edge of the concrete: ``{"quad": 4 plan points, "inner_length": m}``. Each edge is offset outwards by the
+    thickness, except the end faces of a strip that meet another strip; the corner points are where neighbouring offset lines meet (a joined end uses its own
+    joint line), so plates join without gaps or overlaps at the outer corner of a mitre and stop at the inner one."""
+    spec = formwork_of(meta)
+    if spec is None:
+        return []
+    t = spec[0]
+    pts = [tuple(q) for q in outline(meta)]
+    if G.signed_area(pts) < 0:
+        pts.reverse()
+    n = len(pts)
+    skip: set[int] = set()
+    if kind_of(meta) in LINES and oid is not None:
+        start_joined, end_joined = _joined_ends(project, oid, meta)
+        if start_joined:
+            skip.add(3)
+        if end_joined:
+            skip.add(1)
+    normals, dist = [], []
+    for i in range(n):
+        d = G.unit(G.sub(pts[(i + 1) % n], pts[i]))
+        normals.append((d[1], -d[0]))                                           # to the right of a counter-clockwise outline: outwards
+        dist.append(0.0 if i in skip else t)
+    out: list[tuple[float, float]] = []
+    for i in range(n):
+        n0, n1, d0, d1 = normals[i - 1], normals[i], dist[i - 1], dist[i]
+        det = n0[0] * n1[1] - n0[1] * n1[0]
+        c0 = G.dot(n0, pts[i]) + d0                                             # the two offset lines through this corner: n . x = c
+        c1 = G.dot(n1, pts[i]) + d1
+        if abs(det) < 1e-6:                                                      # (nearly) collinear edges: the corner just moves out
+            out.append((pts[i][0] + n1[0] * d1, pts[i][1] + n1[1] * d1))
+            continue
+        out.append(((c0 * n1[1] - c1 * n0[1]) / det, (n0[0] * c1 - n1[0] * c0) / det))
+        if math.dist(out[-1], pts[i]) > 8 * max(t, 1e-9):
+            raise BadRequest("A corner of this foundation is too sharp for formwork of that thickness")
+    plates = []
+    for i in range(n):
+        if i in skip:
+            continue
+        j = (i + 1) % n
+        plates.append({"quad": [pts[i], pts[j], out[j], out[i]], "length": math.dist(pts[i], pts[j])})
+    return plates
+
+
+def concrete_z(project: Any, meta: Mapping[str, Any]) -> tuple[float, float]:
+    top = E.level_elevation(project, E.m(meta, "level")) + float(E.m(meta, "top"))
+    return top - depth_of(meta), top
+
+
+def parts_of(project: Any, oid: str | None, meta: Mapping[str, Any]) -> tuple[G.Mesh, list[dict[str, Any]]]:
+    """The mesh of a foundation and, in the order its faces run, ``{material, faces}`` for each solid (the concrete and its layers, then all the formwork)."""
     poly = outline(meta)
     if not G.is_simple_polygon(poly) or abs(G.signed_area(poly)) < 1e-9:
         raise BadRequest("The outline crosses itself or has no area")
     verts: list[Any] = []
     faces: list[Any] = []
-    for part in stack(project, meta):
-        v, f = G.prism(poly, part["z0"], part["z1"])
+    parts: list[dict[str, Any]] = []
+
+    def add(shape: Sequence[tuple[float, float]], z0: float, z1: float) -> int:
+        v, f = G.prism(shape, z0, z1)
         base = len(verts)
-        verts += [list(p) for p in v]
-        faces += [[a + base, b + base, c + base] for a, b, c in f]
-    return E._positive_volume((verts, faces))
+        verts.extend(list(p) for p in v)
+        faces.extend([a + base, b + base, c + base] for a, b, c in f)
+        return len(f)
+
+    for part in stack(project, meta):
+        parts.append({"material": display_material(meta) if part["concrete"] else str(part["material"]), "faces": add(poly, part["z0"], part["z1"])})
+    plates = formwork_plates(project, oid, meta)
+    if plates:
+        z0, z1 = concrete_z(project, meta)
+        spec = formwork_of(meta)
+        count = 0
+        for plate in plates:
+            if abs(G.signed_area(plate["quad"])) > 1e-9:
+                count += add(plate["quad"], z0, z1)
+        parts.append({"material": spec[1] if spec else "Timber", "faces": count, "formwork": True})
+    return E._positive_volume((verts, faces)), parts
+
+
+def build_mesh(project: Any, meta: Mapping[str, Any], oid: str | None = None) -> G.Mesh:
+    return parts_of(project, oid, meta)[0]
+
+
+def loop_materials(project: Any, meta: Mapping[str, Any], loops: Sequence[Sequence[tuple[float, float]]]) -> list[str]:
+    """The material of each cut loop of a vertical section: a loop's height (screen y is height) says which layer of the build-up it is. Where formwork stands at the
+    same height as the concrete, the largest loop at that height is the concrete and the others are the formwork."""
+    parts = stack(project, meta)
+    shown = display_material(meta)
+    spec = formwork_of(meta)
+    z0, z1 = concrete_z(project, meta)
+
+    def area(loop: Sequence[tuple[float, float]]) -> float:
+        return abs(G.signed_area([tuple(p) for p in loop]))
+
+    in_concrete = [k for k, loop in enumerate(loops) if z0 - 1e-9 <= (min(p[1] for p in loop) + max(p[1] for p in loop)) / 2 <= z1 + 1e-9]
+    main = max(in_concrete, key=lambda k: area(loops[k]), default=None)
+    out = []
+    for k, loop in enumerate(loops):
+        mid = (min(p[1] for p in loop) + max(p[1] for p in loop)) / 2
+        if spec is not None and k in in_concrete and k != main:
+            out.append(spec[1])
+            continue
+        hit = next((s for s in parts if s["z0"] - 1e-9 <= mid <= s["z1"] + 1e-9), None)
+        if hit is None:
+            out.append(shown)
+        else:
+            out.append(shown if hit["concrete"] else str(hit["material"]))
+    return out
 
 
 def regenerate(project: Any, oid: str) -> None:
@@ -329,21 +485,41 @@ def regenerate(project: Any, oid: str) -> None:
         E._attach(project, oid, {"ends": [list(j["ends"][0]), list(j["ends"][1])], "joins": j["with"]})
         meta = E.meta_of(project, oid)
     try:
-        E._set_mesh(project, oid, build_mesh(project, meta))
+        mesh, parts = parts_of(project, oid, meta)
+        E._set_mesh(project, oid, mesh)
+        E._attach(project, oid, {"part_faces": [p["faces"] for p in parts], "part_materials": [p["material"] for p in parts]})
     except G.GeometryError as exc:
         raise BadRequest(str(exc)) from exc
 
 
+def part_colors(project: Any, meta: Mapping[str, Any], face_count: int) -> list[dict[str, Any]]:
+    """The colour of each solid of a foundation for the 3D view, in face order (empty if the stored parts no longer match the mesh). An override colour set on the
+    element paints the concrete only."""
+    counts, mats = E.m(meta, "part_faces") or [], E.m(meta, "part_materials") or []
+    if not counts or len(counts) != len(mats) or sum(int(c) for c in counts) != face_count:
+        return []
+    palette = project.manifest.get("material_colors", {})
+    out = []
+    for n, mat in zip(counts, mats):
+        concrete = mat in (REINFORCED, str(E.m(meta, "material", "Concrete")))
+        color = (E.m(meta, "color") if concrete else None) or palette.get(mat) or PART_COLORS.get(mat) or E.MATERIAL_COLORS.get(mat)
+        out.append({"count": int(n), "color": color})
+    return out
+
+
 def reconcile(project: Any) -> list[str]:
-    """After any command: foundations follow the walls and columns they stand on, and strips re-cut their joints to their neighbours. Only what changed
-    is rebuilt. Runs inside the command, so a foundation that can no longer be built rolls the whole command back."""
+    """After any command: foundations follow the walls and columns they stand on, a foundation that merges with a floor drops to the floor's underside, strips
+    re-cut their joints to their neighbours, and the floors they overlap are trimmed or merged. Only what changed is rebuilt. Runs inside the command, so a
+    foundation that can no longer be built rolls the whole command back."""
     ids = E.all_ids(project.model, metadata={f"{E.NS}:category": "foundation"})
     if not ids:
+        _restore_floors(project)
         return []
     dirty: set[str] = set()
     for oid in ids:
         if follow(project, oid):
             dirty.add(oid)
+    dirty |= set(merge_drops(project, ids))
     tables: dict[str, dict[str, Any]] = {}
     for oid in ids:
         meta = E.meta_of(project, oid)
@@ -359,10 +535,212 @@ def reconcile(project: Any) -> list[str]:
             dirty.add(oid)
     for oid in sorted(dirty):
         regenerate(project, oid)
+    reconcile_floors(project)
     return sorted(dirty)
 
 
+# ------------------------------------------------------------------------------------------------------------------------------ floors
+def _bbox(ring: Sequence[Sequence[float]]) -> tuple[float, float, float, float]:
+    xs, ys = [q[0] for q in ring], [q[1] for q in ring]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _near(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> bool:
+    return a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
+
+
+def _rings(project: Any) -> list[dict[str, Any]]:
+    """Every foundation that deals with floors (policy adjust or merge) as a plan ring and the height range of its concrete."""
+    rows = []
+    for oid in E.all_ids(project.model, metadata={f"{E.NS}:category": "foundation"}):
+        meta = E.meta_of(project, oid)
+        policy = str(E.m(meta, "floors", "adjust"))
+        if policy == "keep":
+            continue
+        try:
+            ring = [(float(q[0]), float(q[1])) for q in outline(meta)]
+        except BadRequest:
+            continue
+        z0, z1 = concrete_z(project, meta)
+        rows.append({"id": oid, "policy": policy, "ring": ring, "z0": z0, "z1": z1, "bbox": _bbox(ring)})
+    return rows
+
+
+def _floor_z(project: Any, meta: Mapping[str, Any]) -> tuple[float, float]:
+    top = E.level_elevation(project, E.m(meta, "level")) + float(E.m(meta, "offset", 0.0))
+    return top - float(E.m(meta, "thickness")), top
+
+
+def _shares_plan(a: Sequence[tuple[float, float]], b: Sequence[tuple[float, float]]) -> bool:
+    try:
+        return any(abs(PL.region_area(r)) > 1e-6 for r in PL.intersection(a, b))
+    except PL.PlanarError:
+        return True                                                              # the exact overlap could not be worked out: treat it as overlapping, the result is checked next
+
+
+def merge_drops(project: Any, ids: Sequence[str]) -> list[str]:
+    """A foundation that merges with a floor stops at the floor's underside: its top is lowered to it and its height shortened by the same amount, so its underside
+    stays where it was. Returns the foundations changed."""
+    changed: list[str] = []
+    floors = E.all_ids(project.model, metadata={f"{E.NS}:category": "floor"})
+    if not floors:
+        return changed
+    for oid in ids:
+        meta = E.meta_of(project, oid)
+        if str(E.m(meta, "floors", "adjust")) != "merge":
+            continue
+        try:
+            ring = [(float(q[0]), float(q[1])) for q in outline(meta)]
+        except BadRequest:
+            continue
+        z0, z1 = concrete_z(project, meta)
+        soffit = None
+        for fl in floors:
+            fm = E.meta_of(project, fl)
+            if E.m(fm, "level") != E.m(meta, "level") and abs(_floor_z(project, fm)[1] - z1) > 5.0:
+                continue
+            f0, f1 = _floor_z(project, fm)
+            if not (min(f1, z1) - max(f0, z0) > 1e-6):                            # only a floor the foundation really reaches into
+                continue
+            if not _near(_bbox(ring), _bbox([(float(q[0]), float(q[1])) for q in E.m(fm, "boundary")])):
+                continue
+            if _shares_plan(ring, [(float(q[0]), float(q[1])) for q in E.m(fm, "boundary")]):
+                soffit = f0 if soffit is None else min(soffit, f0)
+        if soffit is None or soffit >= z1 - 1e-6:
+            continue
+        if soffit <= z0 + 0.01:
+            continue                                                             # the floor is as deep as the foundation: nothing to merge into (reported by the model check)
+        level_z = E.level_elevation(project, E.m(meta, "level"))
+        values: dict[str, Any] = {"top": soffit - level_z, ("thickness" if kind_of(meta) in AREAS else "height"): soffit - z0}
+        if constrained(project, meta):
+            base = support_base(project, support_ids(meta)[0])
+            values["top_gap"] = soffit - (base if base is not None else level_z)
+            values["support_sig"] = None
+        E._attach(project, oid, values)
+        changed.append(oid)
+    return changed
+
+
+def _ring_list(ring: Sequence[Sequence[float]]) -> list[list[float]]:
+    return [[round(float(q[0]), 7), round(float(q[1]), 7)] for q in ring]
+
+
+def _same_ring(a: Sequence[Sequence[float]], b: Sequence[Sequence[float]]) -> bool:
+    return len(a) == len(b) and all(abs(p[0] - q[0]) < 1e-6 and abs(p[1] - q[1]) < 1e-6 for p, q in zip(a, b))
+
+
+def _restore_floors(project: Any) -> None:
+    """With no foundation left, every floor a foundation had trimmed or extended gets its own outline back."""
+    reconcile_floors(project)
+
+
+def reconcile_floors(project: Any) -> dict[str, list[Any]]:
+    """Trim or merge the floors the foundations overlap (see the module text) and give a floor its own outline back when nothing overlaps it any more.
+    Returns ``{"adjusted", "merged", "restored", "unresolved"}`` (floor ids; unresolved are ``[floor, foundation, reason]``)."""
+    report: dict[str, list[Any]] = {"adjusted": [], "merged": [], "restored": [], "unresolved": []}
+    floors = E.all_ids(project.model, metadata={f"{E.NS}:category": "floor"})
+    if not floors:
+        return report
+    rows = _rings(project)
+    for fl in floors:
+        meta = E.meta_of(project, fl)
+        current = [[float(q[0]), float(q[1])] for q in E.m(meta, "boundary")]
+        free = E.m(meta, "fd_free")
+        applied = E.m(meta, "fd_applied")
+        if free is not None and (applied is None or not _same_ring(current, applied)):
+            free = None                                                          # the person changed the outline themselves: that is the floor's own outline now
+        base = [(float(q[0]), float(q[1])) for q in (free if free is not None else current)]
+        f0, f1 = _floor_z(project, meta)
+        box = _bbox(base)
+        cuts, adds, owners = [], [], {}
+        for r in rows:
+            if not _near(r["bbox"], box):
+                continue
+            reach = min(f1, r["z1"]) - max(f0, r["z0"])
+            if r["policy"] == "adjust" and reach > 1e-6:
+                bucket = cuts
+            elif r["policy"] == "merge" and reach >= -1e-6:
+                bucket = adds
+            else:
+                continue
+            if _shares_plan(base, r["ring"]):
+                bucket.append(r["ring"])
+                owners[id(r["ring"])] = r["id"]
+        unresolved: list[list[str]] = []
+        if not cuts and not adds:
+            if free is not None:                                                 # nothing overlaps any more: the floor gets its own outline back
+                E._attach(project, fl, {"boundary": [list(q) for q in free], "fd_free": None, "fd_applied": None, "fd_unresolved": None})
+                E.regenerate_floor(project, fl)
+                report["restored"].append(fl)
+            elif E.m(meta, "fd_unresolved"):
+                E._attach(project, fl, {"fd_unresolved": None})
+            continue
+        try:
+            regions = PL.difference(base, cuts) if cuts else [(base, [])]
+            if adds:
+                if any(h for _, h in regions):
+                    raise PL.PlanarError("the floor would be left with a hole in it")
+                regions = PL.union([reg[0] for reg in regions] + adds)
+        except PL.PlanarError as exc:
+            regions, why = [], str(exc)
+        else:
+            why = ""
+            if not regions:
+                why = "the foundation covers the whole floor"
+            elif len(regions) > 1:
+                why = "the floor would be split in two"
+            elif regions[0][1]:
+                why = "the floor would be left with a hole in it"
+        if why:
+            who = sorted({owners[id(r)] for r in cuts + adds})
+            note = [[o, why] for o in who]
+            values: dict[str, Any] = {}
+            if E.m(meta, "fd_unresolved") != note:
+                values["fd_unresolved"] = note
+            if free is not None:                                                 # what an earlier trim left is no longer right: the floor is as its owner drew it
+                values.update(boundary=[list(q) for q in free], fd_free=None, fd_applied=None)
+            if values:
+                E._attach(project, fl, values)
+                if free is not None:
+                    E.regenerate_floor(project, fl)
+            report["unresolved"] += [[fl, o, why] for o in who]
+            continue
+        new = _ring_list(regions[0][0])
+        if _same_ring(new, current):
+            if E.m(meta, "fd_free") is None or E.m(meta, "fd_unresolved"):
+                E._attach(project, fl, {"fd_free": _ring_list(base), "fd_applied": new, "fd_unresolved": None})
+            continue
+        E._attach(project, fl, {"boundary": new, "fd_free": _ring_list(base), "fd_applied": new, "fd_unresolved": None})
+        E.regenerate_floor(project, fl)
+        report["merged" if adds and not cuts else "adjusted"].append(fl)
+    return report
+
+
 # ---------------------------------------------------------------------------------------------------------------------------- creation
+def _flag(value: Any, label: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("true", "false", "yes", "no", "on", "off"):
+        return value.strip().lower() in ("true", "yes", "on")
+    raise BadRequest(f"{label} must be true or false")
+
+
+def _formwork_values(p: Mapping[str, Any]) -> dict[str, Any]:
+    """The formwork parameters of a request: ``formwork`` (thickness, mm; 0 or empty for none) and ``formwork_material``."""
+    out: dict[str, Any] = {}
+    if "formwork" in p:
+        raw = p["formwork"]
+        if raw in (None, "", False, 0):
+            out["formwork"] = None
+        else:
+            out["formwork"] = number(FORMWORK_DEFAULT_MM if raw is True else raw, "formwork thickness (mm)", 5, 500) / 1000.0
+    if "formwork_material" in p and p["formwork_material"] not in (None, ""):
+        out["formwork_material"] = E._choice(p["formwork_material"], FORMWORK_MATERIALS, "formwork material")
+    elif out.get("formwork"):
+        out["formwork_material"] = FORMWORK_MATERIALS[0]
+    return out
+
+
 def _levelled(project: Any, p: Mapping[str, Any]) -> dict[str, Any]:
     return project.level(text(p.get("level"), "level", 80))
 
@@ -377,7 +755,11 @@ def add_foundation(project: Any, p: Mapping[str, Any], to_m: float) -> str:
     if p.get("support") and kind in AREAS:
         raise BadRequest("A raft or slab does not stand on a single wall or column")
     values: dict[str, Any] = {"category": "foundation", "kind": kind, "type": KINDS[kind]["type"], "material": E._choice(p.get("material", "Concrete"), MATERIALS, "material"),
-                              "support": support, "cover": number(p.get("cover", COVER_DEFAULT * 1000), "cover (mm)", 10, 150) / 1000.0}
+                              "support": support, "cover": number(p.get("cover", COVER_DEFAULT * 1000), "cover (mm)", 10, 150) / 1000.0,
+                              "floors": E._choice(p.get("floors", "adjust"), FLOOR_POLICIES, "floors")}
+    if support:
+        values["constrain"] = _flag(p.get("constrain", True), "constrain")
+    values.update(_formwork_values(p))
     if p.get("concrete_class") not in (None, ""):
         values["concrete_class"] = text(p["concrete_class"], "concrete class", 20)
     if p.get("steel") not in (None, ""):
@@ -402,6 +784,9 @@ def add_foundation(project: Any, p: Mapping[str, Any], to_m: float) -> str:
         base = support_base(project, support[0]) if support else None
         top = (base - E.level_elevation(project, level["id"])) if base is not None else 0.0
     values["top"] = number(top, "top", -100, 100)
+    if support:                                                                  # the gap it keeps from the underside of what it carries (0 when it starts at that underside)
+        base_now = support_base(project, support[0])
+        values["top_gap"] = (E.level_elevation(project, level["id"]) + values["top"] - base_now) if base_now is not None else 0.0
     if kind == "poer":
         shape = E._choice(p.get("shape", "rect"), SHAPES, "shape")
         if sup_meta:
@@ -485,15 +870,35 @@ def set_property(project: Any, oid: str, meta: Mapping[str, Any], key: str, valu
             out["length"] = v
         return out
     if key == "top":
-        return {"top": number(value, "top", -100, 100)}
+        top = number(value, "top", -100, 100)
+        base = support_base(project, support_ids(meta)[0]) if constrained(project, meta) else None
+        out = {"top": top}
+        if base is not None:                                                     # the person moved the top: the gap to the support is now this
+            out["top_gap"] = E.level_elevation(project, E.m(meta, "level")) + top - base
+        return out
+    if key == "constrain":
+        if not support_ids(meta) or not all(E.alive(project, s) for s in support_ids(meta)):
+            raise BadRequest("This foundation does not stand on a wall or column, so there is nothing to constrain it to")
+        return {"constrain": _flag(value, "constrain"), "support_sig": None}     # switched on: it snaps to its support in this command; off: it stays and may be moved
+    if key == "top_gap":
+        if not support_ids(meta):
+            raise BadRequest("Only a foundation on a wall or column keeps a gap to it")
+        return {"top_gap": number(value, "gap to the support (mm)", -20000, 20000) / 1000.0, "support_sig": None}
+    if key in ("formwork", "formwork_material"):
+        out = _formwork_values({key: value, **({"formwork_material": E.m(meta, "formwork_material")} if key == "formwork" and E.m(meta, "formwork_material") else {})})
+        if key == "formwork_material" and not E.m(meta, "formwork"):
+            raise BadRequest("Add formwork first (give it a thickness)")
+        return out
+    if key == "floors":
+        return {"floors": E._choice(value, FLOOR_POLICIES, "floors")}
     if key == "offset" and kind in LINES:
         return {"offset": number(value, "offset", -10000, 10000) / 1000.0}
     if key == "shape" and kind == "poer":
         shape = E._choice(value, SHAPES, "shape")
         return {"shape": shape, **({"length": float(E.m(meta, "width"))} if shape == "round" else {})}
     if key == "rotation" and kind == "poer":
-        if support_ids(meta):
-            raise BadRequest("This pad turns with its column: rotate the column")
+        if constrained(project, meta):
+            raise BadRequest("This pad turns with its column: rotate the column, or switch 'Constrained to its support' off")
         return {"rotation": math.radians(number(value, "rotation", -360, 360))}
     if key == "material":
         return {"material": E._choice(value, MATERIALS, "material")}
@@ -529,16 +934,21 @@ def set_data(project: Any, oid: str, p: Mapping[str, Any]) -> None:
             values[key] = text(p[key], key.replace("_", " "), 20) if str(p[key] or "").strip() else None
     if "cover" in p:
         values["cover"] = number(p["cover"], "cover (mm)", 10, 150) / 1000.0
+    values.update(_formwork_values(p))
+    if "formwork_material" in p and "formwork" not in p and not E.m(meta, "formwork"):
+        raise BadRequest("Add formwork first (give it a thickness)")
+    if "floors" in p:
+        values["floors"] = E._choice(p["floors"], FLOOR_POLICIES, "floors")
     if not values:
-        raise BadRequest("Give layers, bars, a concrete class, a steel quality or a cover")
+        raise BadRequest("Give layers, bars, a concrete class, a steel quality, a cover, formwork or a floor policy")
     E._attach(project, oid, values)
     regenerate(project, oid)
 
 
 def move(project: Any, oid: str, meta: Mapping[str, Any], dx: float, dy: float, dz: float) -> None:
     kind = kind_of(meta)
-    if support_ids(meta) and any(E.alive(project, s) for s in support_ids(meta)):
-        raise BadRequest("A foundation follows what it stands on: move the wall or column and it goes with it")
+    if constrained(project, meta):
+        raise BadRequest("A foundation is constrained to what it stands on: move the wall or column and it goes with it, or switch 'Constrained to its support' off to move it on its own")
     values: dict[str, Any] = {"top": float(E.m(meta, "top")) + dz}
     if kind == "poer":
         x, y = E.m(meta, "point")
@@ -553,8 +963,8 @@ def move(project: Any, oid: str, meta: Mapping[str, Any], dx: float, dy: float, 
 
 def rotate(project: Any, oid: str, meta: Mapping[str, Any], angle: float, centre: tuple[float, float]) -> None:
     kind = kind_of(meta)
-    if support_ids(meta) and any(E.alive(project, s) for s in support_ids(meta)):
-        raise BadRequest("A foundation follows what it stands on: rotate the wall or column and it goes with it")
+    if constrained(project, meta):
+        raise BadRequest("A foundation is constrained to what it stands on: rotate the wall or column and it goes with it, or switch 'Constrained to its support' off to turn it on its own")
     if kind == "poer":
         E._attach(project, oid, {"point": E._turn(E.m(meta, "point"), angle, centre), "rotation": float(E.m(meta, "rotation", 0.0)) + angle})
     elif kind in LINES:
@@ -567,7 +977,8 @@ def detach(project: Any, oid: str) -> None:
     """A copy is independent: it stands where it was put and does not snap back to the original's support."""
     meta = E.meta_of(project, oid)
     if E.m(meta, "category") == "foundation" and (E.m(meta, "support") or E.m(meta, "support_sig")):
-        E._attach(project, oid, {"support": [], "support_sig": None, "ends": [[0.0, 0.0], [0.0, 0.0]] if kind_of(meta) in LINES else None, "joins": []})
+        E._attach(project, oid, {"support": [], "support_sig": None, "top_gap": None, "constrain": None,
+                                 "ends": [[0.0, 0.0], [0.0, 0.0]] if kind_of(meta) in LINES else None, "joins": []})
 
 
 # ------------------------------------------------------------------------------------------------------------------------------ quantities
@@ -652,14 +1063,30 @@ def quantities(project: Any, oid: str) -> dict[str, Any]:
     rows = [{"name": s["name"], "material": s["material"], "thickness_m": s["z1"] - s["z0"], "volume_m3": area * (s["z1"] - s["z0"]), "concrete": s["concrete"]} for s in parts]
     concrete = next(r for r in rows if r["concrete"])["volume_m3"]
     out: dict[str, Any] = {"kind": kind, "plan_area_m2": area, "perimeter_m": perimeter, "depth_m": depth, "concrete_m3": concrete, "volume_m3": math.fsum(r["volume_m3"] for r in rows),
-                           "formwork_m2": perimeter * depth, "layers": rows,
+                           "formwork_m2": perimeter * depth, "layers": rows, "display_material": display_material(meta),
                            "reinforcement": reinforcement(project, meta) if E.m(meta, "bars") else None,
-                           "concrete_class": E.m(meta, "concrete_class"), "steel": E.m(meta, "steel"), "cover_m": float(E.m(meta, "cover", COVER_DEFAULT))}
+                           "concrete_class": E.m(meta, "concrete_class"), "steel": E.m(meta, "steel"), "cover_m": float(E.m(meta, "cover", COVER_DEFAULT)),
+                           "bars": [dict(b) for b in E.m(meta, "bars") or []]}                           # as declared, so the Reinforce dialog can start from them
     if kind in LAYERED:
         out["thermal"] = resistance(meta, parts)
     if kind in LINES:
         out["length_m"] = line_frame(meta)["length"]
-    out["note"] = ("Quantities from the foundation's parameters. Formwork is the edge area (perimeter x thickness) only. No structural verification of any kind is made.")
+    spec = formwork_of(meta)
+    if spec is not None:
+        plates = formwork_plates(project, oid, meta)
+        z0, z1 = concrete_z(project, meta)
+        out["formwork_m2"] = math.fsum(pl["length"] for pl in plates) * (z1 - z0)                     # the faces that are formed: a joined end of a strip is inside the joint
+        out["formwork"] = {"thickness_m": spec[0], "material": spec[1], "plates": len(plates), "area_m2": out["formwork_m2"],
+                           "volume_m3": math.fsum(abs(G.signed_area(pl["quad"])) for pl in plates) * (z1 - z0)}
+    elif kind in LINES:
+        sj, ej = _joined_ends(project, oid, meta)
+        end_edges = [math.dist(poly[i], poly[(i + 1) % len(poly)]) for i in ((3,) if sj else ()) + ((1,) if ej else ())]
+        out["formwork_m2"] = (perimeter - math.fsum(end_edges)) * depth            # a joined end face is inside the joint: nothing is cast against it
+    else:
+        out["formwork_m2"] = perimeter * depth
+    out["floors"] = E.m(meta, "floors", "adjust")
+    out["note"] = ("Quantities from the foundation's parameters. Formwork is the edge area (perimeter x height); with formwork modelled it is the area of the plates, and a strip's "
+                   "joined end faces are left out. No structural verification of any kind is made.")
     return out
 
 
@@ -702,6 +1129,12 @@ def properties(project: Any, oid: str, out: dict[str, Any], volume: Mapping[str,
     top_row = {"key": "top", "label": "Top above level", "type": "number", "unit": "m", "value": float(E.m(meta, "top"))}
     ids = support_ids(meta)
     cons = [top_row]
+    tied = constrained(project, meta)
+    if ids:
+        cons.append({"key": "constrain", "label": "Constrained to its support", "type": "choice", "value": "true" if E.m(meta, "constrain", True) is not False else "false",
+                     "choices": [{"value": "true", "label": "Yes: it moves with what it stands on"}, {"value": "false", "label": "No: it stays where it is"}]})
+        if tied:
+            cons.append({"key": "top_gap", "label": "Top relative to the support's underside", "type": "number", "unit": "mm", "value": mm(E.m(meta, "top_gap") or 0.0)})
     for sid in ids:
         alive = E.alive(project, sid)
         cons.append({"label": "Stands on", "type": "link", "value": project.model.get(sid)["name"] if alive else "(deleted)", **({"ref": {"model": sid}} if alive else {})})
@@ -710,6 +1143,15 @@ def properties(project: Any, oid: str, out: dict[str, Any], volume: Mapping[str,
             gap = (E.level_elevation(project, E.m(meta, "level")) + float(E.m(meta, "top")) - base) * 1000
             cons.append({"label": "Top to underside of support", "type": "readonly", "value": "meets it" if abs(gap) <= TOLERANCE * 1000 else f"{gap:+.0f} mm"})
     groups.append({"title": "Constraints", "rows": cons})
+    spec = formwork_of(meta)
+    fw = [{"key": "formwork", "label": "Formwork thickness", "type": "number", "unit": "mm", "value": mm(spec[0]) if spec else ""},
+          {"key": "formwork_material", "label": "Formwork material", "type": "choice", "value": spec[1] if spec else FORMWORK_MATERIALS[0], "choices": E._choices(FORMWORK_MATERIALS)}]
+    if spec and q.get("formwork"):
+        fw.append({"label": "Formwork area", "type": "readonly", "value": f"{q['formwork']['area_m2']:.2f} m² · {q['formwork']['volume_m3']:.3f} m³"})
+    fw.append({"key": "floors", "label": "Existing floors it overlaps", "type": "choice", "value": E.m(meta, "floors", "adjust"),
+               "choices": [{"value": "adjust", "label": "Trim the floor back to the foundation"}, {"value": "merge", "label": "Merge: the floor runs over the foundation"},
+                           {"value": "keep", "label": "Leave both as they are"}]})
+    groups.append({"title": "Formwork and floors", "rows": fw})
     if kind in LAYERED:
         lr = [{"label": f"{'Above' if s['z0'] >= E.level_elevation(project, E.m(meta, 'level')) + float(E.m(meta, 'top')) - 1e-12 and not s['concrete'] else 'Below' if not s['concrete'] else 'Slab'}: {s['name']}",
                "type": "readonly", "value": f"{(s['z1'] - s['z0']) * 1000:.0f} mm · {s['material']}" + (f" · λ {s['conductivity']:g}" if s.get("conductivity") else "")} for s in stack(project, meta)]
@@ -728,8 +1170,9 @@ def properties(project: Any, oid: str, out: dict[str, Any], volume: Mapping[str,
         rrows.append({"label": "Bars (indicative)", "type": "readonly", "value": f"{rf['bars']} bars · {rf['length_m']:.1f} m" + (f" · {rf['mass_kg']:.0f} kg" if rf["mass_kg"] is not None else "")})
     else:
         rrows.append({"label": "Bar groups", "type": "readonly", "value": "none declared"})
+    rrows.append({"label": "Shown as", "type": "readonly", "value": display_material(meta)})
     rrows.append({"label": "Note", "type": "readonly", "value": "Declared, not designed or verified"})
-    groups.append({"title": "Concrete and reinforcement", "rows": rrows})
+    groups.append({"title": "Concrete and reinforcement", "rows": rrows, "action": {"label": "Reinforce…", "dialog": "reinforce"}})
     groups.append({"title": "Quantities", "rows": [{"label": "Concrete", "type": "readonly", "value": f"{q['concrete_m3']:.3f} m³"},
                                                      {"label": "Formwork (edges)", "type": "readonly", "value": f"{q['formwork_m2']:.2f} m²"}]})
     out["groups"] = groups
@@ -794,8 +1237,9 @@ def issues(project: Any, oid: str, label: str, issue: Any) -> list[dict[str, str
             out.append(issue("error", oid, f"{label} is on a different level from what it stands on", "consistency"))
         base = support_base(project, sid)
         top = E.level_elevation(project, E.m(meta, "level")) + float(E.m(meta, "top"))
-        if base is not None and abs(top - base) > TOLERANCE:
-            gap = (top - base) * 1000
+        want = float(E.m(meta, "top_gap")) if constrained(project, meta) and E.m(meta, "top_gap") is not None else 0.0     # a chosen gap is not a mismatch
+        if base is not None and abs(top - base - want) > TOLERANCE:
+            gap = (top - base - want) * 1000
             out.append(issue("warning", oid, f"{label}: its top is {abs(gap):.0f} mm {'above' if gap > 0 else 'below'} the underside of {project.model.get(sid)['name'] or 'its support'}"
                                               f"{', so they overlap' if gap > 0 else ', so there is a gap'}", "hosting"))
         if kind == "poer" and E.is_column(sm):
@@ -807,6 +1251,10 @@ def issues(project: Any, oid: str, label: str, issue: Any) -> list[dict[str, str
                 out.append(issue("warning", oid, f"{label} does not cover the whole foot of its column", "geometry"))
         if kind == "strook" and E.m(sm, "category") == "wall" and float(E.m(meta, "width")) < float(E.m(sm, "thickness")) - 1e-9:
             out.append(issue("warning", oid, f"{label} is narrower than the wall it carries", "geometry"))
+    for fl in E.all_ids(project.model, metadata={f"{E.NS}:category": "floor"}):
+        for who, why in E.m(E.meta_of(project, fl), "fd_unresolved") or []:
+            if who == oid:
+                out.append(issue("warning", oid, f"{label} overlaps {project.model.get(fl)['name'] or 'a floor'} and the floor could not be adjusted: {why}", "geometry"))
     if kind == "funderingsbalk" and len(ids) == 2 and ids[0] == ids[1]:
         out.append(issue("error", oid, f"{label} has the same column at both ends", "parameters"))
     bars = E.m(meta, "bars") or []

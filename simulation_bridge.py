@@ -169,6 +169,8 @@ def simulate_beam(project: Any, oid: str, p: Mapping[str, Any]) -> dict[str, Any
     digest = hashlib.sha256(json.dumps(inputs, sort_keys=True, default=str).encode()).hexdigest()
     return {
         "id": oid, "name": inputs["name"], "revision": project.revision,
+        "idealization": {"label": "Idealized single-degree-of-freedom model",
+                         "meaning": "The beam is replaced by one lumped mass on one linear spring and dashpot. It is not a finite-element or full dynamic analysis of the member."},
         "derived": {"static_deflection_m": deflection, "total_load_n": load_n, "stiffness_n_per_m": stiffness, "effective_mass_kg": mass, "damping_n_s_per_m": damping,
                     "natural_frequency_rad_s": omega, "natural_frequency_hz": float(freq["result"]["frequency"]["magnitude"]), "period_s": period},
         "response": {"peak_displacement_m": disp[i_peak], "peak_time_s": times[i_peak], "peak_velocity_m_s": max(vel, key=abs), "final_displacement_m": disp[-1],

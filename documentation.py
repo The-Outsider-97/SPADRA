@@ -55,7 +55,7 @@ HATCH_PATTERNS: dict[str, dict[str, Any]] = {
     "cross-0": {"label": "Grid", "kind": "cross", "angle": 0.0, "spacing_mm": 2.2},
     "dots": {"label": "Dots", "kind": "dots", "angle": 0.0, "spacing_mm": 2.2},
 }
-DEFAULT_HATCH = {"Concrete": "lines-45", "Masonry": "lines-135", "Timber": "lines-0", "Steel": "solid", "Plasterboard": "none", "Glass": "none",
+DEFAULT_HATCH = {"Reinforced concrete": "cross-45", "Plywood": "lines-0", "Concrete": "lines-45", "Masonry": "lines-135", "Timber": "lines-0", "Steel": "solid", "Plasterboard": "none", "Glass": "none",
                  "EPS": "cross-45", "XPS": "cross-45", "PIR": "cross-45", "Mineral wool": "cross-45", "Foam glass": "cross-45",       # insulation
                  "Sand": "dots", "Gravel": "dots", "Blinding concrete": "lines-45", "Screed": "none", "Floor finish": "none", "Damp-proof membrane": "solid"}
 
@@ -588,6 +588,18 @@ def _summary(project: Any, category: str) -> dict[str, Any]:
             "summary": True}                                                                    # its rows are groups, not elements: the client does not select them
 
 
+def view_schedule(project: Any, view: Mapping[str, Any]) -> dict[str, Any]:
+    """The data of a schedule *view*: a category schedule, or (``category: "family"``) the parametric schedule of one family (see ``family_schedule``)."""
+    if view.get("category") == "family":
+        from . import family_schedule as FS
+        return FS.data(project, view.get("family"))
+    return schedule_data(project, view["category"])
+
+
+def is_summary_view(view: Mapping[str, Any]) -> bool:
+    return view.get("category") != "family" and bool(SCHEDULES[view["category"]].get("summary"))
+
+
 def schedule_data(project: Any, category: str) -> dict[str, Any]:
     """The rows of one schedule, read from the elements' parameters and exact geometry. Rows are ordered by level, then position, so the
     numbering is the same however the elements were created."""
@@ -706,9 +718,9 @@ def schedule_data(project: Any, category: str) -> dict[str, Any]:
         elif category == "generic":
             lo, hi = project.model.world_bounds(oid)
             from . import families as FM
-            row.update(family=FM.family(project, obj["family_id"])["name"], size_x=_r((hi[0] - lo[0]) * 1000, 1), size_y=_r((hi[1] - lo[1]) * 1000, 1),
+            row.update(family=FM.family(project, obj["family_id"])["name"] if "family_id" in obj else str(E.m(obj["metadata"], "type", "Generated")), size_x=_r((hi[0] - lo[0]) * 1000, 1), size_y=_r((hi[1] - lo[1]) * 1000, 1),
                        size_z=_r((hi[2] - lo[2]) * 1000, 1), volume=volume, material=E.m(meta, "material", "-"))
-            x, y = E.m(meta, "point")
+            x, y = E.m(meta, "point") or ((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2)          # generated cladding has no point of its own: its centre orders it
             order = (order[0], x, y)
         elif E.is_column(meta):                                                 # structural: column
             x, y = E.m(meta, "point")

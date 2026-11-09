@@ -110,7 +110,7 @@ def view_digest(project: Any, view: Mapping[str, Any]) -> str:
     if key not in project._cache:
         if view["kind"] == "schedule":
             from . import documentation as D
-            content: Any = D.schedule_data(project, view["category"])
+            content: Any = D.view_schedule(project, view)
         else:
             data = project.drawing_data(view["id"])
             data.pop("revision", None)

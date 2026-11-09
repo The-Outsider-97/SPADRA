@@ -125,6 +125,20 @@ class SlabCut(list):
         self.holes = [[tuple(q) for q in h] for h in holes]
 
 
+def cut_ids(cuts: Any) -> set[str]:
+    """The ids of the voids behind ``_cuts``'s third result, whatever the element: a wall's opening spans (id last), a slab's voids (a ``SlabCut`` of dicts) or,
+    for a layered floor, one ``SlabCut`` per layer."""
+    out: set[str] = set()
+    for c in cuts:
+        if isinstance(c, SlabCut):
+            out |= cut_ids(c)
+        elif isinstance(c, Mapping):
+            out.add(c["id"])
+        else:
+            out.add(c[4])
+    return out
+
+
 def _remaining(outline: Sequence[Pt], voids: Sequence[Mapping[str, Any]], label: str) -> P.Region:
     """What is left of ``outline`` once ``voids`` are taken away: one region, or ``PlanarError`` saying why there is not exactly one."""
     regions = P.difference(outline, [v["poly"] for v in voids])

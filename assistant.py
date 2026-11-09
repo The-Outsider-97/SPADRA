@@ -332,6 +332,18 @@ class Assistant:
                              steps=[{"op": "model.set_property", "params": {"id": ch["id"], "key": ch["key"], "value": ch["value"]}}],
                              targets=[ch["id"]], units="mm", evidence=out, risk="medium", evidence_kind="optimization")
 
+    def propose_commands(self, project: Any, *, source: str, title: str, explanation: str, steps: list[dict[str, Any]], targets: Sequence[str] = (),
+                         evidence: Any = None, evidence_kind: str | None = None, risk: str = "medium") -> dict[str, Any]:
+        """Turn a computation's result (a script run, an optimization, an agent's suggestion) into a *proposal* a person reviews: the steps are dry-run on a
+        scratch copy, nothing changes, and only ``consent`` followed by ``run`` (see ``commits.py``) can apply it. ``source`` says who proposed it."""
+        with self._lock:
+            self._bind(project)
+            self._mark_stale(project)
+            if not steps or len(steps) > 200:
+                raise BadRequest("A proposal has 1 to 200 steps")
+            return self._propose(project, f"[{source}]", {"revision": project.revision, "source": source}, len(HUB.calls), intent=source, title=title, explanation=explanation,
+                                 steps=steps, targets=list(targets), units=project.manifest["unit"], risk=risk, evidence=evidence, evidence_kind=evidence_kind)
+
     # ------------------------------------------------------------------------------------------------------------- proposals
     def _propose(self, project: Any, request: str, context: Mapping[str, Any], mark: int, *, intent: str, title: str, explanation: str, steps: list[dict[str, Any]],
                  targets: Sequence[str], units: str, risk: str = "low", assumptions: Sequence[str] = (), skipped: Sequence[str] = (), evidence: Any = None,
