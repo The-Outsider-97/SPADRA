@@ -51,6 +51,14 @@ class Simulation(Base):
         self.assertFalse(r["provenance"]["validity"]["validated_against_measurement"])
         self.assertEqual(self.p.revision, 1)                                                        # a simulation reads the project
 
+    def test_the_result_is_labelled_as_an_idealized_model(self):
+        """Report 10.2: where the Simulation Agent returns only an idealized dynamic model, the application says so, beside the assumptions it rests on."""
+        r = SB.simulate_beam(self.p, self.beam, CASE)
+        self.assertIn("Idealized", r["idealization"]["label"])
+        self.assertIn("lumped mass", r["idealization"]["meaning"])
+        self.assertTrue(any("single degree of freedom" in a for a in r["provenance"]["assumptions"]))
+        self.assertFalse(r["provenance"]["validity"]["structural_certification"])
+
     def test_step_load_peaks_near_twice_the_static_deflection_when_undamped(self):
         r = SB.simulate_beam(self.p, self.beam, {**CASE, "scenario": "step"})
         self.assertAlmostEqual(r["response"]["amplification"], 2.0, delta=0.07)

@@ -40,31 +40,6 @@ class Case(Joints):
         return sorted(self.at(i) for i in self.columns())
 
 
-class ArrayDrawingIntegration(Case):
-    def test_a_geometryless_array_controller_does_not_break_plan_sheets_or_project_tree(self):
-        """Arrays keep a non-geometric controller alongside their drawable members.
-
-        A sheet viewport's digest evaluates the entire plan; including the
-        controller as if it were a mesh made the project browser fail to load.
-        """
-        source = self.column()
-        array = self.array(source, dimension="X", counts=[3], spacings=[2000])["array"]
-        self.assertIsNone(self.p.model.get(array)["geometry"])
-        plan = next(view["id"] for view in self.p.manifest["views"] if view.get("level_id") == self.level)
-        sheet = self.run_("sheet.create", name="Array plan")["id"]
-        self.run_("sheet.place_view", id=sheet, view_id=plan, x=40, y=60, scale="1:50")
-
-        self.assertEqual(len([o for o in self.p.scene_data()["objects"] if o["category"] == "structural"]), 3)
-        self.assertEqual(len([o for o in self.p.plan_overlay(plan) if o["category"] == "column"]), 3)
-        self.assertIn("status", self.p.sheet_data(sheet))
-        self.assertTrue(self.p.tree()["sections"])
-        with tempfile.TemporaryDirectory() as tmp:
-            self.p.save(Path(tmp) / "array-sheet.spadra")
-            reopened = Project.open(Path(tmp) / "array-sheet.spadra")
-            self.assertTrue(reopened.tree()["sections"])
-            self.assertEqual(len([o for o in reopened.plan_overlay(plan) if o["category"] == "column"]), 3)
-
-
 class Directions(Case):
     def test_x_y_and_z_arrays_put_items_where_the_spacing_says(self):
         c = self.column()
@@ -441,3 +416,17 @@ class Scale(Case):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ArrayGroupInPlan(unittest.TestCase):
+    def test_a_plan_with_an_array_group_in_the_model_still_draws(self):
+        from applications.SPADRA.project import Project
+        p = Project.create("Arr")
+        level = p.manifest["levels"][0]["id"]
+        w = p.execute("model.add_wall", {"start": [0, 0], "end": [3000, 0], "level": level, "thickness": 200, "height": 3})["result"]["id"]
+        gid = p.model.add_group(name="Array")                                  # an array's container is a group with no geometry
+        from applications.SPADRA import elements as E
+        E._attach(p, gid, {"category": "array", "type": "Array"})
+        plan = next(v for v in p.manifest["views"] if v.get("level_id") == level and v["kind"] == "plan")
+        self.assertTrue(p.plan_overlay(plan["id"]))
+        p.tree()

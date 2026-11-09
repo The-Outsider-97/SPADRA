@@ -2,6 +2,7 @@
 says so about the rest, and every one of them is one undoable change that follows later edits."""
 from __future__ import annotations
 
+import importlib.util
 import math
 import unittest
 
@@ -542,12 +543,14 @@ class NativeModifierCommands(unittest.TestCase):
         self.assertEqual(self.p.model.get(oid)["family_id"], definition)
         self.assertEqual(self.p.model.modifiers(), [])
 
+    @unittest.skipUnless(importlib.util.find_spec("trimesh") and importlib.util.find_spec("numpy"), "a mesh split needs numpy and trimesh")
     def test_detached_copy_modifier_preserves_host_and_original_geometry(self):
+        # An independent copy is a baked mesh, and clipping a mesh by a plane is tolerance-controlled (never "exact"), so this uses the command's own default policy.
         level = self.p.manifest["levels"][0]["id"]
         wall = self.execute("model.add_wall", level=level, start=[0, 0],
                             end=[5000, 0], height=3, thickness=250)["id"]
         before = self.p.model.get(wall)
-        answer = self.execute("model.modifier", operation="split", id=wall, policy="exact",
+        answer = self.execute("model.modifier", operation="split", id=wall,
                               independent_copy=True, parameters={
                                   "origin": [0, 0, 1], "normal": [0, 0, 1],
                                   "side": "positive"})

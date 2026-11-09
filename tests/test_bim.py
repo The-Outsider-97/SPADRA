@@ -452,7 +452,7 @@ class Families(Case):
         self.assertEqual(doc.document_kind, "family")
         other = Project.create("Other")
         ids = FM.import_family_file(other, doc)
-        fam = next(f for f in other.model.families() if f["id"] == ids[0])
+        fam = next(f for f in other.model.families() if f["id"] == ids[0]["id"])
         self.assertEqual(fam["parameters"], next(f for f in self.p.model.families() if f["id"] == fid)["parameters"])
 
 

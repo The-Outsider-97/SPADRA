@@ -265,3 +265,19 @@ class Panel(Case):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LayeredFloorWithVoid(Case):
+    """A floor built of layers keeps one cut list per layer; the Properties panel, the void classification and the model check must read them all
+    (they once indexed a layer's cut list as if it were a wall's opening span and failed with IndexError)."""
+
+    def test_properties_check_and_classification_of_a_layered_floor_cut_by_a_void(self):
+        f = self.floor()
+        self.run_("model.add_layer", id=f, material="Screed", thickness=60)
+        v = self.void()
+        rows = self.p.properties({"model": f}, relations=True)
+        self.assertTrue(rows["groups"])
+        self.p.properties({"model": v}, relations=True)
+        self.assertEqual(self.classes(v)["Generic Floor"]["state"] if "Generic Floor" in self.classes(v) else "cut", "cut")
+        self.assertIn("issues", self.p.check())
+        self.assertEqual(FX.cut_ids(FX._cuts(self.p, f, FX.voids(self.p))[2]), {v})

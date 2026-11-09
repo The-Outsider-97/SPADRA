@@ -1,4 +1,25 @@
-# SPADRA — technical completion report (2026-11-03, tenth revision)
+# SPADRA — technical completion report (2026-11-09, eleventh revision)
+
+**Eleventh revision (2026-11-09).** The foundation request (several connected walls selected; floors that overlap adjust or merge; optional formwork with a thickness; reinforce after creation with the shading following; constrained to the wall above by default) is described in **Part 0000** below. Everything after it is the tenth revision, except that the foundation *limits* listed in Part 000 are superseded by Part 0000 where they differ (a foundation now follows its support's height; formwork is modelled when asked for).
+
+---
+
+## Part 0000 — Foundations under several walls, constrained, with formwork, floors and reinforcement (`foundations.py`, `foundations.ts`)
+
+**Several walls.** Selecting several connected walls and choosing Foundation → Strip (or "Under the selection") makes one strip under each wall in a single command (one undo step, all or none). Strips that meet are joined at the corners (mitre, T or star) so a corner is solid once. The dialog no longer sends its Level when it stands on a selection: the level is the supports' own (the earlier "A strip foundation stands on a wall" error came from asking a strip to stand on four walls, and from a level that could disagree with the wall's).
+
+**Constrained by default.** A foundation records the gap between its top and the base of its support (`top_gap`, 0 when it starts at that base). While `constrain` is on (the default), moving or stretching the wall moves and re-cuts the strip, and moving the wall up or down moves the foundation up or down by the same amount, all inside the command that moved the wall. Turn "Constrained" off in the dialog or in Properties and the foundation keeps its place; a mismatch between its top and the wall's base is then *reported* by the model check, not fixed. A constrained foundation cannot be moved on its own (it is refused with the reason); detaching it clears the constraint.
+
+**Formwork.** "Add formwork" with a thickness (5-500 mm) and a material (EPS, XPS, timber, plywood, steel) builds lost formwork as plates around the vertical edges of the concrete, shown in 3D and hatched as its own material in sections. Quantities report the formed area from the plates (a strip's joined end faces are inside the joint and are left out). It can be switched on, changed or removed afterwards in Properties.
+
+**Floors that overlap.** Each foundation has a policy for existing floors: *adjust* (default: the floor is cut back to the foundation's edge), *merge* (the floor runs over the foundation: the foundation's top is lowered once to the floor's underside) or *keep*. Only floors whose underside is below the foundation's top, on the same level, are touched. A floor's own outline is remembered, so moving the wall back, changing the strip, or deleting the foundation gives the floor its outline back. A floor that the trim would split in two, or one with an outline that cannot be trimmed exactly, is **left alone and reported** (Properties and the model check say which foundation and why); nothing is faked.
+
+**Reinforce after creation.** Select a foundation → Properties → *Reinforce…* (also on the Insert ribbon). The dialog starts from what is declared and sets the bars, concrete class, steel and cover (`model.set_foundation_data`, one undo step); *Remove reinforcement* clears them. A concrete foundation with declared bars is shown as *Reinforced concrete*: a darker 3D colour, and a heavier crossed hatch in sections. Properties shows what it is "shown as".
+
+**Verified:** 29 new Python tests (the whole SPADRA suite: 1614 tests, one failure that is this environment's missing numpy/trimesh for the modifier test, 7 skipped) (`tests/test_foundation_features.py`; every figure is worked out by hand, e.g. the ring of four strips is (6.6 x 4.6) - (5.4 x 3.4) m² x 0.5 m) and 3 new browser tests in `foundations.e2e.test.mjs` (the four-wall dialog, a wall moved down, Reinforce… on and off with the colour and the section hatch).
+**Limits (kept honest):** reinforcement is *declared*, not modelled as bars in 3D and not drawn as dots or lines in sections; the shading change is the only visual sign. Formwork is on vertical edges only (none under the base). "Merge" lowers the foundation's top once; it does not model a monolithic pour or a joint. If a person edits a floor's outline by hand while a foundation has trimmed it, that edit becomes the floor's new original outline. The section hatch of a strip's cut near a corner uses a heuristic to decide which loop is concrete and which formwork; it is exact for the shapes in the tests, not proved for every junction. Still no structural verification of any kind.
+
+---
 
 **Tenth revision (2026-11-03, evening).** The request of 19:29 ("MASTER DEVELOPMENT PROMPT — SPADRA v2.4") is described in **Part 000** below: two defects fixed, connected gutters, void cutting control, foundations, editable grid lines and persistent parametric arrays, each with what was verified and where it stops. Part 00 and the parts after it are unchanged except where Part 000 says so; the test counts in Part 7 and Part 00 are superseded by Part 000.
 

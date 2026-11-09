@@ -184,5 +184,27 @@ class DrawingImport(Source):
         self.assertEqual(out["entities"], 2)
 
 
+class ProjectOnlyData(unittest.TestCase):
+    """An SGEO export is complete for the model; data SPADRA keeps only in the project (scripts, their provenance log, procedural recipes) is named, not hidden."""
+
+    def setUp(self):
+        self.p = Project.create("Only")
+        self.level = self.p.manifest["levels"][0]["id"]
+        self.wall = self.p.execute("model.add_wall", {"start": [0, 0], "end": [6000, 0], "level": self.level, "thickness": 200, "height": 3})["result"]["id"]
+
+    def test_a_plain_model_exports_complete_with_nothing_lost(self):
+        _, report = IO.export_model(self.p, "sgeo")
+        self.assertEqual((report["status"], report["lost"]), ("complete", []))
+
+    def test_scripts_and_procedural_recipes_are_reported_as_not_in_the_file(self):
+        self.p.execute("script.add", {"name": "s", "source": "def run(model, params):\n    return {'n': 1}\n", "inputs": {}, "outputs": {"n": "integer"}})
+        self.p.execute("procedural.facade", {"wall": self.wall, "panel_width": 1200, "panel_height": 1500})
+        _, report = IO.export_model(self.p, "sgeo")
+        self.assertEqual(report["status"], "partial")
+        text = " ".join(report["lost"])
+        self.assertIn("1 Python script(s)", text)
+        self.assertIn("procedural group recipe", text)
+
+
 if __name__ == "__main__":
     unittest.main()

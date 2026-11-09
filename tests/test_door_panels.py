@@ -78,6 +78,27 @@ class OpeningProfiles(Case):
         self.assertEqual(E.opening_profile(self.p, door), frame)
         self.assertIsNone(E.m(self.meta(frame), "section"))
 
+    def test_a_polyline_drawn_back_to_its_first_point_is_closed_and_usable_as_a_frame_profile(self):
+        door = self.run_("model.add_door", wall=self.host, offset=3.0, width=900, height=2100)["id"]
+        drawing = next(iter(self.p.drawings))
+        corners = [[0, 0], [50, 0], [50, 100], [30, 100], [30, 200], [0, 200]]
+        # drawn through the command with the first point repeated: it is stored closed, without the repeated point
+        looped = self.run_("draw.polyline", drawing=drawing, points=corners + [corners[0]], closed=False)["id"]
+        shape = self.p.drawing(drawing).get(looped)
+        self.assertTrue(shape["geometry"]["closed"])
+        self.assertEqual(len(shape["geometry"]["points"]), 6)
+        frame = self.frame(door, profile_drawing=drawing, profile_entity=looped)
+        self.assertEqual(E.m(self.meta(frame), "section_source"), {"drawing": drawing, "entity": looped})
+        self.assertGreater(self.vol(frame), 0)
+
+    def test_an_older_open_polyline_that_returns_to_its_start_is_still_accepted_as_a_profile(self):
+        window = self.run_("model.add_window", wall=self.host, offset=3.0, width=1200, height=1200, sill=900)["id"]
+        drawing = next(iter(self.p.drawings))
+        doc = self.p.drawing(drawing)
+        legacy = doc.add_polyline([(0, 0), (50, 0), (50, 200), (0, 200), (0, 0)], closed=False)      # as earlier versions stored it
+        self.assertFalse(doc.get(legacy)["geometry"]["closed"])
+        self.assertGreater(self.vol(self.frame(window, profile_drawing=drawing, profile_entity=legacy)), 0)
+
     def test_profile_rejects_open_or_self_intersecting_sdrw_contours(self):
         window = self.run_("model.add_window", wall=self.host, offset=3.0, width=1200, height=1200, sill=900)["id"]
         drawing = next(iter(self.p.drawings))

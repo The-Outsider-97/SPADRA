@@ -137,17 +137,26 @@ class Supports(Case):
         with self.assertRaises(BadRequest):
             self.found(kind="funderingsbalk", support=[a], width=300, height=500)
 
-    def test_the_top_starts_at_the_base_of_what_it_carries_and_a_later_mismatch_is_reported(self):
+    def test_the_top_starts_at_the_base_of_what_it_carries_and_follows_it_up_and_down(self):
         w = self.wall([0, 0], [5000, 0])
         self.run_("model.set_property", id=w, key="base_offset", value=-300)
         s = self.found(kind="strook", support=[w], height=500)
         self.assertAlmostEqual(self.meta(s)[f"{NS}:top"], -0.3, places=9)
         self.assertEqual(self.problems(), [])
-        self.run_("model.set_property", id=w, key="base_offset", value=0)
+        self.run_("model.set_property", id=w, key="base_offset", value=0)               # the wall goes up 300 mm: the foundation goes with it
+        self.assertAlmostEqual(self.meta(s)[f"{NS}:top"], 0.0, places=9)
+        self.assertEqual(self.problems(), [])
+        self.run_("model.move", id=w, dx=0, dy=0, dz=-0.2)
+        self.assertAlmostEqual(self.meta(s)[f"{NS}:top"], -0.2, places=9)
+
+    def test_a_foundation_that_is_not_constrained_keeps_its_place_and_a_mismatch_is_reported(self):
+        w = self.wall([0, 0], [5000, 0])
+        s = self.found(kind="strook", support=[w], height=500, constrain=False)
+        self.run_("model.set_property", id=w, key="base_offset", value=300)
+        self.assertAlmostEqual(self.meta(s)[f"{NS}:top"], 0.0, places=9)
         msgs = self.problems()
         self.assertEqual(len(msgs), 1)
         self.assertIn("300 mm below the underside", msgs[0])
-        self.assertAlmostEqual(self.meta(s)[f"{NS}:top"], -0.3, places=9)              # reported, never silently moved
 
     def test_it_stays_independent_of_the_walls_hosted_openings_and_survives_the_wall_going(self):
         w = self.wall([0, 0], [5000, 0])
@@ -464,7 +473,7 @@ class Commands(Case):
         pad = self.found(kind="poer", support=[c], height=500, bars=[{"diameter": 12, "spacing": 150, "role": "x"}])
         panel = self.p.properties({"model": pad})
         titles = [g["title"] for g in panel["groups"]]
-        self.assertEqual(titles[:6], ["Geometry", "Constraints", "Concrete and reinforcement", "Quantities", "Appearance", "Identity"])
+        self.assertEqual(titles[:7], ["Geometry", "Constraints", "Formwork and floors", "Concrete and reinforcement", "Quantities", "Appearance", "Identity"])
         rf = next(g for g in panel["groups"] if g["title"] == "Concrete and reinforcement")["rows"]
         self.assertTrue(any("Declared, not designed or verified" in str(r["value"]) for r in rf))
         self.run_("model.set_property", id=pad, key="height", value=700)
