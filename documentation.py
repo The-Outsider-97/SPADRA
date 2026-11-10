@@ -551,7 +551,7 @@ for _category, _columns in COLUMNS.items():                                     
                          _col("ifc_type", "IFC Type Product", text=True),
                          _col("ifc_predefined_type", "IFC PredefinedType", text=True),
                          _col("sfb", "NL-SfB", text=True)])
-COUNT_AS = {"wall": "Walls", "door": "Doors", "window": "Windows", "floor": "Floors", "roof": "Roofs", "gutter": "Gutters", "downpipe": "Downpipes", "structural": "Columns and beams", "room": "Rooms",
+COUNT_AS = {"wall": "Walls", "door": "Doors", "window": "Windows", "roof_window": "Roof windows", "floor": "Floors", "roof": "Roofs", "gutter": "Gutters", "downpipe": "Downpipes", "structural": "Columns and beams", "room": "Rooms",
             "stair": "Stairs", "generic": "Generic models", "grid": "Grids", "foundation": "Foundations"}
 
 
@@ -734,7 +734,7 @@ def schedule_data(project: Any, category: str) -> dict[str, Any]:
             order = (order[0], (s[0] + e[0]) / 2, (s[1] + e[1]) / 2)
         rows.append({"_order": order, **row})
     rows.sort(key=lambda r: r["_order"])
-    prefix = {"door": "D", "window": "W", "wall": "WL", "floor": "F", "roof": "R", "gutter": "GT", "downpipe": "DP", "structural": "S", "room": "RM", "stair": "ST", "generic": "G", "foundation": "FD"}[category]
+    prefix = {"door": "D", "window": "W", "roof_window": "RW", "wall": "WL", "floor": "F", "roof": "R", "gutter": "GT", "downpipe": "DP", "structural": "S", "room": "RM", "stair": "ST", "generic": "G", "foundation": "FD"}[category]
     for n, r in enumerate(rows, 1):
         r.pop("_order")
         r["no"] = f"{prefix}{n:02d}"

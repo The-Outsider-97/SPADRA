@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { closedPolylinePoints, closedLoop, alongFrom, angleBetween, polygonsBounds, rotateAbout, roundAngle, wallBand, distToSegment, entityBounds, formatDimension, pointInPolygon, polygonDistance, entityDistance, fitBox, insideBox, niceStep, normaliseRect, orthoConstrain, segmentIntersection, snapPoint } from "../src/client/geom2d.js";
+import { closedPolylinePoints, closedLoop, alongFrom, angleBetween, polygonsBounds, rotateAbout, roundAngle, wallBand, wallCentreShift, distToSegment, entityBounds, formatDimension, pointInPolygon, polygonDistance, entityDistance, fitBox, insideBox, niceStep, normaliseRect, orthoConstrain, segmentIntersection, snapPoint } from "../src/client/geom2d.js";
 import type { Entity } from "../src/client/types.js";
 
 const line = (id: string, a: [number, number], b: [number, number]): Entity => ({ id, kind: "line", layer: "0", geometry: { start: a, end: b } });
@@ -132,6 +132,12 @@ describe("turning and stretching", () => {
   });
   it("draws a wall band of the given thickness about its centre line", () => {
     assert.deepEqual(wallBand([0, 0], [10, 0], 2), [[0, 1], [10, 1], [10, -1], [0, -1]]);
+  });
+  it("places a wall band beside the drawn line by its reference: near face (right of the path) puts the band on the left, far face on the right", () => {
+    assert.deepEqual(wallBand([0, 0], [10, 0], 2, wallCentreShift("near", 0, 2)), [[0, 2], [10, 2], [10, 0], [0, 0]]);
+    assert.deepEqual(wallBand([0, 0], [10, 0], 2, wallCentreShift("far", 0, 2)), [[0, 0], [10, 0], [10, -2], [0, -2]]);
+    assert.deepEqual(wallBand([0, 0], [10, 0], 2, wallCentreShift("centre", 0.5, 2)), [[0, 1.5], [10, 1.5], [10, -0.5], [0, -0.5]]);
+    assert.equal(wallCentreShift("near", -1, 4), 1);
   });
   it("finds the point at a given length along a wall from its first end", () => {
     close(alongFrom([0, 0], [3, 4], 10), [6, 8]);

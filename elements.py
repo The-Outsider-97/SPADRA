@@ -32,8 +32,13 @@ DOOR_LEAF = 0.05                      # thickness of the drawn door leaf, m
 GLASS = 0.03                          # thickness of the drawn glazing panel, m
 ROOF_TYPES = {"flat": "Flat Roof", "shed": "Shed Roof", "gable": "Gable Roof", "hip": "Hip Roof"}      # the four everyday roofs; each can be changed to another later
 OPENINGS = ("door", "window")
+DEPTH_REFS = ("centre", "near", "far", "custom")   # across the wall, by its directed path: near = the right-hand face, far = the left-hand face (see depth_shift)
+SLIDE_MOUNTS = ("surface", "pocket")               # a leaf on a track in front of the wall face, or one that slides into a cavity inside the wall
+SLIDE_DIRECTIONS = ("left", "right", "both")      # as seen from the face the leaf runs on; "both" is a bi-parting pair
+SLIDE_GAP = 0.02                                   # m: between a sliding leaf and the wall face, and between two rails
+RAIL = 0.04                                        # m: the drawn track above a surface-mounted sliding door
 WINDOW_OPERATIONS = ("fixed", "casement")        # a casement has one sash hinged at one jamb; a fixed window does not open
-SPECIAL = ("wall", "door", "window", "opening_profile", "floor", "roof", "structural", "room", "stair", "generic", "extrusion", "void", "sweep", "gutter", "downpipe", "foundation")
+SPECIAL = ("wall", "door", "window", "roof_window", "opening_profile", "floor", "roof", "structural", "room", "stair", "generic", "extrusion", "void", "sweep", "gutter", "downpipe", "foundation")
 FORMS = ("extrusion", "void", "sweep")                     # solids made from a profile (see forms.py)
 FLOOR_TYPES = ("Generic Floor", "Structural Slab")
 IDENTITY = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
@@ -386,17 +391,231 @@ def opening_span(meta: Mapping[str, Any]) -> tuple[float, float, float, float]:
     return centre - width / 2, centre + width / 2, sill, sill + height
 
 
+def depth_shift(meta: Mapping[str, Any], wall_thickness: float, component: float) -> float:
+    """Where the middle of a door or window component ``component`` thick sits across its wall, in metres from the wall's centre line.
+
+    The wall's directed path (start to end) gives the sides: **near** is the right-hand face, **far** the left-hand face, and a positive value moves
+    toward the far face. ``depth_ref`` picks what the offset is measured from: *near* puts the component's near face flush with the wall's near face,
+    *far* likewise, *centre* and *custom* start on the centre line; ``depth_offset`` is then added in every case."""
+    room = max(0.0, wall_thickness / 2 - component / 2)
+    ref = str(m(meta, "depth_ref", "centre"))
+    return {"near": -room, "far": room}.get(ref, 0.0) + float(m(meta, "depth_offset", 0.0))
+
+
+def slide_toward(direction: str, face: int) -> str:
+    """Which end of the wall a sliding leaf travels to. "Left" and "right" are as a person standing on the face the leaf runs on sees it: on the far
+    (left-hand) face of the directed path, right is toward the wall's start; on the near face, toward its end."""
+    right = "start" if face > 0 else "end"
+    left = "end" if face > 0 else "start"
+    return right if direction == "right" else left
+
+
+def sliding_of(meta: Mapping[str, Any]) -> dict[str, Any]:
+    return dict(m(meta, "sliding") or {})
+
+
+def _slide_y(meta: Mapping[str, Any], panel: Mapping[str, Any], wall_t: float, leaf: float) -> float:
+    """Across-the-wall position (m from the centre line) of a sliding leaf in its closed position."""
+    sl = sliding_of(meta)
+    layer, layers = int(panel.get("layer", 0)), int(sl.get("layers", 1))
+    if sl.get("mount", "surface") == "pocket":
+        return depth_shift(meta, wall_t, leaf) + (layer - (layers - 1) / 2) * (leaf + SLIDE_GAP)
+    return int(panel.get("swing", 1)) * (wall_t / 2 + SLIDE_GAP + leaf / 2 + layer * (leaf + SLIDE_GAP))
+
+
+def _profile_shift(opening: Mapping[str, Any], profile: Mapping[str, Any], wall_t: float) -> float:
+    depth = wall_t if m(profile, "depth_mode", "host") == "host" else float(m(profile, "depth"))
+    return depth_shift(opening, wall_t, depth)
+
+
+WALL_REFS = ("near", "centre", "far")
+
+
+def ref_sign(ref: Any) -> int:
+    """+1 when the reference line is the wall's near (right-hand) face, -1 when it is the far (left-hand) face, 0 for the centre line. The directed
+    path start -> end defines "near" and "far": looking along it, the near face is on the right."""
+    return {"near": 1, "far": -1}.get(str(ref), 0)
+
+
+def _wall_normal(start: Any, end: Any) -> tuple[float, float]:
+    d = math.dist(start, end)
+    return (-(end[1] - start[1]) / d, (end[0] - start[0]) / d) if d > 1e-12 else (0.0, 1.0)
+
+
+def reference_shift(meta: Mapping[str, Any], thickness: float | None = None) -> float:
+    """How far (m, along the wall's left normal) the centre line lies from its reference line: the offset, plus half the thickness when the line is a face."""
+    t = float(m(meta, "thickness")) if thickness is None else thickness
+    return float(m(meta, "reference_offset", 0.0)) + ref_sign(m(meta, "reference", "centre")) * t / 2
+
+
+def wall_reference_line(meta: Mapping[str, Any]) -> tuple[tuple[float, float], tuple[float, float]]:
+    """The line the wall was placed on (what a person drew, snapped to and dimensions from), derived from the centre line, which stays the authority."""
+    start, end = m(meta, "start"), m(meta, "end")
+    nx, ny = _wall_normal(start, end)
+    k = reference_shift(meta)
+    return (start[0] - nx * k, start[1] - ny * k), (end[0] - nx * k, end[1] - ny * k)
+
+
+def _move_end(project: Any, wid: str, which: str, point: tuple[float, float]) -> None:
+    """Move one end of a wall along its own line, leaving what is hosted in it where it was (offsets are measured from the start)."""
+    meta = meta_of(project, wid)
+    start, end = m(meta, "start"), m(meta, "end")
+    if which == "start":
+        ux, uy = G.unit(G.sub(end, start))
+        along = (point[0] - start[0]) * ux + (point[1] - start[1]) * uy
+        for hid in hosted(project, wid):
+            _attach(project, hid, {"offset": float(m(meta_of(project, hid), "offset")) - along})
+    _attach(project, wid, {which: [float(point[0]), float(point[1])]})
+
+
+def _line_cross(p: Any, d: Any, q: Any, e: Any) -> tuple[float, float] | None:
+    det = d[0] * e[1] - d[1] * e[0]
+    if abs(det) < 1e-3 * math.hypot(*d) * math.hypot(*e):
+        return None
+    k = ((q[0] - p[0]) * e[1] - (q[1] - p[1]) * e[0]) / det
+    return (p[0] + d[0] * k, p[1] + d[1] * k)
+
+
+def _shift_centre(project: Any, oid: str, d: float) -> set[str]:
+    """Move a wall sideways by ``d`` m (along its left normal). A corner it forms with exactly one other wall keeps its shape: both walls' ends move to
+    where their centre lines now cross (the other wall's end moves along its own line, what is hosted in it staying put). Returns the walls whose ends moved."""
+    meta = meta_of(project, oid)
+    start, end = tuple(m(meta, "start")), tuple(m(meta, "end"))
+    if math.dist(start, end) <= 1e-6 or abs(d) < 1e-12:
+        return set()
+    nx, ny = _wall_normal(start, end)
+    new = {"start": (start[0] + nx * d, start[1] + ny * d), "end": (end[0] + nx * d, end[1] + ny * d)}
+    table, moved = _wall_table(project), set()
+    level, direction = str(m(meta, "level")), (end[0] - start[0], end[1] - start[1])
+    for which, old in (("start", start), ("end", end)):
+        others = [(wid, row) for wid, row in table.items()
+                  if wid != oid and row.level == level and (math.dist(row.start, old) <= JOIN_TOLERANCE or math.dist(row.end, old) <= JOIN_TOLERANCE)]
+        if len(others) == 1:
+            wid, row = others[0]
+            cross = _line_cross(new["start"], direction, row.start, (row.end[0] - row.start[0], row.end[1] - row.start[1]))
+            if cross is not None and math.dist(cross, new[which]) <= max(1.0, 20 * abs(d)):
+                at_start = math.dist(row.start, old) <= JOIN_TOLERANCE
+                new[which] = cross
+                _move_end(project, wid, "start" if at_start else "end", cross)
+                moved.add(wid)
+    _attach(project, oid, {"start": [float(c) for c in new["start"]], "end": [float(c) for c in new["end"]]})
+    return moved
+
+
+def _sync_reference(project: Any, oid: str) -> set[str]:
+    """When a wall that is placed by a face (or with an offset) changes thickness, its reference line stays where it was and the centre line follows,
+    so a wall drawn along its outer face keeps that face. Returns the other walls whose ends moved with its corners (to rebuild)."""
+    meta = meta_of(project, oid)
+    t, before = float(m(meta, "thickness")), m(meta, "ref_thickness")
+    if before is None or abs(float(before) - t) < 1e-9:
+        if before is None and m(meta, "reference") is not None:
+            _attach(project, oid, {"ref_thickness": t})
+        return set()
+    _attach(project, oid, {"ref_thickness": t})
+    return _shift_centre(project, oid, ref_sign(m(meta, "reference", "centre")) * (t - float(before)) / 2)
+
+
+def set_wall_reference(project: Any, oid: str, reference: Any = None, offset: Any = None) -> set[str]:
+    """Change what a wall is placed by. The reference line stays where it is and the wall moves to sit as the new setting says (near/far: that face is
+    on the line; centre: the line runs down the middle), so nothing is placed twice: only the centre line, the one authority, changes."""
+    meta = meta_of(project, oid)
+    new_ref = str(m(meta, "reference", "centre")) if reference is None else _choice(reference, WALL_REFS, "reference")
+    new_off = float(m(meta, "reference_offset", 0.0)) if offset is None else number(offset, "reference offset", -100000, 100000) / 1000.0
+    t = float(m(meta, "thickness"))
+    delta = (new_off + ref_sign(new_ref) * t / 2) - reference_shift(meta, t)
+    _attach(project, oid, {"reference": new_ref, "reference_offset": new_off, "ref_thickness": t})
+    return _shift_centre(project, oid, delta)
+
+
+def join_drawn_corners(project: Any, oid: str) -> set[str]:
+    """A wall drawn from or to the end of another wall's reference line makes a corner with it: where the two walls' centre lines cross is the corner,
+    whichever faces they were drawn along. Returns the walls whose ends moved."""
+    meta = meta_of(project, oid)
+    ref = wall_reference_line(meta)
+    start, end = tuple(m(meta, "start")), tuple(m(meta, "end"))
+    if math.dist(start, end) <= 1e-6:
+        return set()
+    level, moved = str(m(meta, "level")), set()
+    others = []
+    for wid in all_ids(project.model, metadata={f"{NS}:category": "wall"}):
+        if wid == oid:
+            continue
+        om = meta_of(project, wid)
+        if str(m(om, "level")) == level and math.dist(m(om, "start"), m(om, "end")) > 1e-6:
+            others.append((wid, om, wall_reference_line(om)))
+    new = {"start": start, "end": end}
+    for which, drawn in (("start", ref[0]), ("end", ref[1])):
+        hits = [(wid, om, which2) for wid, om, oref in others for which2, q in (("start", oref[0]), ("end", oref[1])) if math.dist(q, drawn) <= JOIN_TOLERANCE]
+        if len(hits) != 1:
+            continue
+        wid, om, which2 = hits[0]
+        cross = _line_cross(start, (end[0] - start[0], end[1] - start[1]), m(om, "start"), (m(om, "end")[0] - m(om, "start")[0], m(om, "end")[1] - m(om, "start")[1]))
+        near_by = max(1.0, 10 * (float(m(meta, "thickness")) + float(m(om, "thickness"))))
+        if cross is not None and math.dist(cross, new[which]) <= near_by:
+            new[which] = cross
+            _move_end(project, wid, which2, cross)
+            moved.add(wid)
+    _attach(project, oid, {"start": [float(c) for c in new["start"]], "end": [float(c) for c in new["end"]]})
+    return moved
+
+
+def flip_wall(project: Any, oid: str) -> None:
+    """Reverse a wall's direction without moving it: start and end swap, near and far swap with them, the offset changes sign, and what is hosted in
+    the wall is mirrored so each door and window stays exactly where it was in the room."""
+    meta = meta_of(project, oid)
+    if m(meta, "category") != "wall":
+        raise BadRequest("Only a wall can be flipped")
+    length = math.dist(m(meta, "start"), m(meta, "end"))
+    swap = {"near": "far", "far": "near", "centre": "centre"}
+    _attach(project, oid, {"start": list(m(meta, "end")), "end": list(m(meta, "start")), "reference": swap[str(m(meta, "reference", "centre"))],
+                           "reference_offset": -float(m(meta, "reference_offset", 0.0)), "ref_thickness": float(m(meta, "thickness"))})
+    for hid in hosted(project, oid):
+        h = meta_of(project, hid)
+        values: dict[str, Any] = {"offset": length - float(m(h, "offset")), "depth_offset": -float(m(h, "depth_offset", 0.0)),
+                                  "depth_ref": swap[str(m(h, "depth_ref", "centre"))]}
+        if m(h, "category") == "door":
+            values["hinge"] = "end" if m(h, "hinge", "start") == "start" else "start"
+            values["swing"] = -int(m(h, "swing", 1))
+            if m(h, "panels"):
+                flip = {"start": "end", "end": "start"}
+                values["panels"] = [{**q, "hinge": flip.get(q.get("hinge", "start"), "start"), "swing": -int(q.get("swing", 1)),
+                                     "slide": flip.get(q.get("slide", "end"), "end")} for q in reversed(list(m(h, "panels")))]
+            if m(h, "sliding"):
+                values["sliding"] = {**sliding_of(h), "face": -int(sliding_of(h).get("face", 1))}
+        _attach(project, hid, values)
+    corners = project.manifest.get("wall_corners", {})                              # a saved corner style names the wall's ends: swap them with it
+    if isinstance(corners, dict) and any(f"{oid}:" in str(k) for k in corners):
+        remapped: dict[str, str] = {}
+        for key, mode in corners.items():
+            parts = str(key).split("|")
+            if not any(part.startswith(f"{oid}:") for part in parts):
+                remapped[key] = mode
+                continue
+            swapped = [f"{oid}:{'end' if part.endswith(':start') else 'start'}" if part.startswith(f"{oid}:") else part for part in parts]
+            new_key = "|".join(sorted(swapped))
+            if mode in ("first_through", "second_through") and new_key.split("|", 1)[0] != key.split("|", 1)[0]:
+                mode = "second_through" if mode == "first_through" else "first_through"
+            remapped[new_key] = mode
+        corners.clear()
+        corners.update(remapped)
+    regenerate_wall(project, oid)
+
+
 def regenerate_wall(project: Any, oid: str) -> None:
     """Rebuild a wall (and everything hosted on it) from parameters, then the walls it joins or used to join, whose ends depend on it.
     Refuses, with the reason, any combination that does not fit."""
     meta = meta_of(project, oid)
     if m(meta, "category") != "wall":
         raise BadRequest("That element is not a wall")
+    followed = _sync_reference(project, oid)                                        # a thickness change keeps the reference line
     f = wall_frame(project, oid)
     table = _wall_table(project)
     affected = set(m(meta, "joins") or ()) | (_touching(table, oid, str(m(meta, "level")), f["start"], f["end"], f["thickness"]) if f["length"] > 1e-6 else set())
     _build_wall(project, oid, table)
-    _refresh_walls(project, affected - {oid})
+    for wid in sorted(followed):                                                     # walls whose ends moved with this one's corner
+        _build_wall(project, wid, _wall_table(project))
+    _refresh_walls(project, affected - {oid} - followed)
+    _refresh_roof_ends(project)                                                      # a roof that ends on this wall follows it
 
 
 def _refresh_walls(project: Any, ids: Any) -> None:
@@ -497,18 +716,22 @@ def _build_wall(project: Any, oid: str, table: Mapping[str, _WallRow]) -> None:
 def _place_opening(project: Any, oid: str, frame: Mapping[str, Any]) -> None:
     """Position a door or window's own solid inside its opening. The object's origin is its hinge: a vertical axis at the hinge edge (for a door, on
     the wall face the plan's swing arc is drawn from; for a window, on the wall's centre line), so an animated turn swings the leaf about its hinge,
-    as the plan shows, and not about its own centre. The leaf itself sits where it did: centred in the opening."""
+    as the plan shows, and not about its own centre. The leaf itself sits in the opening, across the wall where ``depth_shift`` puts it (on the centre
+    line unless the door was given a depth reference or offset; where its frame is, when it has one). A sliding door's leaves stand in their closed
+    position, on their own plane (in front of the wall face, or in the wall's pocket), with the track above them when it is surface-mounted."""
     meta = project.model.get(oid)["metadata"]
     x0, x1, z0, z1 = opening_span(meta)
     door = m(meta, "category") == "door"
     thickness = DOOR_LEAF if door else GLASS
     raw_x0, raw_x1 = x0, x1
     profile = opening_profile(project, oid)
+    yd = depth_shift(meta, frame["thickness"], thickness)
     if profile:
         pm = meta_of(project, profile)
         inset, clearance = float(m(pm, "face_width")), float(m(pm, "clearance", 0.003))
         x0, x1 = x0 + inset + clearance, x1 - inset - clearance
         z0, z1 = z0 + (inset if not door else 0.0) + clearance, z1 - inset - clearance
+        yd = _profile_shift(meta, pm, frame["thickness"])                           # the leaf stays in its frame
         if x1 - x0 < MIN_PANEL or z1 - z0 < MIN_PANEL:
             raise BadRequest("The opening profile leaves insufficient clear space for the panel", hint="Reduce the profile face width or enlarge the rough opening")
     hinge_x = x0 if m(meta, "hinge", "start") == "start" else x1
@@ -517,16 +740,28 @@ def _place_opening(project: Any, oid: str, frame: Mapping[str, Any]) -> None:
     if has_panels(meta):                                                          # one leaf per panel, side by side, each its own closed shell; the origin is the door's start edge
         verts: list[list[float]] = []
         faces: list[list[int]] = []
-        for _, px0, px1 in panel_spans(meta):
+        sliding = sliding_of(meta)
+        rails: dict[tuple[float, int], list[float]] = {}
+        for q, px0, px1 in panel_spans(meta):
             px0 = x0 + (px0 - raw_x0) * (x1 - x0) / (raw_x1 - raw_x0)
             px1 = x0 + (px1 - raw_x0) * (x1 - x0) / (raw_x1 - raw_x0)
-            v, f_ = _box(px0 - x0, px1 - x0, -thickness / 2, thickness / 2, -(z1 - z0) / 2, (z1 - z0) / 2)
+            y = _slide_y(meta, q, frame["thickness"], thickness) if q["operation"] == "slide" else yd
+            v, f_ = _box(px0 - x0, px1 - x0, y - thickness / 2, y + thickness / 2, -(z1 - z0) / 2, (z1 - z0) / 2)
+            faces += [[a + len(verts), b + len(verts), c_ + len(verts)] for a, b, c_ in f_]
+            verts += v
+            if q["operation"] == "slide" and sliding.get("mount", "surface") == "surface":     # a track over the closed leaf and the way it travels
+                travel = q["width"] if q["slide"] == "end" else -q["width"]
+                lo, hi = sorted((px0 - x0, px1 - x0, px0 - x0 + travel, px1 - x0 + travel))[::3]
+                key = (round(y, 6), 0)
+                rails[key] = [min(lo, rails.get(key, [lo, hi])[0]), max(hi, rails.get(key, [lo, hi])[1]), y]
+        for (_, _), (lo, hi, y) in rails.items():
+            v, f_ = _box(lo, hi, y - RAIL / 2, y + RAIL / 2, (z1 - z0) / 2 + 0.01, (z1 - z0) / 2 + 0.01 + RAIL)
             faces += [[a + len(verts), b + len(verts), c_ + len(verts)] for a, b, c_ in f_]
             verts += v
         _set_mesh(project, oid, (verts, faces), _rot(frame["angle"], frame["start"][0] + c * x0, frame["start"][1] + s * x0, frame["base"] + (z0 + z1) / 2))
         _attach(project, oid, {"level": m(frame["meta"], "level")})
         return
-    project.model.set_geometry(oid, {"kind": "box", "center": [(x0 + x1) / 2 - hinge_x, -face, 0.0], "size": [x1 - x0, thickness, z1 - z0]})
+    project.model.set_geometry(oid, {"kind": "box", "center": [(x0 + x1) / 2 - hinge_x, yd - face, 0.0], "size": [x1 - x0, thickness, z1 - z0]})
     project.model.set_transform(oid, _rot(frame["angle"], frame["start"][0] + c * hinge_x - s * face, frame["start"][1] + s * hinge_x + c * face, frame["base"] + (z0 + z1) / 2))
     _attach(project, oid, {"level": m(frame["meta"], "level")})
 
@@ -648,7 +883,8 @@ def regenerate_opening_profile(project: Any, oid: str) -> None:
     for side, begin, end in segments:
         vv, ff = _section_prism(section, begin, end, side, opening)
         at = len(verts)
-        verts.extend([[q[0] - frame["length"] / 2, q[1], q[2] - frame["height"] / 2] for q in vv])
+        shift = _profile_shift(opening, meta_of(project, oid), frame["thickness"])     # the frame sits where its door or window's depth reference puts it
+        verts.extend([[q[0] - frame["length"] / 2, q[1] + shift, q[2] - frame["height"] / 2] for q in vv])
         faces.extend([[i + at for i in face] for face in ff])
     _set_mesh(project, oid, _positive_volume((verts, faces)),
               _rot(frame["angle"], frame["mid"][0], frame["mid"][1], frame["base"] + frame["height"] / 2))
@@ -719,7 +955,7 @@ def refresh_opening_profiles_for_drawing(project: Any, drawing_id: str, to_m: fl
 
 
 # ------------------------------------------------------------------------------------------------------------------------ door panels
-PANEL_OPERATIONS = ("swing", "fixed")
+PANEL_OPERATIONS = ("swing", "fixed", "slide")
 MIN_PANEL = 0.05                      # m: a panel narrower than this is not a panel
 
 
@@ -733,8 +969,9 @@ def door_panels(meta: Mapping[str, Any]) -> list[dict[str, Any]]:
     stored = m(meta, "panels")
     if stored:
         return [{"id": str(q["id"]), "name": str(q.get("name") or ""), "width": float(q["width"]), "hinge": str(q.get("hinge", "start")),
-                 "swing": int(q.get("swing", 1)), "operation": str(q.get("operation", "swing"))} for q in stored]
-    return [{"id": "p1", "name": "Panel 1", "width": float(m(meta, "width")), "hinge": str(m(meta, "hinge", "start")), "swing": int(m(meta, "swing", 1)), "operation": "swing"}]
+                 "swing": int(q.get("swing", 1)), "operation": str(q.get("operation", "swing")), "slide": str(q.get("slide", "end")), "layer": int(q.get("layer", 0))}
+                for q in stored]
+    return [{"id": "p1", "name": "Panel 1", "width": float(m(meta, "width")), "hinge": str(m(meta, "hinge", "start")), "swing": int(m(meta, "swing", 1)), "operation": "swing", "slide": "end", "layer": 0}]
 
 
 def panel_spans(meta: Mapping[str, Any]) -> list[tuple[dict[str, Any], float, float]]:
@@ -816,6 +1053,12 @@ def set_panel_field(project: Any, oid: str, pid: str, field: str, value: Any) ->
         q["swing"] = 1 if _choice(value, ("left", "right"), "swing") == "left" else -1
     elif field == "operation":
         q["operation"] = _choice(value, PANEL_OPERATIONS, "operation")
+        if q["operation"] == "slide" and not sliding_of(meta):
+            _attach(project, oid, {"sliding": {"leaves": len(panels), "direction": "custom", "mount": "surface", "face": q["swing"], "layers": 1 + max(p_["layer"] for p_ in panels)}})
+    elif field == "slide":
+        q["slide"] = _choice(value, ("start", "end"), "slide direction")
+    elif field == "layer":
+        q["layer"] = int(number(value, "rail", 0, 3))
     elif field == "name":
         q["name"] = text(value, "name", 40)
     else:
@@ -835,7 +1078,7 @@ def add_opening(project: Any, kind: str, p: Mapping[str, Any], to_m: float) -> s
     f = wall_frame(project, wall)
     width = number(p.get("width", 900 if kind == "door" else 1200), "width", 100, 20000) / 1000.0
     height = number(p.get("height", 2100 if kind == "door" else 1200), "height", 100, 20000) / 1000.0
-    sill = 0.0 if kind == "door" else number(p.get("sill", 900), "sill", 0, 20000) / 1000.0
+    sill = number(p.get("sill", 0 if kind == "door" else 900), "sill", 0, 20000) / 1000.0
     if p.get("offset") is not None:
         offset = number(p["offset"], "offset", 0, 100000)
     else:
@@ -858,14 +1101,76 @@ def add_opening(project: Any, kind: str, p: Mapping[str, Any], to_m: float) -> s
     if values["material"] not in MATERIALS:
         raise BadRequest(f"material must be one of {', '.join(MATERIALS)}")
     values["hinge"] = _choice(p.get("hinge", "start"), ("start", "end"), "hinge")
+    values["depth_ref"] = _choice(p.get("depth_ref", "centre"), DEPTH_REFS, "depth reference")
+    values["depth_offset"] = number(p.get("depth_offset", 0), "depth offset", -5000, 5000) / 1000.0
     if kind == "window":
         values["operation"] = _choice(p.get("operation", "fixed"), WINDOW_OPERATIONS, "operation")
     values["swing"] = 1 if _choice(p.get("swing", "left"), ("left", "right"), "swing") == "left" else -1      # which side of the wall the leaf opens to
     name = text(p.get("name") or kind.title(), "name", 80)
     oid = project.model.add_box(width=1.0, depth=1.0, height=1.0, name=name)
     _attach(project, oid, values)
-    regenerate_wall(project, wall)
+    slide = p.get("sliding")
+    if slide:
+        if kind != "door":
+            raise BadRequest("Only a door can slide")
+        slide = dict(slide) if isinstance(slide, Mapping) else {}
+        make_sliding(project, oid, slide.get("leaves", 1), slide.get("direction", "right"), slide.get("mount", "surface"), slide.get("face", 1))
+    else:
+        regenerate_wall(project, wall)
     return oid
+
+
+def make_sliding(project: Any, oid: str, leaves: Any = 1, direction: Any = "right", mount: Any = "surface", face: Any = 1) -> None:
+    """Make a door a sliding door (*schuifdeur*): one or two leaves that run on a track in front of the wall face (``surface``) or into a cavity in the wall
+    (``pocket``). The leaves are ordinary door panels with the operation ``slide``, so they are edited, schedule and quantify like any panel.
+    ``direction`` is "left" or "right" as seen from the face they run on (``face``: 1 the far, left-hand face of the wall's path, -1 the near one);
+    ``both`` is a bi-parting pair, two leaves that part toward each end. Two leaves going the same way run on two rails."""
+    meta = meta_of(project, oid)
+    if m(meta, "category") != "door":
+        raise BadRequest("Only a door can slide")
+    try:
+        count = int(float(leaves))
+    except (TypeError, ValueError):
+        raise BadRequest("A sliding door has one or two leaves") from None
+    if count not in (1, 2):
+        raise BadRequest("A sliding door has one or two leaves")
+    direction = _choice(direction, SLIDE_DIRECTIONS, "sliding direction")
+    mount = _choice(mount, SLIDE_MOUNTS, "mount")
+    if direction == "both" and count != 2:
+        raise BadRequest("A bi-parting pair needs two leaves")
+    try:
+        face = 1 if float(face) >= 0 else -1
+    except (TypeError, ValueError):
+        raise BadRequest("The face a sliding door runs on is 1 (far) or -1 (near)") from None
+    width = float(m(meta, "width"))
+    toward = slide_toward(direction, face)
+    leaf = lambda i, w, to, layer: {"id": f"p{i}", "name": f"Leaf {i}", "width": w, "hinge": "start", "swing": face, "operation": "slide", "slide": to, "layer": layer}     # noqa: E731
+    if count == 1:
+        panels, layers = [leaf(1, width, toward, 0)], 1
+    elif direction == "both":
+        panels, layers = [leaf(1, width / 2, "start", 0), leaf(2, width / 2, "end", 0)], 1
+    else:
+        panels, layers = [leaf(1, width / 2, toward, 0), leaf(2, width / 2, toward, 1)], 2
+    _attach(project, oid, {"sliding": {"leaves": count, "direction": direction, "mount": mount, "face": face, "layers": layers}, "panels": panels, "width": width,
+                           "type": "Sliding Door"})
+    regenerate_wall(project, str(m(meta, "host")))
+
+
+def make_hinged(project: Any, oid: str) -> None:
+    """Back from a sliding door to a plain single hinged door of the same size."""
+    meta = meta_of(project, oid)
+    if m(meta, "category") != "door":
+        raise BadRequest("Only a door can be hinged")
+    _attach(project, oid, {"sliding": None, "panels": None, "type": "Single Flush Door"})
+    regenerate_wall(project, str(m(meta, "host")))
+
+
+def opening_depth_y(project: Any, oid: str, meta: Mapping[str, Any], wall_t: float) -> float:
+    """Across-the-wall position of a door's or window's own leaf (its profile's, when it has a frame), m from the wall's centre line."""
+    profile = opening_profile(project, oid)
+    if profile:
+        return _profile_shift(meta, meta_of(project, profile), wall_t)
+    return depth_shift(meta, wall_t, DOOR_LEAF if m(meta, "category") == "door" else GLASS)
 
 
 # ------------------------------------------------------------------------------------------------------------------------ floors
@@ -1082,14 +1387,531 @@ def roof_eaves(meta: Mapping[str, Any]) -> list[tuple[tuple[float, float], tuple
     return [(boundary[i], boundary[(i + 1) % len(boundary)]) for i in roof_eave_edges(meta)]
 
 
-def _roof_mesh(meta: Mapping[str, Any], base: float, thickness: float) -> G.Mesh:
-    """One slab of a roof: its top surface where the roof's top is when its eaves are at ``base``, ``thickness`` thick straight down."""
+# ------------------------------------------------------------------------------------------------------------- roof end connections
+# How a pitched roof ends at an eave, in the cross-section across that eave: the end of the slab is cut by a plane (square to the slope, plumb or
+# horizontal) placed so that one point of the cut face (its underside corner, middle or top corner) stands over a chosen line of the wall that carries it
+# (its near face, centre line or far face, plus an offset). "Near" is the wall face nearest the roof's ridge, "far" the outer one. The presets below are the
+# 14 connection details A1 to D3 of the reference sheet, as combinations of those parameters; every parameter can then be edited on its own.
+ROOF_CUTS = ("square", "plumb", "horizontal")
+ROOF_ANCHORS = {"underside": 0.0, "mid": 0.5, "top": 1.0}
+ROOF_END_LAYERS = ("through", "own")
+# type: (title, cut, wall reference, anchor on the cut face, bearing, default heel in m: + stands above the wall top, - is embedded in it)
+ROOF_END_TYPES: dict[str, tuple[str, str, str, str, str, float]] = {
+    "A1": ("Square-cut roof end, near-face bearing alignment", "square", "near", "underside", "top", 0.0),
+    "A2": ("Square-cut roof end, centreline bearing alignment", "square", "centre", "underside", "top", 0.0),
+    "A3": ("Square-cut roof end, far-face bearing alignment", "square", "far", "underside", "top", 0.0),
+    "B1": ("Plumb-cut roof end, near-face alignment", "plumb", "near", "underside", "top", 0.0),
+    "B2": ("Plumb-cut roof end, centreline alignment", "plumb", "centre", "underside", "top", 0.0),
+    "B3": ("Plumb-cut roof end, far-face alignment", "plumb", "far", "underside", "top", 0.0),
+    "C1": ("Horizontal-cut roof end, far-face edge alignment", "horizontal", "far", "underside", "top", 0.0),
+    "C2": ("Horizontal-cut roof end, projecting", "horizontal", "near", "mid", "top", 0.0),
+    "C3": ("Horizontal-cut roof end, centreline-referenced", "horizontal", "centre", "mid", "top", 0.0),
+    "C4": ("Horizontal-cut roof end, flush alignment", "horizontal", "far", "top", "top", 0.0),
+    "C5": ("Horizontal-cut roof end, near-face edge alignment", "horizontal", "near", "top", "top", 0.0),
+    "D1": ("Raised-heel roof connection", "square", "near", "underside", "top", 0.1),
+    "D2": ("Plumb-cut roof end, near-face butt abutment", "plumb", "near", "underside", "face", 0.0),
+    "D3": ("Embedded/intersecting roof end, plumb-cut", "plumb", "far", "underside", "top", -0.1),
+}
+ROOF_END_TOLERANCE = 0.002             # m: a roof corner this close to its target height is seated
+
+
+def _line_hit(p0: tuple[float, float], dv: tuple[float, float], c: float, tan: float) -> tuple[float, float]:
+    """Where the line p0 + k·dv crosses the slope line z = c − q·tan (section coordinates: q outward from the outline, z up)."""
+    k = (c - p0[1] - p0[0] * tan) / (dv[1] + dv[0] * tan)
+    return (p0[0] + k * dv[0], p0[1] + k * dv[1])
+
+
+def end_cut(cut: str, lam: float, q_ref: float, tan: float, top_c: float, t: float) -> tuple[tuple[float, float], tuple[float, float], tuple[tuple[float, float], tuple[float, float]]]:
+    """The cut that puts the point at fraction ``lam`` of the cut face (0 the underside corner, 1 the top corner) over ``q_ref``, for a slab whose top
+    surface is z = top_c - q·tan and that is ``t`` thick straight down. Returns the underside corner, the top corner and the cut line (point, direction)."""
+    alpha = math.atan(tan)
+    if cut == "plumb":
+        line = ((q_ref, 0.0), (0.0, 1.0))
+    elif cut == "square":
+        q_u = q_ref - lam * t * math.cos(alpha) * math.sin(alpha)
+        line = ((q_u, top_c - t - q_u * tan), (math.sin(alpha), math.cos(alpha)))
+    else:
+        q_u = q_ref - lam * t / tan
+        line = ((q_u, top_c - t - q_u * tan), (1.0, 0.0))
+    return _line_hit(*line, top_c - t, tan), _line_hit(*line, top_c, tan), line
+
+
+def roof_end_config(meta: Mapping[str, Any], edge: int) -> dict[str, Any] | None:
+    stored = (m(meta, "roof_ends") or {}).get(str(edge))
+    return dict(stored) if stored else None
+
+
+def normalise_roof_end(p: Mapping[str, Any], current: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """A complete, valid connection from what was given: a preset type fills the rest, any parameter then overrides it (mm in, m stored)."""
+    base = dict(current or {})
+    kind = p.get("type", base.get("type", "B1"))
+    if kind != "custom" and kind not in ROOF_END_TYPES:
+        raise BadRequest(f"type must be custom or one of {', '.join(ROOF_END_TYPES)}")
+    if "type" in p and kind in ROOF_END_TYPES:                                       # choosing a preset resets the parameters it defines
+        _, cut, ref, anchor, bearing, heel = ROOF_END_TYPES[kind]
+        base = {"cut": cut, "ref": ref, "anchor": anchor, "bearing": bearing, "heel": heel, "offset": 0.0, "layers": base.get("layers", "through"), "wall": base.get("wall")}
+    cfg = {"type": kind, "cut": base.get("cut", "plumb"), "ref": base.get("ref", "near"), "anchor": base.get("anchor", "underside"), "bearing": base.get("bearing", "top"),
+           "heel": float(base.get("heel", 0.0)), "offset": float(base.get("offset", 0.0)), "layers": base.get("layers", "through"), "wall": base.get("wall")}
+    if "cut" in p:
+        cfg["cut"] = _choice(p["cut"], ROOF_CUTS, "cut orientation")
+    if "ref" in p:
+        cfg["ref"] = _choice(p["ref"], WALL_REFS, "wall alignment")
+    if "anchor" in p:
+        cfg["anchor"] = _choice(p["anchor"], tuple(ROOF_ANCHORS), "cut anchor")
+    if "bearing" in p:
+        cfg["bearing"] = _choice(p["bearing"], ("top", "face"), "bearing condition")
+    if "layers" in p:
+        cfg["layers"] = _choice(p["layers"], ROOF_END_LAYERS, "layer behaviour")
+    if "heel" in p:
+        cfg["heel"] = number(p["heel"], "heel (mm)", -5000, 5000) / 1000.0
+    if "offset" in p:
+        cfg["offset"] = number(p["offset"], "offset (mm)", -5000, 5000) / 1000.0
+    if "wall" in p:
+        cfg["wall"] = text(p["wall"], "wall", 80) if p["wall"] else None
+    if kind in ROOF_END_TYPES and (cfg["cut"], cfg["ref"], cfg["anchor"]) != ROOF_END_TYPES[kind][1:4]:
+        cfg["type"] = "custom"                                                       # edited away from its preset: it is its own detail now
+    return cfg
+
+
+def _edge_section(meta: Mapping[str, Any], edge: int) -> dict[str, Any]:
+    boundary = [tuple(q) for q in m(meta, "boundary")]
+    centre, along, across, length, width = _rectangle([list(q) for q in boundary])
+    a, b = boundary[edge], boundary[(edge + 1) % len(boundary)]
+    sigma = 1.0 if G.dot(G.sub(((a[0] + b[0]) / 2, (a[1] + b[1]) / 2), centre), across) > 0 else -1.0
+    return {"a": a, "b": b, "sigma": sigma, "along": along, "across": across, "centre": centre, "length": length, "width": width,
+            "normal": (across[0] * sigma, across[1] * sigma), "tan": math.tan(math.radians(float(m(meta, "pitch"))))}
+
+
+def _wall_under_eave(project: Any, sec: Mapping[str, Any], under_z: float, explicit: str | None) -> dict[str, Any] | None:
+    """The wall that carries an eave: parallel to it, overlapping most of its length, nearest to it in plan and with its top near the roof."""
+    a, nrm, along = sec["a"], sec["normal"], sec["along"]
+    best: tuple[float, dict[str, Any]] | None = None
+    for wid in all_ids(project.model, metadata={f"{NS}:category": "wall"}):
+        if explicit and wid != explicit:
+            continue
+        wm = meta_of(project, wid)
+        s, e = tuple(m(wm, "start")), tuple(m(wm, "end"))
+        d = G.sub(e, s)
+        if G.norm(d) < 1e-6 or abs(d[0] * sec["along"][1] - d[1] * sec["along"][0]) > 0.02 * G.norm(d):
+            continue
+        lo, hi = sorted((G.dot(G.sub(s, a), along), G.dot(G.sub(e, a), along)))
+        if min(hi, sec["length"]) - max(lo, 0.0) < 0.25 * sec["length"] and not explicit:
+            continue
+        mid = ((s[0] + e[0]) / 2, (s[1] + e[1]) / 2)
+        q_c = G.dot(G.sub(mid, a), nrm)
+        top = level_elevation(project, m(wm, "level")) + float(m(wm, "base_offset", 0.0)) + float(m(wm, "height"))
+        if not explicit and (abs(q_c) > 1.5 or abs(top - under_z) > 3.0):
+            continue
+        thick = float(m(wm, "thickness"))
+        if best is None or abs(q_c) < best[0]:
+            best = (abs(q_c), {"id": wid, "q_centre": q_c, "q_near": q_c - thick / 2, "q_far": q_c + thick / 2, "top": top, "thickness": thick})
+    return best[1] if best else None
+
+
+def roof_end_cuts(project: Any, meta: Mapping[str, Any], overrides: Mapping[int, Mapping[str, Any]] | None = None) -> dict[int, dict[str, Any]]:
+    """Every eave of a roof that has an end connection, resolved against the walls as they are now: the cut line and its corners in the eave's
+    cross-section (``q`` outward from the outline, ``z`` m above the roof's top surface at the outline), where it lands on the wall, and what is
+    wrong or notable about it (``notes``). Raises when a cut would leave nothing of the slope."""
+    out: dict[int, dict[str, Any]] = {}
+    kind = m(meta, "roof")
+    configs = {int(k): dict(v) for k, v in (m(meta, "roof_ends") or {}).items()}
+    for k, v in (overrides or {}).items():
+        configs[int(k)] = dict(v)
+    if not configs:
+        return out
+    if kind not in ("gable", "shed"):                                                    # a roof changed to flat or hip keeps its settings but they have no effect
+        return out
+    eaves = roof_eave_edges(meta)
+    t = float(m(meta, "thickness"))
+    base = level_elevation(project, m(meta, "level")) + float(m(meta, "offset", 0.0))                  # the top surface at the outline
+    for edge, cfg in sorted(configs.items()):
+        if edge not in eaves:
+            continue
+        sec = _edge_section(meta, edge)
+        tan = sec["tan"]
+        wall = _wall_under_eave(project, sec, base - t, cfg.get("wall"))
+        notes: list[dict[str, str]] = []
+        if cfg.get("wall") and wall is None:
+            notes.append({"severity": "warning", "code": "wall_missing", "message": "The wall this end is tied to is gone or is not parallel to the eave: positioned from the roof outline instead"})
+        if wall is None:
+            wall_q = {"near": 0.0, "centre": 0.0, "far": 0.0}
+            if not cfg.get("wall"):
+                notes.append({"severity": "info", "code": "no_wall", "message": "No wall found under this eave: the cut is positioned from the roof outline"})
+        else:
+            wall_q = {"near": wall["q_near"], "centre": wall["q_centre"], "far": wall["q_far"]}
+        q_ref = wall_q[cfg["ref"]] + float(cfg.get("offset", 0.0))
+        lam = ROOF_ANCHORS[cfg["anchor"]]
+        u, tp, line = end_cut(cfg["cut"], lam, q_ref, tan, 0.0, t)
+        if max(u[0], tp[0]) > 5.0:
+            raise BadRequest("The cut would end more than 5 m outside the roof outline")
+        ridge = float(m(meta, "ridge_offset", 0.0)) if kind == "gable" else None
+        half = sec["width"] / 2
+        far_side = ridge if ridge is not None else -sec["sigma"] * half                               # where the slope this eave belongs to begins
+        for q, _z in (u, tp):                                                                          # a cut must leave some of the slope
+            if half + q - sec["sigma"] * far_side < 0.02:
+                raise BadRequest(f"The end cut of eave {edge + 1} would cut away the whole slope up to the {'ridge' if ridge is not None else 'high edge'}")
+        p_anchor = (u[0] + lam * (tp[0] - u[0]), u[1] + lam * (tp[1] - u[1]))
+        item: dict[str, Any] = {"edge": edge, "cfg": cfg, "sigma": sec["sigma"], "wall": wall, "q_ref": q_ref, "line": line, "under": u, "top": tp, "anchor": p_anchor,
+                                "base": base, "thickness": t, "tan": tan, "notes": notes, "wall_q": wall_q}
+        if wall is not None:
+            z_anchor = base + p_anchor[1]
+            gap = z_anchor - wall["top"]
+            item["gap"] = gap
+            heel = float(cfg.get("heel", 0.0))
+            face = cfg.get("bearing", "top") == "face"
+            item["seat_delta"] = ((base + tp[1]) - wall["top"] - heel) if face else gap - heel          # an abutment is seated by its upper corner, a bearing by its lower one
+            projection = max(0.0, max(u[0], tp[0]) - wall["q_far"])
+            item["projection"] = projection
+            delta = item["seat_delta"]
+            if face:
+                if abs(q_ref - wall["q_near"]) > 0.005 or cfg["cut"] != "plumb":
+                    notes.append({"severity": "info", "code": "abut_offset", "message": f"The cut stands {abs(q_ref - wall['q_near']) * 1000:.0f} mm from the near face of the wall: it only abuts it with a plumb cut at 0 mm offset"})
+                if delta > ROOF_END_TOLERANCE:
+                    notes.append({"severity": "warning", "code": "wall_below_roof", "message": f"The wall top is {delta * 1000:.0f} mm below the roof's upper corner at the abutment"})
+                elif delta < -ROOF_END_TOLERANCE:
+                    notes.append({"severity": "info", "code": "wall_above_roof", "message": f"The wall rises {-delta * 1000:.0f} mm above the roof's upper corner (aligned at 0 mm)"})
+                else:
+                    notes.append({"severity": "info", "code": "abutment", "message": "The roof abuts the near face of the wall with its upper corner at the wall top: vertical face contact, not bearing on the wall top. Its own support is not modelled"})
+            else:
+                if delta > ROOF_END_TOLERANCE:
+                    notes.append({"severity": "warning", "code": "roof_floating", "message": f"The roof corner stands {delta * 1000:.0f} mm above where it should bear ({gap * 1000:.0f} mm above the wall top, target {heel * 1000:.0f}): seat the roof or accept the gap"})
+                elif delta < -ROOF_END_TOLERANCE:
+                    notes.append({"severity": "warning", "code": "roof_embedded", "message": f"The roof corner is {-delta * 1000:.0f} mm lower than its target ({gap * 1000:.0f} mm from the wall top, target {heel * 1000:.0f}): it overlaps the wall"})
+                elif heel > ROOF_END_TOLERANCE:
+                    notes.append({"severity": "info", "code": "raised_heel", "message": f"Raised heel: the roof corner stands {gap * 1000:.0f} mm above the wall top; it needs a designed bearing and tie-down"})
+                elif heel < -ROOF_END_TOLERANCE:
+                    notes.append({"severity": "info", "code": "embedded", "message": f"Embedded end: the roof reaches {-gap * 1000:.0f} mm into the wall (an overlap of the two solids, not a notch cut in the wall)"})
+                else:
+                    notes.append({"severity": "info", "code": "bearing", "message": "The roof bears on the wall top"})
+                inside = min(max(u[0], tp[0]), wall["q_far"]) - max(min(u[0], tp[0]), wall["q_near"])
+                if cfg["cut"] == "horizontal" and abs(delta) <= ROOF_END_TOLERANCE:
+                    if abs(inside) <= ROOF_END_TOLERANCE:
+                        notes.append({"severity": "info", "code": "edge_contact", "message": "Edge contact: the horizontal cut meets the wall at its edge, without a horizontal bearing overlap"})
+                    elif inside < 0:
+                        notes.append({"severity": "warning", "code": "no_bearing", "message": "The horizontal bearing face does not touch the top of the wall"})
+                elif cfg["cut"] != "horizontal" and not wall["q_near"] - ROOF_END_TOLERANCE <= u[0] <= wall["q_far"] + ROOF_END_TOLERANCE and abs(delta) <= ROOF_END_TOLERANCE:
+                    notes.append({"severity": "warning", "code": "corner_off_wall", "message": "The roof's lower corner is not over the wall"})
+            if projection > ROOF_END_TOLERANCE:
+                notes.append({"severity": "info", "code": "projection", "message": f"The roof projects {projection * 1000:.0f} mm beyond the far face of the wall"})
+        out[edge] = item
+    return out
+
+
+def effective_boundary(project: Any, meta: Mapping[str, Any]) -> list[tuple[float, float]]:
+    """The outline with every eave that has an end connection moved to where its cut ends (the roof's outermost corner), which is where its fascia
+    and gutter hang."""
+    boundary = [tuple(map(float, q)) for q in m(meta, "boundary")]
+    if not m(meta, "roof_ends"):
+        return boundary
+    for edge, c in roof_end_cuts(project, meta).items():
+        sec = _edge_section(meta, edge)
+        shift = max(c["under"][0], c["top"][0])
+        for i in (edge, (edge + 1) % len(boundary)):
+            boundary[i] = (boundary[i][0] + sec["normal"][0] * shift, boundary[i][1] + sec["normal"][1] * shift)
+    return boundary
+
+
+def seat_roof(project: Any, oid: str, edge: int) -> float:
+    """Raise or lower a roof so the corner of one end connection bears as designed. The whole roof moves (one level offset), so its other ends move with it:
+    returns by how much (m, + up)."""
+    meta = meta_of(project, oid)
+    cut = roof_end_cuts(project, meta).get(edge)
+    if cut is None or cut["wall"] is None:
+        raise BadRequest("Seating needs an end connection on a wall that carries this eave")
+    move = -cut["seat_delta"]
+    _attach(project, oid, {"offset": float(m(meta, "offset", 0.0)) + move})
+    return move
+
+
+def set_roof_end(project: Any, oid: str, edge: Any, params: Mapping[str, Any], seat: bool = False) -> dict[str, Any]:
+    meta = meta_of(project, oid)
+    if m(meta, "category") != "roof" or m(meta, "roof") not in ("gable", "shed"):
+        raise BadRequest("End connections are defined for gable and shed roofs")
+    try:
+        edge = int(edge)
+    except (TypeError, ValueError):
+        raise BadRequest("edge must be the number of an eave edge") from None
+    if edge not in roof_eave_edges(meta):
+        raise BadRequest(f"Edge {edge} is not an eave of this roof (eaves: {', '.join(str(e) for e in roof_eave_edges(meta))})")
+    cfg = normalise_roof_end(params, roof_end_config(meta, edge))
+    ends = dict(m(meta, "roof_ends") or {})
+    ends[str(edge)] = cfg
+    _attach(project, oid, {"roof_ends": ends})
+    moved = 0.0
+    try:
+        roof_end_cuts(project, meta_of(project, oid))                                   # refuses a cut that leaves nothing of the slope, before anything is built
+        if seat:
+            moved = seat_roof(project, oid, edge)
+        regenerate_roof(project, oid)
+    except BadRequest:
+        raise
+    from . import gutters as GU
+    GU.follow(project, oid)
+    return {"id": oid, "edge": edge, "end": cfg, "roof_moved": moved}
+
+
+def clear_roof_end(project: Any, oid: str, edge: Any) -> None:
+    meta = meta_of(project, oid)
+    ends = dict(m(meta, "roof_ends") or {})
+    if str(edge) not in ends:
+        raise BadRequest("That eave has no end connection")
+    del ends[str(edge)]
+    _attach(project, oid, {"roof_ends": ends or None})
+    regenerate_roof(project, oid)
+    from . import gutters as GU
+    GU.follow(project, oid)
+
+
+def preview_roof_end(project: Any, params: Mapping[str, Any]) -> dict[str, Any]:
+    """What a connection would make, for one eave, without making it: the cross-section to draw, the numbers and the findings. Read-only."""
+    oid = text(params.get("id"), "id", 80)
+    if not alive(project, oid) or m(meta_of(project, oid), "category") != "roof":
+        raise NotFound(f"Roof {oid} does not exist")
+    meta = meta_of(project, oid)
+    if m(meta, "roof") not in ("gable", "shed"):
+        raise BadRequest("End connections are defined for gable and shed roofs")
+    edge = int(params.get("edge", -1))
+    if edge not in roof_eave_edges(meta):
+        raise BadRequest(f"Edge {edge} is not an eave of this roof")
+    cfg = normalise_roof_end(params, roof_end_config(meta, edge))
+    cut = roof_end_cuts(project, meta, {edge: cfg})[edge]
+    t, tan, wall = cut["thickness"], cut["tan"], cut["wall"]
+    ref_z = wall["top"] if wall else cut["base"]
+    z = lambda value: round(value + cut["base"] - ref_z, 6)                          # noqa: E731  heights relative to the wall top (or the roof's top at the outline)
+    q0 = min(cut["under"][0], cut["top"][0], cut["wall_q"]["near"]) - 0.7
+    slab = [[round(q0, 6), z(-t - q0 * tan)], [round(cut["under"][0], 6), z(cut["under"][1])], [round(cut["top"][0], 6), z(cut["top"][1])], [round(q0, 6), z(-q0 * tan)]]
+    return {"id": oid, "edge": edge, "end": cfg, "slab": slab, "reference": "wall top" if wall else "roof top at the outline",
+            "wall": ({"id": wall["id"], "name": project.model.get(wall["id"])["name"], "near": round(wall["q_near"], 6), "far": round(wall["q_far"], 6),
+                      "centre": round(wall["q_centre"], 6), "top": 0.0, "base": -1.0} if wall else None),
+            "anchor": [round(cut["anchor"][0], 6), z(cut["anchor"][1])], "q_ref": round(cut["q_ref"], 6),
+            "gap_mm": round(cut["gap"] * 1000, 3) if "gap" in cut else None, "seat_mm": round(-cut["seat_delta"] * 1000, 3) if "seat_delta" in cut else None,
+            "projection_mm": round(cut.get("projection", 0.0) * 1000, 3), "notes": cut["notes"],
+            "perpendicular_thickness_mm": round(t * math.cos(math.atan(tan)) * 1000, 3)}
+
+
+def roof_end_issues(project: Any, oid: str, meta: Mapping[str, Any], label: str) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    stored = m(meta, "roof_ends") or {}
+    if stored and m(meta, "roof") not in ("gable", "shed"):
+        return [issue("warning", oid, f"{label} keeps end connections that only apply to gable and shed roofs: they are ignored", "connection")]
+    for key in stored:
+        if m(meta, "roof") in ("gable", "shed") and int(key) not in roof_eave_edges(meta):
+            out.append(issue("warning", oid, f"{label}: the end connection set for edge {int(key) + 1} no longer applies (it is not an eave any more)", "connection"))
+    try:
+        cuts = roof_end_cuts(project, meta)
+    except BadRequest as exc:
+        return [issue("error", oid, f"{label}: {exc}", "geometry")]
+    for edge, c in cuts.items():
+        for note in c["notes"]:
+            out.append(issue(note["severity"], oid, f"{label}, eave {edge + 1} ({c['cfg']['type']}): {note['message']}", "connection"))
+    return out
+
+
+def _refresh_roof_ends(project: Any) -> None:
+    """A wall that carries a roof end has moved or changed: rebuild the roofs that have end connections."""
+    for rid in all_ids(project.model, metadata={f"{NS}:category": "roof"}):
+        if m(meta_of(project, rid), "roof_ends"):
+            regenerate_roof(project, rid)
+            from . import gutters as GU
+            GU.follow(project, rid)
+
+
+# ------------------------------------------------------------------------------------------------------------- roof windows
+# A roof window (dakraam) sits in the plane of a gable or shed roof, at a place measured from the eave (x along the eave from its start corner, d up the slope
+# to its centre), so it follows the roof when the roof's pitch, ridge, thickness, level or end connections change. Its opening goes straight through every layer
+# of the roof (plumb reveals). The slab is rebuilt in pieces around the opening, so the hole is real geometry in the roof element, and the section, the
+# elevations and the 3D view all show it without a separate drawing.
+ROOF_WINDOW_CLEARANCE = 0.002          # m: the opening is this much larger than the frame all round
+ROOF_WINDOW_MARGIN = 0.02              # m: least distance of an opening from the ridge, the end of the slope and the verges
+
+
+def roof_windows(project: Any, roof_id: str) -> list[str]:
+    return [oid for oid in project.model.query_ids(metadata={f"{NS}:host": roof_id}, limit=10_000) if m(meta_of(project, oid), "category") == "roof_window"]
+
+
+def roof_window_frame(project: Any, roof: Mapping[str, Any], wm: Mapping[str, Any], cuts: Mapping[int, Mapping[str, Any]] | None = None) -> dict[str, Any]:
+    """Where a roof window is, in the roof's own section coordinates (s across the roof, t along it, z above the roof's top surface at the outline), the opening
+    it needs in the slab and the axes of its frame. Raises, with the reason, when it does not fit on its slope."""
+    if m(roof, "roof") not in ("gable", "shed"):
+        raise BadRequest("Roof windows are defined for gable and shed roofs")
+    edge = int(m(wm, "edge"))
+    if edge not in roof_eave_edges(roof):
+        raise BadRequest(f"Edge {edge + 1} is not an eave of this roof, so a roof window cannot be on it")
+    sec = _edge_section(roof, edge)
+    sigma, tan, half, length = sec["sigma"], sec["tan"], sec["width"] / 2, sec["length"]
+    alpha = math.atan(tan)
+    ca, sa = math.cos(alpha), math.sin(alpha)
+    width, height, depth = float(m(wm, "width")), float(m(wm, "height")), float(m(wm, "depth", 0.12))
+    d, x = float(m(wm, "d")), float(m(wm, "x"))
+    q_c = -d * ca
+    reach = (height * ca + depth * sa) / 2 + ROOF_WINDOW_CLEARANCE                          # half the opening in plan, across the slope
+    q_lo, q_hi = q_c - reach, q_c + reach
+    ridge = float(m(roof, "ridge_offset", 0.0)) if m(roof, "roof") == "gable" else -sigma * half
+    q_end = min((min(c["under"][0], c["top"][0]) for e, c in (cuts or {}).items() if c["sigma"] == sigma), default=0.0)
+    if q_hi > q_end - ROOF_WINDOW_MARGIN:
+        raise BadRequest("The roof window would reach the end of its slope: move it up the slope or make it shorter")
+    if q_lo < -(half - sigma * ridge) + ROOF_WINDOW_MARGIN:
+        raise BadRequest("The roof window would reach the ridge: move it down the slope or make it shorter")
+    a, b = sec["a"], sec["b"]
+    edge_dir = G.unit(G.sub(b, a))
+    centre_xy = (a[0] + edge_dir[0] * x, a[1] + edge_dir[1] * x)
+    t_c = G.dot(G.sub(centre_xy, sec["centre"]), sec["along"])
+    t0, t1 = t_c - width / 2 - ROOF_WINDOW_CLEARANCE, t_c + width / 2 + ROOF_WINDOW_CLEARANCE
+    if t0 < -length / 2 + ROOF_WINDOW_MARGIN or t1 > length / 2 - ROOF_WINDOW_MARGIN:
+        raise BadRequest("The roof window would reach the end of the roof (the verge): move it along the eave")
+    s_a, s_b = sorted((sigma * (half + q_lo), sigma * (half + q_hi)))
+    s_c = sigma * (half + q_c)
+    kerb = float(m(wm, "kerb", 0.0))
+    return {"sigma": sigma, "s0": s_a, "s1": s_b, "t0": t0, "t1": t1, "s_c": s_c, "t_c": t_c, "z_c": d * sa, "q_c": q_c, "alpha": alpha, "sec": sec,
+            "up": (-sigma * ca, sa), "normal": (sigma * sa, ca), "kerb": kerb, "width": width, "height": height, "depth": depth,
+            "plan": [(sec["centre"][0] + sec["across"][0] * s + sec["along"][0] * t, sec["centre"][1] + sec["across"][1] * s + sec["along"][1] * t)
+                     for s, t in ((s_a, t0), (s_b, t0), (s_b, t1), (s_a, t1))]}
+
+
+def roof_window_holes(project: Any, roof_id: str, roof: Mapping[str, Any], cuts: Mapping[int, Mapping[str, Any]] | None) -> list[dict[str, Any]]:
+    """The openings of every roof window on a roof, checked not to overlap one another."""
+    holes = [roof_window_frame(project, roof, meta_of(project, wid), cuts) | {"id": wid} for wid in roof_windows(project, roof_id)]
+    for i, p in enumerate(holes):
+        for q in holes[i + 1:]:
+            if p["s0"] < q["s1"] + ROOF_WINDOW_MARGIN and q["s0"] < p["s1"] + ROOF_WINDOW_MARGIN and p["t0"] < q["t1"] + ROOF_WINDOW_MARGIN and q["t0"] < p["t1"] + ROOF_WINDOW_MARGIN:
+                raise BadRequest(f"Two roof windows ({project.model.get(p['id'])['name']} and {project.model.get(q['id'])['name']}) would overlap or touch")
+    return holes
+
+
+def _clip_s(poly: list[tuple[float, float]], lo: float, hi: float) -> list[tuple[float, float]]:
+    """A polygon in (s, z) limited to lo <= s <= hi (Sutherland-Hodgman; the roof's section is one band in s, so one piece comes back)."""
+    def against(points: list[tuple[float, float]], inside: Any, cross: float) -> list[tuple[float, float]]:
+        out: list[tuple[float, float]] = []
+        for i, p in enumerate(points):
+            q = points[(i + 1) % len(points)]
+            if inside(p):
+                out.append(p)
+            if inside(p) != inside(q):
+                k = (cross - p[0]) / (q[0] - p[0])
+                out.append((cross, p[1] + k * (q[1] - p[1])))
+        return out
+    if lo > -math.inf:
+        poly = against(poly, lambda p: p[0] >= lo - 1e-12, lo)
+    if hi < math.inf and poly:
+        poly = against(poly, lambda p: p[0] <= hi + 1e-12, hi)
+    return poly
+
+
+def _slab_with_holes(profile: list[tuple[float, float]], length: float, holes: list[dict[str, Any]]) -> G.Mesh:
+    """The roof section ``profile`` (s, z) swept along t over ``length``, with a plumb opening through it for every hole (s0, s1, t0, t1): the slab is made in
+    pieces, each a closed prism, so that no boolean operation is needed and the reveals are exact."""
+    stops = sorted({-length / 2, length / 2, *(h["t0"] for h in holes), *(h["t1"] for h in holes)})
+    verts: list[list[float]] = []
+    faces: list[list[int]] = []
+    for ta, tb in zip(stops, stops[1:]):
+        if tb - ta < 1e-9:
+            continue
+        gone = sorted((h["s0"], h["s1"]) for h in holes if h["t0"] <= ta + 1e-9 and h["t1"] >= tb - 1e-9)
+        kept, cursor = [], -math.inf
+        for s0, s1 in gone:
+            kept.append((cursor, s0))
+            cursor = s1
+        kept.append((cursor, math.inf))
+        for lo, hi in kept:
+            piece = _clip_s(profile, lo, hi)
+            if len(piece) >= 3 and abs(G.signed_area(piece)) > 1e-10:
+                v, f_ = G.prism(piece, ta, tb)
+                faces += [[a + len(verts), b + len(verts), c + len(verts)] for a, b, c in f_]
+                verts += [list(p) for p in v]
+    return verts, faces
+
+
+def regenerate_roof_window(project: Any, oid: str) -> None:
+    """The window's own solid (a frame and a pane in the plane of the roof), placed from the roof it is in."""
+    meta = meta_of(project, oid)
+    roof_id = str(m(meta, "host", ""))
+    if not alive(project, roof_id) or category(project, roof_id) != "roof":
+        raise BadRequest("The roof window has lost its roof")
+    roof = meta_of(project, roof_id)
+    fr = roof_window_frame(project, roof, meta, roof_end_cuts(project, roof))
+    base = level_elevation(project, m(roof, "level")) + float(m(roof, "offset", 0.0))
+    sec = fr["sec"]
+    w, h, depth, fw = fr["width"], fr["height"], fr["depth"], min(float(m(meta, "frame_width", 0.07)), fr["width"] / 3, fr["height"] / 3)
+    pane = 0.024
+    parts = [_box(-w / 2, -w / 2 + fw, -h / 2, h / 2, -depth, 0.0), _box(w / 2 - fw, w / 2, -h / 2, h / 2, -depth, 0.0),
+             _box(-w / 2 + fw, w / 2 - fw, -h / 2, -h / 2 + fw, -depth, 0.0), _box(-w / 2 + fw, w / 2 - fw, h / 2 - fw, h / 2, -depth, 0.0),
+             _box(-w / 2 + fw, w / 2 - fw, -h / 2 + fw, h / 2 - fw, -depth / 2 - pane / 2, -depth / 2 + pane / 2)]
+    s_c, z_c = fr["s_c"] + fr["normal"][0] * fr["kerb"], fr["z_c"] + fr["normal"][1] * fr["kerb"]
+    verts: list[list[float]] = []
+    faces: list[list[int]] = []
+    for v, f_ in parts:
+        faces += [[a + len(verts), b + len(verts), c + len(verts)] for a, b, c in f_]
+        for x, y, z in v:                                                   # x along the eave, y up the slope, z out of the roof
+            s = s_c + fr["up"][0] * y + fr["normal"][0] * z
+            t = fr["t_c"] + x
+            verts.append([sec["centre"][0] + sec["across"][0] * s + sec["along"][0] * t, sec["centre"][1] + sec["across"][1] * s + sec["along"][1] * t,
+                          base + z_c + fr["up"][1] * y + fr["normal"][1] * z])
+    _set_mesh(project, oid, _positive_volume((verts, faces)))
+    _attach(project, oid, {"level": m(roof, "level"), "plan": [list(p) for p in fr["plan"]]})
+
+
+def add_roof_window(project: Any, p: Mapping[str, Any]) -> str:
+    roof_id = text(p.get("roof"), "roof", 80)
+    if not alive(project, roof_id) or category(project, roof_id) != "roof":
+        raise BadRequest("Select a roof to put the window in")
+    roof = meta_of(project, roof_id)
+    if m(roof, "roof") not in ("gable", "shed"):
+        raise BadRequest("Roof windows are defined for gable and shed roofs")
+    eaves = roof_eave_edges(roof)
+    edge = int(p.get("edge", eaves[0]))
+    if edge not in eaves:
+        raise BadRequest(f"Edge {edge} is not an eave of this roof (eaves: {', '.join(str(e) for e in eaves)})")
+    sec = _edge_section(roof, edge)
+    slope = (sec["width"] / 2 - sec["sigma"] * (float(m(roof, "ridge_offset", 0.0)) if m(roof, "roof") == "gable" else -sec["sigma"] * sec["width"] / 2)) / math.cos(math.atan(sec["tan"]))
+    height = number(p.get("height", 980), "height", 100, 5000) / 1000.0
+    values = {"category": "roof_window", "type": "Roof Window", "host": roof_id, "edge": edge, "level": m(roof, "level"),
+              "width": number(p.get("width", 780), "width", 100, 5000) / 1000.0, "height": height,
+              "x": (number(p["x"], "x", 0, 1e6) / 1000.0) if p.get("x") is not None else math.dist(sec["a"], sec["b"]) / 2,
+              "d": (number(p["d"], "d", 0, 1e6) / 1000.0) if p.get("d") is not None else slope / 2,
+              "kerb": number(p.get("kerb", 0), "kerb", -500, 1000) / 1000.0, "depth": number(p.get("depth", 120), "depth", 20, 600) / 1000.0,
+              "frame_width": number(p.get("frame_width", 70), "frame width", 10, 500) / 1000.0, "material": "Glass"}
+    oid = project.model.add_box(width=1.0, depth=1.0, height=1.0, name=text(p.get("name") or "Roof Window", "name", 80))
+    _attach(project, oid, values)
+    if p.get("x") is not None:
+        regenerate_roof(project, roof_id)                                          # refuses (and the command rolls back) when it does not fit
+        return oid
+    mid, step, error = float(values["x"]), values["width"] + 0.3, None
+    for k in range(0, 9):                                                          # no place asked for: the middle of the eave, else the nearest free place beside it
+        for sign in ((1,) if k == 0 else (1, -1)):
+            _attach(project, oid, {"x": mid + sign * k * step})
+            try:
+                regenerate_roof(project, roof_id)
+                return oid
+            except BadRequest as exc:
+                error = exc
+    raise error if error else BadRequest("The roof window does not fit")
+
+
+def _roof_mesh(meta: Mapping[str, Any], base: float, thickness: float, cuts: Mapping[int, Mapping[str, Any]] | None = None, offset: float = 0.0,
+               holes: list[dict[str, Any]] | None = None) -> G.Mesh:
+    """One slab of a roof: its top surface where the roof's top is when its eaves are at ``base``, ``thickness`` thick straight down. ``cuts`` (see
+    ``roof_end_cuts``) says where each eave is cut off; ``offset`` is how far below the whole roof's top surface this slab's own top lies (a layer)."""
     kind = m(meta, "roof")
     boundary = m(meta, "boundary")
     if kind == "flat":
         return G.prism([tuple(q) for q in boundary], base, base + thickness)
     centre, along, across, length, width = _rectangle(boundary)
     rise_angle = math.tan(math.radians(float(m(meta, "pitch"))))
+    by_side = {c["sigma"]: c for c in (cuts or {}).values()}
+
+    def end_pair(sigma: float) -> tuple[tuple[float, float], tuple[float, float]]:
+        """The underside and top corners of this slab at one eave: square to the outline's plane unless an end connection cuts it."""
+        c = by_side.get(sigma)
+        if c is None:
+            return (sigma * width / 2, -thickness), (sigma * width / 2, 0.0)
+        if c["cfg"]["layers"] == "own":
+            u, tp, _ = end_cut(c["cfg"]["cut"], ROOF_ANCHORS[c["cfg"]["anchor"]], c["q_ref"], rise_angle, 0.0, thickness)
+        else:
+            p0, dv = c["line"]
+            p0 = (p0[0], p0[1] + offset)                                              # the whole roof's section, seen from this layer
+            u, tp = _line_hit(p0, dv, -thickness, rise_angle), _line_hit(p0, dv, 0.0, rise_angle)
+        return (sigma * (width / 2 + u[0]), u[1]), (sigma * (width / 2 + tp[0]), tp[1])
+
     if kind == "hip":
         return _positive_volume(_hip_mesh(centre, along, across, length, width, rise_angle, thickness, base))
     if kind == "gable":
@@ -1097,11 +1919,13 @@ def _roof_mesh(meta: Mapping[str, Any], base: float, thickness: float) -> G.Mesh
         ridge = float(m(meta, "ridge_offset", 0.0))
         if abs(ridge) >= width / 2 - 0.05:
             raise BadRequest("The ridge must remain at least 50 mm inside both eaves")
-        profile = [(-width / 2, -thickness), (ridge, r - thickness), (width / 2, -thickness), (width / 2, 0.0), (ridge, r), (-width / 2, 0.0)]
+        (u_lo, t_lo), (u_hi, t_hi) = end_pair(-1.0), end_pair(1.0)
+        profile = [u_lo, (ridge, r - thickness), u_hi, t_hi, (ridge, r), t_lo]
     else:
         r = width * rise_angle
-        profile = [(-width / 2, -thickness), (width / 2, r - thickness), (width / 2, r), (-width / 2, 0.0)]
-    verts, faces = G.prism(profile, -length / 2, length / 2)                       # (s, z, t): across, up, along
+        (u_lo, t_lo) = end_pair(-1.0)
+        profile = [u_lo, (width / 2, r - thickness), (width / 2, r), t_lo]
+    verts, faces = _slab_with_holes(profile, length, holes or []) if holes else G.prism(profile, -length / 2, length / 2)      # (s, z, t): across, up, along
     mapped = [[centre[0] + across[0] * s + along[0] * t, centre[1] + across[1] * s + along[1] * t, base + z] for s, z, t in verts]
     return _positive_volume((mapped, faces))
 
@@ -1111,6 +1935,8 @@ def regenerate_roof(project: Any, oid: str) -> None:
     base = level_elevation(project, m(meta, "level")) + float(m(meta, "offset", 0.0))
     from . import layers as LY
     try:
+        cuts = roof_end_cuts(project, meta)
+        holes = roof_window_holes(project, oid, meta, cuts) if m(meta, "roof") in ("gable", "shed") else []
         if LY.is_layered(meta):                                                    # one slab per layer, each lowered by the layers above it
             verts: list[Any] = []
             faces: list[Any] = []
@@ -1120,7 +1946,7 @@ def regenerate_roof(project: Any, oid: str) -> None:
             for lay in layers:
                 # a flat roof stands on its level (its top rises as it thickens); a pitched one hangs from its eaves line (its underside drops)
                 at_base = base + whole - lay["offset"] - lay["thickness"] if m(meta, "roof") == "flat" else base - lay["offset"]
-                v, f = _roof_mesh(meta, at_base, lay["thickness"])
+                v, f = _roof_mesh(meta, at_base, lay["thickness"], cuts, 0.0 if m(meta, "roof") == "flat" else lay["offset"], holes)
                 at = len(verts)
                 verts += [list(p) for p in v]
                 faces += [[a + at, b + at, c + at] for a, b, c in f]
@@ -1128,8 +1954,10 @@ def regenerate_roof(project: Any, oid: str) -> None:
             LY.record(project, oid, counts)
             mesh: G.Mesh = _positive_volume((verts, faces))
         else:
-            mesh = _roof_mesh(meta, base, float(m(meta, "thickness")))
+            mesh = _roof_mesh(meta, base, float(m(meta, "thickness")), cuts, 0.0, holes)
         _set_mesh(project, oid, mesh)
+        for hole in holes:                                                         # each roof window follows the roof it is in
+            regenerate_roof_window(project, hole["id"])
         # Ridge members and edge trims are independently editable SGEO solids;
         # their placement is derived from the host roof every time it changes.
         for dependent in element_ids(project):
@@ -1251,7 +2079,7 @@ def _roof_edge_mesh(project: Any, roof: Mapping[str, Any], edge: int, width: flo
     end caps. Boundary corner mitres are computed from the neighbouring roof
     edges even when only one edge component has been installed.
     """
-    boundary = [tuple(map(float, p)) for p in m(roof, "boundary")]
+    boundary = effective_boundary(project, roof)                                      # an eave with an end connection is where it is cut, not where the outline was drawn
     a, b = boundary[edge], boundary[(edge + 1) % len(boundary)]
     dx, dy = b[0] - a[0], b[1] - a[1]
     length = math.hypot(dx, dy)
@@ -1500,6 +2328,10 @@ def regenerate(project: Any, oid: str) -> None:
         regenerate_roof(project, oid)
         from . import gutters as GU
         GU.follow(project, oid)                                                        # the gutters hang on the roof's eaves: they follow it
+    elif cat == "roof_window":
+        if not alive(project, str(m(meta, "host", ""))):
+            raise BadRequest("This roof window has lost its roof")
+        regenerate_roof(project, str(m(meta, "host")))                                 # the opening is in the roof: it is rebuilt with the window
     elif cat == "gutter":
         from . import gutters as GU
         GU.regenerate(project, oid)
@@ -1615,6 +2447,14 @@ def set_property(project: Any, oid: str, key: str, value: Any) -> None:
         else:
             palette[material] = chosen
         return
+    if key.startswith("end:") and cat == "roof":                                      # end:<eave edge>:<parameter> of a roof end connection
+        _, edge, field = key.split(":", 2)
+        if field == "type" and value == "default":
+            if str(edge) in (m(meta, "roof_ends") or {}):                              # already the default: nothing to clear
+                clear_roof_end(project, oid, edge)
+        else:
+            set_roof_end(project, oid, edge, {field: value})
+        return
     if key.startswith("custom:"):
         from . import relations as RL
         RL.set_custom(project, oid, key[7:], RL.parse_custom(value))
@@ -1651,6 +2491,12 @@ def set_property(project: Any, oid: str, key: str, value: Any) -> None:
             values["thickness"] = _mm(value, "thickness", 1, 5000)
         elif key == "base_offset":
             values["base_offset"] = _mm(value, "base_offset", -100000, 100000)
+        elif key in ("reference", "reference_offset"):
+            moved = set_wall_reference(project, oid, value if key == "reference" else None, value if key == "reference_offset" else None)
+            regenerate_wall(project, oid)
+            for wid in sorted(moved):
+                regenerate_wall(project, wid)
+            return
         elif key == "material":
             values["material"] = _choice(value, MATERIALS, "material")
         elif key == "level":
@@ -1671,6 +2517,16 @@ def set_property(project: Any, oid: str, key: str, value: Any) -> None:
             values["end"] = [s[0] + d * math.cos(a), s[1] + d * math.sin(a)]
         else:
             raise BadRequest(f"'{key}' is not an editable wall property")
+    elif cat == "roof_window":
+        numeric = {"width": ("width", 100, 5000), "height": ("height", 100, 5000), "x": ("x", 0, 1e6), "d": ("d", 0, 1e6), "kerb": ("kerb", -500, 1000),
+                   "depth": ("depth", 20, 600), "frame_width": ("frame_width", 10, 500)}
+        if key in numeric:
+            name, lo, hi = numeric[key]
+            values[name] = number(value, key, lo, hi) / 1000.0
+        elif key == "edge":
+            values["edge"] = int(number(value, "edge", 0, 1000))
+        else:
+            raise BadRequest(f"'{key}' is not an editable roof window property")
     elif cat in OPENINGS:
         if key.startswith("panel:"):
             _, pid, field = key.split(":", 2)
@@ -1685,10 +2541,32 @@ def set_property(project: Any, oid: str, key: str, value: Any) -> None:
                 values["panels"] = [{**q, "width": q["width"] * values["width"] / old} for q in door_panels(meta)]
         elif key == "height":
             values["height"] = _mm(value, "height", 100, 20000)
-        elif key == "sill" and cat == "window":
-            values["sill"] = _mm(value, "sill", 0, 20000)
+        elif key in ("sill", "elevation"):
+            host = wall_frame(project, str(m(meta, "host")))
+            sill = _mm(value, "sill", 0, 20000) if key == "sill" else _mm(value, "elevation", -20000, 20000) - float(m(host["meta"], "base_offset", 0.0))
+            if sill < -1e-9:
+                raise BadRequest("The opening would start below the base of its wall", hint="Raise it, or lower the wall's base offset")
+            if sill + float(m(meta, "height")) > host["height"] + 1e-9:
+                raise BadRequest(f"Its head would stand {(sill + float(m(meta, 'height')) - host['height']) * 1000:.0f} mm above the top of the wall",
+                                 hint="Lower it, make it shorter, or raise the wall")
+            values["sill"] = sill                                                  # the opening's own height and width are untouched
         elif key == "offset":
             values["offset"] = number(value, "offset", 0, 100000)
+        elif key == "depth_ref":
+            values["depth_ref"] = _choice(value, DEPTH_REFS, "depth reference")
+        elif key == "depth_offset":
+            values["depth_offset"] = _mm(value, "depth offset", -5000, 5000)
+        elif key == "door_type" and cat == "door":
+            if _choice(value, ("hinged", "sliding"), "door type") == "sliding":
+                make_sliding(project, oid)
+            else:
+                make_hinged(project, oid)
+            return
+        elif key in ("sliding_leaves", "sliding_direction", "sliding_mount", "sliding_face") and cat == "door":
+            cur = sliding_of(meta) or {"leaves": 1, "direction": "right", "mount": "surface", "face": 1}
+            cur[key.split("_", 1)[1]] = value
+            make_sliding(project, oid, cur.get("leaves", 1), cur.get("direction", "right") if cur.get("direction") != "custom" else "right", cur.get("mount", "surface"), cur.get("face", 1))
+            return
         elif key == "material":
             values["material"] = _choice(value, MATERIALS, "material")
         elif key == "host":
@@ -1864,9 +2742,18 @@ def move(project: Any, oid: str, dx: float, dy: float, dz: float) -> None:
         host = wall_frame(project, m(meta, "host"))
         along = dx * math.cos(host["angle"]) + dy * math.sin(host["angle"])
         values = {"offset": float(m(meta, "offset")) + along}
-        if cat == "window":
-            values["sill"] = max(0.0, float(m(meta, "sill", 0.0)) + dz)
+        values["sill"] = max(0.0, float(m(meta, "sill", 0.0)) + dz)
+        if abs(dz) > 1e-9 and values["sill"] + float(m(meta, "height")) > host["height"] + 1e-9:
+            raise BadRequest(f"Its head would stand {(values['sill'] + float(m(meta, 'height')) - host['height']) * 1000:.0f} mm above the top of the wall")
         _attach(project, oid, values)
+    elif cat == "roof_window":
+        if abs(dz) > 1e-9:
+            raise BadRequest("A roof window sits in the roof's surface: raise it with its kerb height, or move the roof")
+        roof = meta_of(project, str(m(meta, "host")))
+        sec = _edge_section(roof, int(m(meta, "edge")))
+        edge_dir = G.unit(G.sub(sec["b"], sec["a"]))
+        _attach(project, oid, {"x": float(m(meta, "x")) + dx * edge_dir[0] + dy * edge_dir[1],
+                               "d": float(m(meta, "d")) - (dx * sec["normal"][0] + dy * sec["normal"][1]) / math.cos(math.atan(sec["tan"]))})
     elif cat in ("floor", "roof"):
         _attach(project, oid, {"boundary": [[q[0] + dx, q[1] + dy] for q in m(meta, "boundary")], "offset": float(m(meta, "offset", 0.0)) + dz})
     elif cat == "room":
@@ -1958,6 +2845,8 @@ def rotate(project: Any, oid: str, angle: float, centre: tuple[float, float], re
         raise BadRequest("This accessory's orientation follows its roof boundary: rotate the roof or edit its offsets")
     if cat in OPENINGS:
         raise BadRequest(f"A {cat} turns with its wall: select the wall to rotate it")
+    if cat == "roof_window":
+        raise BadRequest("A roof window turns with its roof: select the roof to rotate it")
     if cat in ("gutter", "downpipe"):
         raise BadRequest(f"A {cat} turns with its roof: select the roof to rotate it")
     if cat == "array":
@@ -2025,6 +2914,14 @@ def remove(project: Any, oid: str) -> None:
                 if oid in [side.split(":", 1)[0] for side in str(key).split("|")]:
                     del corners[key]
         _refresh_walls(project, affected - {oid})                                   # the walls it joined are square-ended again
+        _refresh_roof_ends(project)
+    elif cat == "roof_window":
+        host = str(m(meta, "host", ""))
+        project.model.remove(oid)
+        if alive(project, host):
+            regenerate_roof(project, host)                                              # the opening closes
+            from . import gutters as GU
+            GU.follow(project, host)
     elif cat in OPENINGS:
         host = m(meta, "host")
         profile = opening_profile(project, oid)
@@ -2047,7 +2944,7 @@ def remove(project: Any, oid: str) -> None:
             project.model.remove(did)
         if cat == "roof":
             for did in element_ids(project):
-                if m(meta_of(project, did), "roof_host") == oid:
+                if m(meta_of(project, did), "roof_host") == oid or (m(meta_of(project, did), "category") == "roof_window" and m(meta_of(project, did), "host") == oid):
                     project.model.remove(did)
         project.model.remove(oid)
         if m(meta, "accessory_kind") == "roof_edge" and alive(project, m(meta, "roof_host")):
@@ -2168,6 +3065,9 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
                 continue
             walls[oid] = fr
             axis = {"a": [fr["start"][0] * f, fr["start"][1] * f], "b": [fr["end"][0] * f, fr["end"][1] * f], "thickness": fr["thickness"] * f}
+            ref_a, ref_b = wall_reference_line(meta)
+            reference = {"a": [ref_a[0] * f, ref_a[1] * f], "b": [ref_b[0] * f, ref_b[1] * f], "kind": str(m(meta, "reference", "centre")),
+                         "offset": float(m(meta, "reference_offset", 0.0)) * 1000}
             local_height = wall_cuts[oid]
             cuts = sorted(opening_span(project.model.get(h)["metadata"])[:2] for h in hosted(project, oid)
                           if opening_span(project.model.get(h)["metadata"])[2] <= local_height < opening_span(project.model.get(h)["metadata"])[3])
@@ -2181,7 +3081,7 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
             for x0, x1 in cuts + [(fr["length"], fr["length"])]:
                 if x0 - cursor > 1e-9:
                     piece = {"id": oid, "category": "wall", "name": obj["name"], "polygon": _wall_piece(fr, cursor, x0, f), "axis": axis,
-                             "joins": list(m(meta, "joins") or ())}
+                             "reference": reference, "joins": list(m(meta, "joins") or ())}
                     if corner_joins:
                         piece["corner_joins"] = corner_joins
                     if show_hatching and not layered:
@@ -2231,6 +3131,11 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
                 from . import documentation as DOC
                 item["hatch"] = DOC.hatch_pattern(project, m(meta, "material"))
             out.append(item)
+        elif cat == "roof_window":
+            outline = [[q[0] * f, q[1] * f] for q in (m(meta, "plan") or ())]
+            if len(outline) == 4:
+                out.append({"id": oid, "category": "roof_window", "name": obj["name"], "polygon": outline, "outline": outline,
+                            **({"cut_polygons": cut_polygons} if cut_polygons else {})})
         elif cat in FORMS:
             from . import forms as FX
             item = FX.plan_item(project, oid, f)
@@ -2298,7 +3203,7 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
         cut = sill <= wall_cuts[m(meta, "host")] < head
         item: dict[str, Any] = {"id": oid, "category": cat, "name": obj["name"], "polygon": _rect(fr["start"], fr["angle"], x0, x1, fr["thickness"] / 2, f),
                                 "cut": cut, "overhead": not cut and fr["base"] + sill >= cut_z}
-        item["symbol"] = _symbol(cat, meta, fr, x0, x1, f, show_opening=show_opening and cut)
+        item["symbol"] = _symbol(cat, meta, fr, x0, x1, f, show_opening=show_opening and cut, yd=opening_depth_y(project, oid, meta, fr["thickness"]), shapes=cut)
         out.append(item)
     return out
 
@@ -2317,11 +3222,13 @@ def opens(meta: Mapping[str, Any]) -> bool:
     return cat == "window" and m(meta, "operation", "fixed") == "casement"
 
 
-def _leaf_symbol(cat: str, fr: Mapping[str, Any], f: float, x0: float, x1: float, swing: int, hinge_side: str) -> dict[str, Any]:
-    """One leaf's swing in plan: the hinge, the open leaf's end, and the arc between the open and the closed leaf (angles counter-clockwise)."""
+def _leaf_symbol(cat: str, fr: Mapping[str, Any], f: float, x0: float, x1: float, swing: int, hinge_side: str, yd: float = 0.0) -> dict[str, Any]:
+    """One leaf's swing in plan: the hinge, the open leaf's end, and the arc between the open and the closed leaf (angles counter-clockwise). ``poly`` is the
+    open leaf itself, as the thin rectangle it is (the leaf's thickness is drawn, not just its centre line). A leaf moved across the wall by ``yd`` swings about
+    that same offset."""
     c, s = math.cos(fr["angle"]), math.sin(fr["angle"])
     at = lambda x, y: ((fr["start"][0] + c * x - s * y) * f, (fr["start"][1] + s * x + c * y) * f)       # noqa: E731
-    face = swing * fr["thickness"] / 2 if cat == "door" else 0.0                                         # a sash hangs on the wall's centre line
+    face = (swing * fr["thickness"] / 2 if cat == "door" else 0.0) + yd                                  # a sash hangs on the wall's centre line
     hinge_x, free_x = (x0, x1) if hinge_side == "start" else (x1, x0)
     hinge, jamb = at(hinge_x, face), at(free_x, face)
     leaf_end = at(hinge_x, face + swing * (x1 - x0))
@@ -2331,26 +3238,70 @@ def _leaf_symbol(cat: str, fr: Mapping[str, Any], f: float, x0: float, x1: float
     start, end = (a_leaf, a_jamb) if G.cross((math.cos(a_leaf), math.sin(a_leaf)), (math.cos(a_jamb), math.sin(a_jamb))) > 0 else (a_jamb, a_leaf)
     while end <= start:
         end += 2 * math.pi
-    return {"hinge": list(hinge), "leaf_end": list(leaf_end), "radius": radius, "start_angle": start, "end_angle": end}
+    inward = 1.0 if hinge_side == "start" else -1.0
+    th = DOOR_LEAF if cat == "door" else GLASS
+    poly = [list(hinge), list(leaf_end), list(at(hinge_x + inward * th, face + swing * (x1 - x0))), list(at(hinge_x + inward * th, face))]
+    return {"hinge": list(hinge), "leaf_end": list(leaf_end), "radius": radius, "start_angle": start, "end_angle": end, "poly": poly}
 
 
-def _symbol(cat: str, meta: Mapping[str, Any], fr: Mapping[str, Any], x0: float, x1: float, f: float, *, show_opening: bool = True) -> dict[str, Any]:
+def _slide_shapes(meta: Mapping[str, Any], fr: Mapping[str, Any], f: float, yd: float) -> list[dict[str, Any]]:
+    """The plan notation of a door's leaves: each leaf as the thin rectangle it is in its closed position; a sliding leaf also dashed where it stands when
+    the door is open, its track (dash-dot, a dashed cavity for a pocket door) and an arrow that points the way it slides.
+
+    This is the common drawing practice for sliding doors (ISO 7519 shows sliding doors with and without a recess among its large-scale examples and
+    leaves the artwork to the draughtsperson); it is not claimed as a symbol that any standard prescribes."""
+    c, s = math.cos(fr["angle"]), math.sin(fr["angle"])
+    at = lambda x, y: [(fr["start"][0] + c * x - s * y) * f, (fr["start"][1] + s * x + c * y) * f]      # noqa: E731
+    th, t = DOOR_LEAF, fr["thickness"]
+    rect = lambda a, b, y: [at(a, y - th / 2), at(b, y - th / 2), at(b, y + th / 2), at(a, y + th / 2)]   # noqa: E731
+    out: list[dict[str, Any]] = []
+    sl = sliding_of(meta)
+    for q, px0, px1 in panel_spans(meta):
+        sliding = q["operation"] == "slide"
+        y = _slide_y(meta, q, t, th) if sliding else yd
+        out.append({"t": "poly", "p": rect(px0, px1, y), "dash": False, "role": "leaf"})
+        if not sliding:
+            continue
+        sign = 1 if q["slide"] == "end" else -1
+        o0, o1 = px0 + sign * q["width"], px1 + sign * q["width"]
+        out.append({"t": "poly", "p": rect(o0, o1, y), "dash": True, "role": "open"})
+        if sl.get("mount", "surface") == "pocket":                                                     # the cavity the leaf runs into
+            half = (int(sl.get("layers", 1)) * (th + SLIDE_GAP) + SLIDE_GAP) / 2
+            mid = depth_shift(meta, t, th)
+            lo, hi = min(px0, o0), max(px1, o1)
+            out.append({"t": "poly", "p": [at(min(o0, o1), mid - half), at(max(o0, o1), mid - half), at(max(o0, o1), mid + half), at(min(o0, o1), mid + half)], "dash": True, "role": "pocket"})
+            ya = int(q.get("swing", 1)) * (t / 2 + 0.12)
+        else:
+            lo, hi = min(px0, o0), max(px1, o1)
+            out.append({"t": "line", "p": [at(lo, y), at(hi, y)], "dash": True, "role": "track"})
+            ya = y + int(q.get("swing", 1)) * (th / 2 + 0.10)
+        cx = (px0 + px1) / 2
+        out.append({"t": "arrow", "p": [at(cx, ya), at(cx + sign * min(0.6 * q["width"], 0.5), ya)], "dash": False, "role": "direction"})
+    return out
+
+
+def _symbol(cat: str, meta: Mapping[str, Any], fr: Mapping[str, Any], x0: float, x1: float, f: float, *, show_opening: bool = True, yd: float = 0.0,
+            shapes: bool = True) -> dict[str, Any]:
     """The plan symbol of a door or window. The swing arc and open leaf are the opening direction: ``show_opening=False`` leaves them out.
-    A door of several panels draws each swinging panel's own leaf: the first in the symbol itself, the others in ``more``."""
+    A door of several panels draws each swinging panel's own leaf: the first in the symbol itself, the others in ``more``. ``shapes`` lists the door's
+    leaves drawn as what they are (closed leaf rectangles, an open sliding leaf dashed, a track and an arrow): they come from the door object itself,
+    one drawing for every view that shows it; ``yd`` is where the leaf stands across the wall."""
     c, s = math.cos(fr["angle"]), math.sin(fr["angle"])
     at = lambda x, y: ((fr["start"][0] + c * x - s * y) * f, (fr["start"][1] + s * x + c * y) * f)       # noqa: E731
     out: dict[str, Any] = {"kind": cat}
     if cat == "window":
-        out.update({"a": list(at(x0, 0.0)), "b": list(at(x1, 0.0))})
+        out.update({"a": list(at(x0, yd)), "b": list(at(x1, yd))})
+    if cat == "door" and shapes:
+        out["shapes"] = _slide_shapes(meta, fr, f, yd)
     if not show_opening or not opens(meta):
         return out
     if cat == "door" and has_panels(meta):
-        leaves = [_leaf_symbol(cat, fr, f, px0, px1, q["swing"], q["hinge"]) for q, px0, px1 in panel_spans(meta) if q["operation"] == "swing"]
+        leaves = [_leaf_symbol(cat, fr, f, px0, px1, q["swing"], q["hinge"], yd) for q, px0, px1 in panel_spans(meta) if q["operation"] == "swing"]
         out.update(leaves[0])
         if len(leaves) > 1:
             out["more"] = leaves[1:]
         return out
-    out.update(_leaf_symbol(cat, fr, f, x0, x1, int(m(meta, "swing", 1)), str(m(meta, "hinge", "start"))))
+    out.update(_leaf_symbol(cat, fr, f, x0, x1, int(m(meta, "swing", 1)), str(m(meta, "hinge", "start")), yd))
     return out
 
 
@@ -2391,6 +3342,34 @@ def elevation_symbol(project: Any, oid: str, look: tuple[float, float]) -> dict[
 # -------------------------------------------------------------------------------------------------------------------- properties
 def _levels(project: Any) -> list[dict[str, str]]:
     return [{"value": l["id"], "label": l["name"]} for l in project.manifest["levels"]]
+
+
+def _roof_end_group(project: Any, oid: str, meta: Mapping[str, Any]) -> dict[str, Any]:
+    """Properties of a roof's eaves: the end connection of each (or "Default": cut plumb on the outline), with its parameters and what it found."""
+    rows: list[dict[str, Any]] = []
+    try:
+        cuts = roof_end_cuts(project, meta)
+    except BadRequest:
+        cuts = {}
+    type_choices = [{"value": "default", "label": "Default (plumb on the outline)"}] + [{"value": k, "label": f"{k} {v[0]}"} for k, v in ROOF_END_TYPES.items()] + [{"value": "custom", "label": "Custom"}]
+    for edge in roof_eave_edges(meta):
+        cfg, n = roof_end_config(meta, edge), f"Eave {edge + 1}"
+        rows.append({"key": f"end:{edge}:type", "label": f"{n}: connection", "type": "choice", "value": cfg["type"] if cfg else "default", "choices": type_choices})
+        if cfg is None:
+            continue
+        key = lambda field: f"end:{edge}:{field}"                                     # noqa: E731
+        rows += [{"key": key("cut"), "label": f"{n}: cut", "type": "choice", "value": cfg["cut"], "choices": _choices(ROOF_CUTS)},
+                 {"key": key("ref"), "label": f"{n}: wall alignment", "type": "choice", "value": cfg["ref"], "choices": _choices(WALL_REFS)},
+                 {"key": key("anchor"), "label": f"{n}: cut point on the wall line", "type": "choice", "value": cfg["anchor"], "choices": _choices(tuple(ROOF_ANCHORS))},
+                 {"key": key("offset"), "label": f"{n}: cut position offset", "type": "number", "unit": "mm", "value": round(cfg["offset"] * 1000, 6)},
+                 {"key": key("heel"), "label": f"{n}: heel height above wall top", "type": "number", "unit": "mm", "value": round(cfg["heel"] * 1000, 6)},
+                 {"key": key("layers"), "label": f"{n}: layers", "type": "choice", "value": cfg["layers"], "choices": _choices(ROOF_END_LAYERS)}]
+        cut = cuts.get(edge)
+        if cut is not None:
+            rows.append({"label": f"{n}: carried by", "type": "readonly", "value": project.model.get(cut["wall"]["id"])["name"] if cut["wall"] else "no wall (roof outline)"})
+            for note in cut["notes"]:
+                rows.append({"label": f"{n}: {note['severity']}", "type": "readonly", "value": note["message"]})
+    return {"title": "End connections", "rows": rows, "action": {"label": "End connections…", "dialog": "roof_end"}}
 
 
 def _choices(values: tuple[str, ...]) -> list[dict[str, str]]:
@@ -2576,26 +3555,67 @@ def _properties(project: Any, oid: str) -> dict[str, Any]:
                 {"key": "angle", "label": "Angle", "type": "number", "unit": "°", "value": round(math.degrees(fr["angle"]), 6)},
                 {"label": "Area", "type": "readonly", "value": f"{(sum((b[0] - a[0]) * (a[1] + b[1]) / 2 for a, b in zip(fr['top'], fr['top'][1:])) if fr['top'] else fr['length'] * fr['height']) - open_area:.3f} m²"},
                 volume]},
+            {"title": "Placement", "rows": [
+                {"key": "reference", "label": "Reference line", "type": "choice", "value": str(m(meta, "reference", "centre")),
+                 "choices": [{"value": "near", "label": "Near face (right of the path)"}, {"value": "centre", "label": "Centre"}, {"value": "far", "label": "Far face (left of the path)"}]},
+                {"key": "reference_offset", "label": "Offset from reference", "type": "number", "unit": "mm", "value": round(float(m(meta, "reference_offset", 0.0)) * 1000, 6)},
+                {"label": "Path", "type": "readonly", "value": f"start → end, near face on the right, {fr['length']:.3f} m"}],
+             "action": {"label": "Flip wall (reverse path, keep position)", "command": "model.flip_wall", "params": {"id": oid}}},
             {"title": "Constraints", "rows": [
                 {"label": "Base Constraint", "type": "readonly", "value": project.level(m(meta, "level"))["name"]},
                 {"key": "base_offset", "label": "Base Offset", "type": "number", "unit": "mm", "value": float(m(meta, "base_offset", 0.0)) * 1000}]},
             {"title": "Identity", "rows": [name_row]}]
         return out
     out["top"] = [{"label": "Type", "type": "readonly", "value": m(meta, "type", cat.title())}]
+    if cat == "roof_window":
+        host = str(m(meta, "host", ""))
+        roof_name = project.model.get(host)["name"] if alive(project, host) else "(missing)"
+        mm = lambda key: round(float(m(meta, key)) * 1000, 6)                         # noqa: E731
+        out["top"] += [{"key": "width", "label": "Width", "type": "number", "unit": "mm", "value": mm("width")},
+                       {"key": "height", "label": "Height (along the slope)", "type": "number", "unit": "mm", "value": mm("height")}]
+        out["groups"] = [
+            {"title": "Position on the roof", "rows": [
+                {"label": "Roof", "type": "readonly", "value": roof_name},
+                {"key": "edge", "label": "Eave (edge number, from 0)", "type": "number", "value": int(m(meta, "edge"))},
+                {"key": "x", "label": "Along the eave, from its start corner", "type": "number", "unit": "mm", "value": mm("x")},
+                {"key": "d", "label": "Up the slope from the eave, to its centre", "type": "number", "unit": "mm", "value": mm("d")},
+                {"key": "kerb", "label": "Raised above the roof surface", "type": "number", "unit": "mm", "value": mm("kerb")}]},
+            {"title": "Frame", "rows": [
+                {"key": "depth", "label": "Frame depth", "type": "number", "unit": "mm", "value": mm("depth")},
+                {"key": "frame_width", "label": "Frame width", "type": "number", "unit": "mm", "value": mm("frame_width")}]},
+            {"title": "Identity", "rows": [name_row]}]
+        return out
     if cat in OPENINGS:
         host = project.model.get(m(meta, "host"))["name"] if alive(project, m(meta, "host", "")) else "(missing)"
         w, h = float(m(meta, "width")), float(m(meta, "height"))
         rows: list[dict[str, Any]] = [{"key": "width", "label": "Width", "type": "number", "unit": "mm", "value": round(w * 1000, 6)},
                                       {"key": "height", "label": "Height", "type": "number", "unit": "mm", "value": round(h * 1000, 6)}]
-        if cat == "window":
-            rows.append({"key": "sill", "label": "Sill Height", "type": "number", "unit": "mm", "value": round(float(m(meta, "sill", 0.0)) * 1000, 6)})
+        sill_mm = round(float(m(meta, "sill", 0.0)) * 1000, 6)
+        rows.append({"key": "sill", "label": "Sill Height" if cat == "window" else "Base Height (above wall base)", "type": "number", "unit": "mm", "value": sill_mm})
+        if alive(project, m(meta, "host", "")):
+            hw = meta_of(project, str(m(meta, "host")))
+            lift = float(m(hw, "base_offset", 0.0))
+            rows.append({"key": "elevation", "label": "Base Elevation (above level)", "type": "number", "unit": "mm", "value": round((lift + float(m(meta, "sill", 0.0))) * 1000, 6)})
+            rows.append({"label": "Head Elevation (above level)", "type": "readonly", "value": f"{(lift + float(m(meta, 'sill', 0.0)) + h) * 1000:.0f} mm"})
         rows.append({"key": "material", "label": "Material", "type": "choice", "value": m(meta, "material"), "choices": _choices(MATERIALS)})
         out["top"] += rows
         walls = [{"value": w, "label": f"{project.model.get(w)['name']} ({project.level(m(project.model.get(w)['metadata'], 'level'))['name']})"}
                  for w in element_ids(project) if m(project.model.get(w)["metadata"], "category") == "wall"]
         placement = [{"key": "host", "label": "Host wall", "type": "choice", "value": m(meta, "host"), "choices": walls} if alive(project, m(meta, "host", "")) else {"label": "Host", "type": "readonly", "value": host},
                      {"key": "offset", "label": "Offset along wall", "type": "number", "unit": "m", "value": float(m(meta, "offset"))},
+                     {"key": "depth_ref", "label": "Depth reference", "type": "choice", "value": m(meta, "depth_ref", "centre"),
+                      "choices": [{"value": "centre", "label": "Centre line"}, {"value": "near", "label": "Near face (right of the wall's path)"},
+                                  {"value": "far", "label": "Far face (left of the wall's path)"}, {"value": "custom", "label": "Custom offset from the centre line"}]},
+                     {"key": "depth_offset", "label": "Depth offset (+ toward far face)", "type": "number", "unit": "mm", "value": round(float(m(meta, "depth_offset", 0.0)) * 1000, 6)},
                      {"label": "Area", "type": "readonly", "value": f"{w * h:.3f} m²"}]
+        if cat == "door":
+            sl = sliding_of(meta)
+            placement.append({"key": "door_type", "label": "Door type", "type": "choice", "value": "sliding" if sl else "hinged", "choices": [{"value": "hinged", "label": "Hinged"}, {"value": "sliding", "label": "Sliding (schuifdeur)"}]})
+            if sl:
+                placement += [{"key": "sliding_leaves", "label": "Leaves", "type": "choice", "value": str(sl.get("leaves", 1)), "choices": [{"value": "1", "label": "One leaf"}, {"value": "2", "label": "Two leaves"}]},
+                              {"key": "sliding_direction", "label": "Opens", "type": "choice", "value": sl.get("direction", "right"), "choices": [{"value": "left", "label": "Left"}, {"value": "right", "label": "Right"}, {"value": "both", "label": "Both ways (bi-parting)"}]},
+                              {"key": "sliding_mount", "label": "Mounting", "type": "choice", "value": sl.get("mount", "surface"), "choices": [{"value": "surface", "label": "Surface-mounted on a track"}, {"value": "pocket", "label": "In a wall pocket (cavity)"}]},
+                              {"key": "sliding_face", "label": "Runs on", "type": "choice", "value": str(sl.get("face", 1)), "choices": [{"value": "1", "label": "Far face (left of the wall's path)"}, {"value": "-1", "label": "Near face (right of the wall's path)"}]}]
         if cat == "window":
             placement.append({"key": "operation", "label": "Operation", "type": "choice", "value": m(meta, "operation", "fixed"), "choices": _choices(WINDOW_OPERATIONS)})
         placement.append({"key": "hinge", "label": "Hinge", "type": "choice", "value": m(meta, "hinge", "start"), "choices": _choices(("start", "end"))})
@@ -2641,6 +3661,12 @@ def _properties(project: Any, oid: str) -> dict[str, Any]:
                                                         {"label": "Perimeter", "type": "readonly", "value": f"{perimeter:.3f} m"}, *extra, volume]},
                          {"title": "Constraints", "rows": [{"key": "offset", "label": "Level Offset", "type": "number", "unit": "mm", "value": float(m(meta, "offset", 0.0)) * 1000}]},
                          {"title": "Identity", "rows": [name_row]}]
+        if cat == "roof" and m(meta, "roof") in ("gable", "shed"):
+            out["groups"].insert(1, _roof_end_group(project, oid, meta))
+            wins = roof_windows(project, oid)
+            out["groups"].insert(2, {"title": f"Roof windows ({len(wins)})", "rows": [{"label": project.model.get(w)["name"], "type": "link", "value": f"{float(m(meta_of(project, w), 'width')) * 1000:.0f} × {float(m(meta_of(project, w), 'height')) * 1000:.0f} mm",
+                                                                                         "ref": {"model": w}} for w in wins],
+                                     "action": {"label": "Add roof window", "command": "model.add_roof_window", "params": {"roof": oid}}})
         return out
     if cat == "room":
         from . import rooms as R
@@ -2749,6 +3775,16 @@ def check(project: Any) -> list[dict[str, str]]:
         meta = obj["metadata"]
         cat = m(meta, "category")
         label = obj["name"] or str(cat).title()
+        if cat == "roof" and m(meta, "roof_ends"):
+            issues += roof_end_issues(project, oid, meta, label)
+        if cat == "roof_window":
+            if not alive(project, str(m(meta, "host", ""))) or category(project, str(m(meta, "host"))) != "roof":
+                issues.append(issue("error", oid, f"{label} has lost its roof", "hosting"))
+            else:
+                try:
+                    roof_window_frame(project, meta_of(project, str(m(meta, "host"))), meta, roof_end_cuts(project, meta_of(project, str(m(meta, "host")))))
+                except BadRequest as exc:
+                    issues.append(issue("error", oid, f"{label}: {exc}", "consistency"))
         if cat in SPECIAL and m(meta, "level") not in level_ids:
             issues.append(issue("error", oid, f"{label} refers to a level that no longer exists", "references"))
         if cat not in ("room", "void", "grid") and obj.get("geometry") is not None:
@@ -2774,6 +3810,17 @@ def check(project: Any) -> list[dict[str, str]]:
                     length, height = wall_frame(project, host)["length"], float(m(hm, "height"))
                     if x0 < -1e-9 or x1 > length + 1e-9 or z1 > height + 1e-9 or z0 < -1e-9:
                         issues.append(issue("error", oid, f"{label} does not fit inside its wall", "hosting"))
+                    elif cat == "door" and sliding_of(meta):
+                        for q, px0, px1 in panel_spans(meta):
+                            room = px0 if q["slide"] == "start" else length - px1
+                            if q["operation"] == "slide" and room < q["width"] - 1e-6:
+                                issues.append(issue("warning", oid, f"{label}: a sliding leaf needs {q['width'] * 1000:.0f} mm of wall beside the opening to open fully; "
+                                                                    f"there is {max(room, 0.0) * 1000:.0f} mm", "geometry"))
+                    else:
+                        th = DOOR_LEAF if cat == "door" else GLASS
+                        out_by = abs(opening_depth_y(project, oid, meta, float(m(hm, "thickness")))) + th / 2 - float(m(hm, "thickness")) / 2
+                        if out_by > 1e-6:
+                            issues.append(issue("warning", oid, f"{label}: its leaf stands {out_by * 1000:.0f} mm outside the faces of its wall (depth offset)", "geometry"))
         elif cat == "opening_profile":
             opening = str(m(meta, "opening", ""))
             if not alive(project, opening) or category(project, opening) not in OPENINGS:

@@ -188,6 +188,12 @@ def gutters_preview(app: SpadraApp, req: Request) -> Any:
         return app.require().preview_gutters(req.json())
 
 
+@router.route("POST", "/api/roof/end/preview")
+def roof_end_preview(app: SpadraApp, req: Request) -> Any:
+    with app.lock:
+        return app.require().preview_roof_end(req.json())
+
+
 @router.route("POST", "/api/properties")
 def properties(app: SpadraApp, req: Request) -> Any:
     with app.lock:

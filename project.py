@@ -85,8 +85,8 @@ _BACKUP_ID = re.compile(r"^\d{8}T\d{6}Z-r\d{1,9}(-\d{1,3})?$")
 NO_DRAWING = ("3d", "schedule")                 # view kinds that have no SDRW document of their own
 MAX_COORD = 1.0e9                              # drawing units; anything larger is a typo, not a building
 MAX_POINTS = 10_000
-CATEGORIES = ("Walls", "Doors", "Windows", "Floors", "Roofs", "Gutters", "Downpipes", "Stairs", "Structural", "Rooms", "Grids", "Generic Models", "Extrusions", "Voids", "Sweeps", "Foundations", "Arrays")
-CATEGORY_KEY = {"wall": "Walls", "door": "Doors", "window": "Windows", "floor": "Floors", "roof": "Roofs", "gutter": "Gutters", "downpipe": "Downpipes", "stair": "Stairs", "structural": "Structural", "room": "Rooms",
+CATEGORIES = ("Walls", "Doors", "Windows", "Roof windows", "Floors", "Roofs", "Gutters", "Downpipes", "Stairs", "Structural", "Rooms", "Grids", "Generic Models", "Extrusions", "Voids", "Sweeps", "Foundations", "Arrays")
+CATEGORY_KEY = {"wall": "Walls", "door": "Doors", "window": "Windows", "roof_window": "Roof windows", "floor": "Floors", "roof": "Roofs", "gutter": "Gutters", "downpipe": "Downpipes", "stair": "Stairs", "structural": "Structural", "room": "Rooms",
                 "grid": "Grids", "generic": "Generic Models", "extrusion": "Extrusions", "void": "Voids", "sweep": "Sweeps", "foundation": "Foundations", "array": "Arrays"}
 
 
@@ -908,6 +908,10 @@ class Project:
         return {"void": void, "settings": {"enabled": v["enabled"], "policy": v["policy"], "targets": v["targets"], "host": v["host"]},
                 "elements": CU.classify(self, void), "missing": CU.stale(self, v)}
 
+    def preview_roof_end(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        """What ``model.set_roof_end`` would make for one eave: the cross-section, the numbers and the findings, without making it. Read-only."""
+        return E.preview_roof_end(self, params)
+
     def preview_gutters(self, params: Mapping[str, Any]) -> dict[str, Any]:
         """What ``model.add_gutters`` would make for the same parameters, as plan outlines, without making it. Read-only."""
         return GU.preview_gutters(self, params, MM_PER[self.manifest["unit"]] / 1000.0)
@@ -1598,10 +1602,52 @@ class _Commands:
         if material not in MATERIALS:
             raise BadRequest(f"material must be one of {', '.join(MATERIALS)}")
         name = text(p.get("name") or "Basic Wall", "name", 80)
+        reference = p.get("reference", "centre")
+        if reference not in E.WALL_REFS:
+            raise BadRequest(f"reference must be one of {', '.join(E.WALL_REFS)}")
+        offset = number(p.get("reference_offset", 0), "reference_offset", -100000, 100000) / 1000.0
+        if math.dist(start, end) > 1e-9:                                          # what was drawn is the reference line: the centre line (the authority) sits beside it
+            k = offset + E.ref_sign(reference) * thickness / 2
+            nx, ny = E._wall_normal(start, end)
+            start, end = (start[0] + nx * k, start[1] + ny * k), (end[0] + nx * k, end[1] + ny * k)
         oid = project.model.add_box(width=1.0, depth=1.0, height=1.0, name=name)
         project.model.attach_semantics(oid, {"category": "wall", "type": "Basic Wall", "level": level["id"], "start": list(start), "end": list(end),
-                                             "thickness": thickness, "height": height, "base_offset": 0.0, "material": material}, namespace=NS)
+                                             "thickness": thickness, "height": height, "base_offset": 0.0, "material": material,
+                                             "reference": reference, "reference_offset": offset, "ref_thickness": thickness}, namespace=NS)
+        moved = E.join_drawn_corners(project, oid)
         regenerate_wall(project, oid)
+        for wid in sorted(moved):                                                 # the walls whose ends moved to the new corner
+            regenerate_wall(project, wid)
+        return {"id": oid}
+
+    @staticmethod
+    @command(_model_target("Set roof end connection"))
+    def model__set_roof_end(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Set how one eave of a gable or shed roof ends (``edge``: the outline edge, ``type``: A1…D3 or custom, then ``cut``, ``ref``, ``anchor``, ``offset`` mm,
+        ``heel`` mm, ``layers``, ``wall``); ``seat`` also moves the roof so its corner bears on the wall as designed."""
+        oid = text(p.get("id"), "id", 80)
+        if not E.alive(project, oid):
+            raise NotFound(f"Roof {oid} does not exist")
+        keys = ("type", "cut", "ref", "anchor", "bearing", "offset", "heel", "layers", "wall")
+        return E.set_roof_end(project, oid, p.get("edge"), {k: p[k] for k in keys if k in p}, bool(p.get("seat", False)))
+
+    @staticmethod
+    @command(_model_target("Clear roof end connection"))
+    def model__clear_roof_end(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        oid = text(p.get("id"), "id", 80)
+        if not E.alive(project, oid):
+            raise NotFound(f"Roof {oid} does not exist")
+        E.clear_roof_end(project, oid, p.get("edge"))
+        return {"id": oid}
+
+    @staticmethod
+    @command(_model_target("Flip wall"))
+    def model__flip_wall(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Reverse a wall's path without moving it (near and far swap, hosted doors and windows are mirrored so they stay put)."""
+        oid = text(p.get("id"), "id", 80)
+        if not E.alive(project, oid) or E.category(project, oid) != "wall":
+            raise NotFound(f"Wall {oid} does not exist")
+        E.flip_wall(project, oid)
         return {"id": oid}
 
     @staticmethod
@@ -1868,6 +1914,13 @@ class _Commands:
     def model__add_roof(project: Project, p: dict[str, Any]) -> dict[str, Any]:
         """A flat roof over any outline, or a gable/shed roof over a rectangular one (``pitch`` in degrees)."""
         return {"id": E.add_roof(project, p, MM_PER[project.manifest["unit"]] / 1000.0)}
+
+    @staticmethod
+    @command(_model_target("Add roof window"))
+    def model__add_roof_window(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """A window in the plane of a gable or shed roof: ``roof``, ``edge`` (the eave it is measured from), ``x`` and ``d`` (mm along the eave and up the slope to
+        its centre), ``width``, ``height`` (mm, height along the slope), ``kerb`` (mm above the roof surface). The roof is opened through all its layers."""
+        return {"id": E.add_roof_window(project, p)}
 
     @staticmethod
     @command(_model_target("Add roof accessory"))
