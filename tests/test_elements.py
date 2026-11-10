@@ -254,8 +254,12 @@ class Doors(ElementCase):
         with self.assertRaises(BadRequest):
             self.run_("model.set_property", id=d, key="width", value=9000)
         self.assertAlmostEqual(self.vol(w), 4.8 - 1.2 * 2.1 * 0.25, places=6)
-        with self.assertRaises(BadRequest):
-            self.run_("model.set_property", id=d, key="sill", value=100)                  # doors have no sill
+        self.run_("model.set_property", id=d, key="sill", value=100)                       # a door can be raised (a threshold, a raised floor) like a window
+        self.assertAlmostEqual(self.meta(d)[f"{NS}:sill"], 0.1)
+        self.assertAlmostEqual(self.meta(d)[f"{NS}:height"], 2.1)                          # raising it does not change its size
+        with self.assertRaises(BadRequest):                                                # but its head may not pass the top of the wall (3.2 m)
+            self.run_("model.set_property", id=d, key="sill", value=1200)
+        self.assertAlmostEqual(self.meta(d)[f"{NS}:sill"], 0.1)
         self.run_("model.set_property", id=d, key="hinge", value="end")
         self.assertEqual(self.meta(d)[f"{NS}:hinge"], "end")
 
@@ -517,7 +521,7 @@ class PlanAndTree(ElementCase):
         self.run_("model.add_roof", points=Roofs.RECT, level=self.roof_level, roof="gable")
         self.run_("model.add_beam", start=[0, 0], end=[1000, 0], level=self.l1)
         cats = {c["label"]: len(c["children"]) for c in next(s for s in self.p.tree()["sections"] if s["id"] == "categories")["children"]}
-        self.assertEqual(cats, {"Walls": 1, "Doors": 1, "Windows": 1, "Floors": 1, "Roofs": 1, "Gutters": 0, "Downpipes": 0, "Stairs": 0, "Structural": 1, "Rooms": 0, "Grids": 0, "Generic Models": 0, "Extrusions": 0, "Voids": 0, "Sweeps": 0, "Foundations": 0, "Arrays": 0})
+        self.assertEqual(cats, {"Walls": 1, "Doors": 1, "Windows": 1, "Roof windows": 0, "Floors": 1, "Roofs": 1, "Gutters": 0, "Downpipes": 0, "Stairs": 0, "Structural": 1, "Rooms": 0, "Grids": 0, "Generic Models": 0, "Extrusions": 0, "Voids": 0, "Sweeps": 0, "Foundations": 0, "Arrays": 0})
 
     def test_scene_draws_every_element(self):
         w = self.wall()
