@@ -153,7 +153,7 @@ describe("building elements in a browser", () => {
 
   it("explains why a pitched roof cannot be built on an irregular outline, and builds nothing", async () => {
     await tool("Roof");
-    await page.locator("[data-field='roof.kind'], .hud-group select").first().selectOption("gable");
+    await page.locator("[data-field='roof.kind'], .hud-group:not([hidden]) select").first().selectOption("gable");
     for (const [x, y] of [[0.3, 0.72], [0.6, 0.72], [0.7, 0.9], [0.3, 0.9]]) await clickFraction(x, y);
     await page.keyboard.press("Enter"); await settle();
     await page.getByText(/pitched roof needs a .*rectangular outline/).first().waitFor();
@@ -165,7 +165,7 @@ describe("building elements in a browser", () => {
   });
 
   it("builds a flat roof on that same outline instead", async () => {
-    await page.locator(".hud-group select").first().selectOption("flat");
+    await page.locator(".hud-group:not([hidden]) select").first().selectOption("flat");
     await overlay().focus();
     await page.keyboard.press("Enter"); await settle();
     const [roof] = await ofCategory("roof");

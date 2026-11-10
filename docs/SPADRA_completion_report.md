@@ -1,4 +1,47 @@
-# SPADRA — technical completion report (2026-11-09, eleventh revision)
+# SPADRA — technical completion report (2026-11-09, twelfth revision)
+
+**Twelfth revision (2026-11-09, evening).** The request "Parametric Roof-End Connections, Door/Window Improvements, and Wall Placement" is described in **Part 00000** below. The eleventh revision (foundations, `b7c6cfc`) follows unchanged.
+
+---
+
+## Part 00000 — Wall placement, door/window offsets, roof-end connections A1–D3, roof windows
+
+### Root causes (what was actually wrong)
+1. **Doors in plan had no leaf.** The plan item for a door drew the opening and the swing but not the panel; the leaf now follows the hinge side, swing and open angle, and sliding doors show their panels with the Dutch notation (a common drawing convention, **not** an official ISO 7519 symbol, and it is not attributed to one).
+2. **Door sill forced to 0 and no depth offset.** `sill` was ignored for doors and an opening could only be centred in the wall. Doors and windows now take a vertical offset and a depth offset (`depth_ref` near/centre/far + `depth_offset`), both checked against the wall.
+3. **A wall had only a centre line.** Changing the thickness therefore always grew it symmetrically about the centre. A wall now stores a reference line (near / centre / far face, plus a numeric offset) and the thickness it was placed with; the centre line stays the single authority, the reference line is derived from it (`centre = reference + n·(offset + sgn·t/2)`; near = right-hand face of the path).
+4. **A roof ended in a vertical edge at its outline.** There were no end-condition parameters, so none of the 14 details A1–D3 could be expressed.
+5. **There was no roof-hosted window.** A window could only be hosted by a wall.
+
+### What was done
+- **Walls:** reference selectable in the wall HUD (2D and 3D) before drawing and in Properties after; the reference line is drawn while drawing and for a selected wall and is snapped to; *Flip wall* reverses the path and swaps near/far without moving the wall (hosted openings are mirrored with it, one undo step); a thickness change keeps the reference line fixed and re-intersects a corner that has exactly one other wall; multilayer, joins and hosted openings were kept working (tests).
+- **Roof ends:** 14 presets (A1–A3 square, B1–B3 plumb, C1–C5 horizontal, D1–D3 per the updated sheet) are presets of five parameters (cut: square/plumb/horizontal; wall alignment: near/centre/far; cut point: underside/mid/top; offset; heel; plus bearing and layer mode). `end_cut()` solves the cut so the chosen corner stands over the chosen wall line; the *same* cut feeds the roof mesh, the fascia and gutters (so they follow the cut) and the roof windows. Dialog: preview section, parameters, Apply (optionally moves the whole roof so it bears as designed; one undo step). Properties: an "End connections" group per eave. Saved with the project and reloaded.
+- **Roof windows:** a new element (`roof_window`, id prefix RW) hosted on a gable/shed roof: eave, position along the eave, distance up the slope, width, height, kerb, depth, frame. The roof is opened through every layer by the exact plumb opening (no boolean library); the window is frame bars plus a pane in the roof plane.
+- **Diagnostics:** error / warning / info, each saying what to change. Roof ends: no wall under the eave (info), wall below / above the roof's upper corner, roof floating or embedded at the bearing, no bearing for a horizontal cut, corner not over the wall, projection beyond the far face, raised heel and embedded end (info). Roof windows: an error when the roof is lost or the window no longer fits (reaches the ridge, the end of the slope or a verge). Roof ends are advisory where the geometry is still well defined. They appear in Check model and in the Properties of the roof. Windows are **not** checked against each other: two windows can overlap.
+- **Deterministic:** all of it is plain geometry in `elements.py`; nothing depends on the assistant. Agent/Python-made changes keep the preview → approval → commit path.
+
+### Modules modified
+`elements.py` (wall reference, flip, roof ends, roof windows, diagnostics, Properties), `project.py` (commands `model.add_wall` reference, `model.flip_wall`, `model.set_roof_end`, `model.clear_roof_end`, `model.add_roof_window`, preview, browser category), `routes.py` (`/api/roof/end/preview`), `documentation.py` (roof window counted and numbered); client `store.ts`, `geom2d.ts`, `view2d.ts`, `view3d.ts`, `types.ts`, `properties.ts`, `gutters.ts`, `shell.ts`. One UI defect found by the browser test and fixed: the End connections dialog asked to seat the roof even where no wall carries the eave (the server refused); the option is now disabled and not sent then.
+
+### Verified
+- **Python:** 1686 passed, 7 skipped, 1 failed. New: `tests/test_opening_offsets.py` (23), `tests/test_wall_reference.py` (18), `tests/test_roof_ends.py` (21 + subtests; every one of the 14 presets checked against its cut, reference and bearing, plus a section render of the real mesh compared by eye with the sheet), `tests/test_roof_windows.py` (18; opening areas worked out by hand, volume removed, following the roof and the end cut). The one failure is `test_api.py::ModifierPreview…` which needs numpy and trimesh, absent in this environment (it failed before this work too).
+- **TypeScript:** `tsc --noEmit` clean; 131 `tsx` unit tests pass (one new for `wallBand` with a shift).
+- **Browser (Playwright, real server):** new `tests_e2e/placement.e2e.test.mjs` (6): draws a wall on its far face with a 100 mm offset from the HUD and checks the stored reference and the offset of the centre line; thickness change from Properties keeps the reference line; *Flip wall* keeps the footprint, reverses the path, near becomes far, and undo restores it; End connections dialog previews C4, applies it, undo removes it; *Add roof window* creates real geometry hosted by the roof and undo removes it; no console errors. The other 25 e2e files: all pass except three that are **flaky on the unmodified code too** (`walls` test 5 and `animation` tests 3/15 failed in some runs and passed in others, in a copy of the tree with my files replaced by the committed versions). Two real regressions of mine were found by this run and fixed: the new wall HUD was tall enough to cover the top-left of the plan, where a click starts a wall (the hint is now one short line with the full text as a tooltip), and an existing roof test selected the first select in any HUD group, which is now the hidden wall group (the test selects the visible group).
+- **Not run:** interactive checks by a person with a mouse (drag feel, label legibility), Windows, DXF/IFC.
+
+### Limits (kept honest)
+- **Sliding-door notation** is common drawing practice; it is not an ISO 7519 symbol. The pocket cavity of a pocket door is **not** cut from the wall.
+- Door/window **depth offsets** are edited by number in Properties; there is no drag handle for them.
+- **Roof ends and roof windows exist for gable and shed roofs only.** Flat and hip roofs are refused on creation and ignored with a warning if the type is changed afterwards.
+- C2, C4 and C5 follow the updated sheet as I read it; D1 is modelled as a designed gap (a diagnostic, with optional seating), **D3 reports the overlap with the wall but does not cut a notch in the wall**, and **D2's raised wall and its support are not modelled**.
+- `roof_facets` (wall attachments, auto rooms) still use the outline polygons and are **not clipped by the end cuts**.
+- The roof window has no separate elevation symbol: it is real mesh geometry, so sections, elevations and 3D show it; the IFC mapping of `roof_window` was not checked specially (DXF/IFC are not run here at all).
+- Following a thickness change moves a corner only when exactly one other wall meets it.
+- The built client (`dist/`) must be rebuilt on the device (`npm run build`); nothing here was run on Windows, and the three earlier Windows e2e failures are still waiting for new output.
+
+---
+
+## Eleventh revision (foundations), unchanged
 
 **Eleventh revision (2026-11-09).** The foundation request (several connected walls selected; floors that overlap adjust or merge; optional formwork with a thickness; reinforce after creation with the shading following; constrained to the wall above by default) is described in **Part 0000** below. Everything after it is the tenth revision, except that the foundation *limits* listed in Part 000 are superseded by Part 0000 where they differ (a foundation now follows its support's height; formwork is modelled when asked for).
 

@@ -15,7 +15,7 @@ import { familiesDialog, issueDialog, levelsDialog, newReportDialog, reportDialo
 import { optimizeDialog, scriptsDialog, stairDesignDialog } from "./parametric_ui.js";
 import { propertiesDialog, recoverDialog } from "./project_dialogs.js";
 import { appearanceDialog, arrayDialog, releaseArray, modifierDialog, ensureClean, newProjectDialog, openProjectDialog, reviewDialog } from "./dialogs.js";
-import { downpipeDialog, drainageDialog, gutterDialog } from "./gutters.js";
+import { downpipeDialog, drainageDialog, gutterDialog, roofEndDialog } from "./gutters.js";
 import { foundationDialog, foundationReportDialog, reinforceDialog } from "./foundations.js";
 import { renderProperties } from "./properties.js";
 import { ScheduleView } from "./schedule.js";
@@ -185,6 +185,7 @@ export class Shell {
       case "issue": if (sheet) issueDialog(store, sheet); break;
       case "arrange": if (sheet) void store.arrangeSheet(sheet); break;
       case "reinforce": void reinforceDialog(store, ref); break;
+      case "roof_end": void roofEndDialog(store); break;
       case "jobs": jobsDialog(store); break;
       case "diagnostics": void diagnosticsDialog(store); break;
       default: toast(`There is no “${name}” dialog.`, { kind: "error" });

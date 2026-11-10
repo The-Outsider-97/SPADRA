@@ -58,7 +58,10 @@ function group(store: Store, p: Properties, g: PropGroup): HTMLElement {
   if (g.add) el.appendChild(addForm(store, p, g.add));
   if (g.action) {
     const action = g.action;
-    el.appendChild(h("div", { class: "prop-row" }, h("button", { class: "tool-inline", type: "button", text: action.label, on: { click: () => store.openDialog?.(action.dialog, p.ref["sheet"]) } })));
+    el.appendChild(h("div", { class: "prop-row" }, h("button", { class: "tool-inline", type: "button", text: action.label, on: { click: () => {
+      if (action.command) void store.run(action.command, action.params ?? {});                       // an action that is a command (flip a wall) runs at once
+      else if (action.dialog) store.openDialog?.(action.dialog, p.ref["sheet"]);
+    } } })));
   }
   return el;
 }

@@ -2,7 +2,7 @@
 import { h, replace, s } from "../../../tools/web/src/dom.js";
 import { openMenu, type MenuEntry } from "./menus.js";
 import { entityBounds, formatDimension, segments, textBox } from "./geom2d.js";
-import { cutPath, cutStyle, cutWeight, edgePath, hatchPath, levelLabel, markArrows, markLabel, hatchFill, patternPath, surfacePath, swingPath, visibleLevels } from "./projection.js";
+import { cutPath, cutStyle, cutWeight, edgePath, hatchPath, levelLabel, markArrows, markLabel, hatchFill, patternPath, surfacePath, swingPath, shapePaths, visibleLevels } from "./projection.js";
 import { formatCell } from "./schedule.js";
 import { iconFor } from "./browser.js";
 import { flatten, openable, type Store } from "./store.js";
@@ -299,6 +299,7 @@ export class SheetView {
           if (p[0] && p[1] && p[2] && p[3]) g.appendChild(s("path", { attrs: { d: `M${p[3][0]} ${p[3][1]}L${p[0][0]} ${p[0][1]}M${p[1][0]} ${p[1][1]}L${p[2][0]} ${p[2][1]}`, fill: "none", ...stroke } }));
           const d = swingPath(sym);
           if (d) g.appendChild(s("path", { attrs: { d, fill: "none", ...stroke } }));
+          for (const sh of shapePaths(sym)) g.appendChild(s("path", { attrs: { d: sh.d, fill: "none", ...stroke, ...(sh.dash ? { "stroke-dasharray": sh.dash } : {}) } }));
         }
       }
     }

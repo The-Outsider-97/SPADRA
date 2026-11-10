@@ -185,11 +185,29 @@ export function hatchPath(loop: Pt[], hatch: "diag" | "cross" | "dots", step: nu
  *  carries none (a fixed window, or a view that hides opening direction). The arc runs counter-clockwise in drawing coordinates. */
 export function swingPath(sym: PlanSymbol | undefined): string {
   if (!(sym?.hinge && sym.leaf_end && sym.radius !== undefined && sym.start_angle !== undefined && sym.end_angle !== undefined)) return "";
-  const one = (c: Pt, leaf: Pt, r: number, a0: number, a1: number): string => {
+  const box = (q?: Pt[]): string => (q && q.length >= 3 ? `M${q.map((c) => `${c[0]} ${c[1]}`).join("L")}Z` : "");
+  const one = (c: Pt, leaf: Pt, r: number, a0: number, a1: number, poly?: Pt[]): string => {
     const sx = c[0] + r * Math.cos(a0), sy = c[1] + r * Math.sin(a0), ex = c[0] + r * Math.cos(a1), ey = c[1] + r * Math.sin(a1);
-    return `M${c[0]} ${c[1]}L${leaf[0]} ${leaf[1]}M${sx} ${sy}A${r} ${r} 0 ${a1 - a0 > Math.PI ? 1 : 0} 1 ${ex} ${ey}`;
+    return `${poly ? box(poly) : `M${c[0]} ${c[1]}L${leaf[0]} ${leaf[1]}`}M${sx} ${sy}A${r} ${r} 0 ${a1 - a0 > Math.PI ? 1 : 0} 1 ${ex} ${ey}`;
   };
-  return one(sym.hinge, sym.leaf_end, sym.radius, sym.start_angle, sym.end_angle) + (sym.more ?? []).map((l) => one(l.hinge, l.leaf_end, l.radius, l.start_angle, l.end_angle)).join("");     // a door of several panels: one per swinging panel
+  return one(sym.hinge, sym.leaf_end, sym.radius, sym.start_angle, sym.end_angle, sym.poly) + (sym.more ?? []).map((l) => one(l.hinge, l.leaf_end, l.radius, l.start_angle, l.end_angle, l.poly)).join("");     // a door of several panels: one per swinging panel
+}
+
+/** A door's leaves as SVG paths: each shape with its own dash, so a sheet draws the closed leaves solid, the open sliding leaf and the pocket dashed, the
+ *  track dash-dot and the travel arrow with its head. */
+export function shapePaths(sym: PlanSymbol | undefined): Array<{ d: string; dash: string; role: string }> {
+  const out: Array<{ d: string; dash: string; role: string }> = [];
+  for (const sh of sym?.shapes ?? []) {
+    const pts = sh.p.map((c) => `${c[0]} ${c[1]}`);
+    let d = sh.t === "poly" ? `M${pts.join("L")}Z` : `M${pts.join("L")}`;
+    if (sh.t === "arrow" && sh.p.length === 2) {
+      const [a, b] = sh.p as [Pt, Pt];
+      const ang = Math.atan2(b[1] - a[1], b[0] - a[0]), len = Math.hypot(b[0] - a[0], b[1] - a[1]) * 0.18;
+      for (const k of [-0.45, 0.45]) d += `M${b[0]} ${b[1]}L${b[0] - len * Math.cos(ang + k)} ${b[1] - len * Math.sin(ang + k)}`;
+    }
+    out.push({ d, dash: sh.dash ? (sh.role === "track" ? "10 3 2 3" : "5 4") : "", role: sh.role });
+  }
+  return out;
 }
 
 /** How a cut is filled given its hatch: a plain tint when there is no hatch (or the view hides it), solid ink for a solid pattern, and nothing

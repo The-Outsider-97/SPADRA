@@ -322,9 +322,15 @@ export function polygonsBounds(polygons: readonly (readonly Pt[])[]): [Pt, Pt] |
 }
 
 /** The footprint of a straight, square-ended wall of the given thickness along a→b (used to show a wall that is being drawn or stretched). */
-export function wallBand(a: Pt, b: Pt, thickness: number): Pt[] {
-  const len = dist(a, b) || 1, nx = (-(b[1] - a[1]) / len) * (thickness / 2), ny = ((b[0] - a[0]) / len) * (thickness / 2);
-  return [[a[0] + nx, a[1] + ny], [b[0] + nx, b[1] + ny], [b[0] - nx, b[1] - ny], [a[0] - nx, a[1] - ny]];
+export function wallBand(a: Pt, b: Pt, thickness: number, shift = 0): Pt[] {
+  const len = dist(a, b) || 1, ux = -(b[1] - a[1]) / len, uy = (b[0] - a[0]) / len, nx = ux * (thickness / 2), ny = uy * (thickness / 2), sx = ux * shift, sy = uy * shift;
+  return [[a[0] + sx + nx, a[1] + sy + ny], [b[0] + sx + nx, b[1] + sy + ny], [b[0] + sx - nx, b[1] + sy - ny], [a[0] + sx - nx, a[1] + sy - ny]];
+}
+
+/** How far (same unit as ``thickness``) a wall's centre line lies from the line that was drawn: the offset, plus half the thickness when the line is a face.
+ *  The near face is the right-hand one looking along the path, so its centre is to the left (+). */
+export function wallCentreShift(reference: "near" | "centre" | "far", offset: number, thickness: number): number {
+  return offset + (reference === "near" ? thickness / 2 : reference === "far" ? -thickness / 2 : 0);
 }
 
 /** The point on the line a→b that is ``length`` from a (for a wall whose length is typed in). */

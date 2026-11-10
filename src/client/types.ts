@@ -62,10 +62,15 @@ export interface Entity {
 }
 export interface Layer { name: string; visible: boolean; entity_count: number }
 /** What the model shows on a plan: a wall piece, a door or window (with its symbol), a floor or a beam, as a polygon in drawing units. */
+export interface PlanShape { t: "poly" | "line" | "arrow"; p: Pt[]; dash: boolean; role: "leaf" | "open" | "track" | "pocket" | "direction" | string }
 export interface PlanSymbol {
   kind: "door" | "window"; hinge?: Pt; leaf_end?: Pt; radius?: number; start_angle?: number; end_angle?: number; a?: Pt; b?: Pt;
+  /** The open leaf as the thin rectangle it is (four corners), where the door swings. */
+  poly?: Pt[];
   /** The other swinging panels of a door that has several: each with its own hinge, open leaf and arc. */
-  more?: Array<{ hinge: Pt; leaf_end: Pt; radius: number; start_angle: number; end_angle: number }>;
+  more?: Array<{ hinge: Pt; leaf_end: Pt; radius: number; start_angle: number; end_angle: number; poly?: Pt[] }>;
+  /** A door's leaves as drawn: closed-leaf rectangles, an open sliding leaf (dashed), its track or pocket, and the arrow of its travel. */
+  shapes?: PlanShape[];
 }
 /** A room's plan label: its name and number, its area from the outline (m²) and where the label sits (drawing units). */
 export interface RoomLabel { name: string; number: string; area_m2: number | null; volume_m3?: number | null; at: Pt; valid?: boolean; warning?: string }
@@ -89,6 +94,8 @@ export interface PlanWall {
   joins?: string[];
   /** A wall's centre line and thickness, in the drawing's unit: what its end grips hold and what the next wall snaps to. */
   axis?: { a: Pt; b: Pt; thickness: number };
+  /** The line the wall was placed on (its near face, centre or far face, plus an offset): shown on a selected wall, and snapped to like the centre line. */
+  reference?: { a: Pt; b: Pt; kind: "near" | "centre" | "far"; offset: number };
   /** A floor's outline (its corner points, in the drawing's unit): what its corner and edge grips hold. */
   outline?: Pt[];
   /** A gable roof's selectable ridge line and its transverse offset, in drawing units. */
@@ -178,7 +185,7 @@ export interface PropGroup {
   /** Advanced classification groups start collapsed without hiding their data. */
   collapsed?: boolean;
   /** A button under the rows that opens a dialog (``issue``: issue a revision of the sheet). */
-  action?: { label: string; dialog: string };
+  action?: { label: string; dialog?: string; command?: string; params?: Record<string, unknown> };
   /** A form to add a row: ``custom`` (a custom property) or ``note`` (a sheet note). */
   add?: "custom" | "note" | "layer" | "panel";
 }

@@ -227,3 +227,115 @@ export async function drainageDialog(store: Store): Promise<void> {
       h("p", { class: "muted", text: data.note })),
     actions: [{ label: "Done", kind: "primary", run: () => true }] });
 }
+
+
+/** What `/roof/end/preview` returns: the cross-section across one eave, in metres, heights relative to the wall top (or the roof's top at the outline). */
+export interface RoofEndPreview {
+  edge: number; slab: number[][]; reference: string; q_ref: number; anchor: number[]; gap_mm: number | null; seat_mm: number | null; projection_mm: number;
+  perpendicular_thickness_mm: number; wall: { name: string; near: number; far: number; centre: number; top: number; base: number } | null;
+  end: { type: string; cut: string; ref: string; anchor: string; offset: number; heel: number; layers: string };
+  notes: Array<{ severity: string; message: string }>;
+}
+const CONNECTIONS: Array<[string, string]> = [
+  ["A1", "A1 Square cut, near-face bearing"], ["A2", "A2 Square cut, centreline bearing"], ["A3", "A3 Square cut, far-face bearing"],
+  ["B1", "B1 Plumb cut, near face"], ["B2", "B2 Plumb cut, centreline"], ["B3", "B3 Plumb cut, far face"],
+  ["C1", "C1 Horizontal cut, far-face edge"], ["C2", "C2 Horizontal cut, projecting"], ["C3", "C3 Horizontal cut, centreline-referenced"], ["C4", "C4 Horizontal cut, flush with the far face"], ["C5", "C5 Horizontal cut, near-face edge"],
+  ["D1", "D1 Raised heel"], ["D2", "D2 Plumb cut, near-face butt abutment"], ["D3", "D3 Embedded, plumb cut"], ["custom", "Custom"],
+];
+
+/** How the selected gable or shed roof ends at an eave: the 14 connection details A1 to D3 as presets of a cut across the eave (cut orientation, which wall line the cut
+ *  stands over, offset, heel, layers). The server computes the section and the findings for every change; Apply makes exactly what the preview last showed. */
+export async function roofEndDialog(store: Store): Promise<void> {
+  if (!store.project) return;
+  const roof = selectedOf(store, "roof");
+  if (!roof) { toast("Select a gable or shed roof first, then choose End connections.", { kind: "info" }); return; }
+  const props = await store.api.post<{ groups: Array<{ title: string; rows: Array<{ key?: string }> }> }>("/properties", { model: roof });
+  const edges = [...new Set((props.groups.find((g) => g.title === "End connections")?.rows ?? []).map((r) => /^end:(\d+):/.exec(r.key ?? "")?.[1]).filter((x): x is string => !!x).map(Number))];
+  if (!edges.length) { toast("End connections are defined for gable and shed roofs.", { kind: "info" }); return; }
+  const num = (value: string, step: string): HTMLInputElement => h("input", { type: "number", value, step, attrs: { autocomplete: "off" } });
+  const pick = (options: Array<[string, string]>): HTMLSelectElement => h("select", {}, ...options.map(([v, l]) => h("option", { value: v, text: l })));
+  const edge = pick(edges.map((e) => [String(e), `Eave ${e + 1}`]));
+  const type = pick(CONNECTIONS);
+  const cut = pick([["square", "Square to the slope"], ["plumb", "Plumb (vertical)"], ["horizontal", "Horizontal seat"]]);
+  const ref = pick([["near", "Near face (towards the ridge)"], ["centre", "Centre line"], ["far", "Far face (outer)"]]);
+  const anchor = pick([["underside", "Lower corner of the cut"], ["mid", "Middle of the cut (reference axis)"], ["top", "Upper corner of the cut"]]);
+  const layers = pick([["through", "One cut through all layers"], ["own", "Each layer cut on its own"]]);
+  const offset = num("0", "5"), heel = num("0", "5");
+  const seat = h("input", { type: "checkbox", checked: true, attrs: { "aria-label": "Move the roof so the corner bears as designed" } }) as HTMLInputElement;
+  const status = h("div", { class: "muted", attrs: { role: "status", "aria-live": "polite" } });
+  const picture = h("div", {});
+  let latest: RoofEndPreview | null = null, seq = 0, loading = true;
+  const request = (mode: "preset" | "full" | "current"): Record<string, unknown> => mode === "current" ? { id: roof, edge: Number(edge.value) } : mode === "full"
+    ? { id: roof, edge: Number(edge.value), type: type.value, cut: cut.value, ref: ref.value, anchor: anchor.value, offset: Number(offset.value) || 0, heel: Number(heel.value) || 0, layers: layers.value }
+    : { id: roof, edge: Number(edge.value), type: type.value };
+  const draw = (pv: RoofEndPreview): void => {
+    clear(picture);
+    const pts = pv.slab.map((q) => [q[0] as number, q[1] as number]);
+    seat.disabled = !pv.wall;                                                                       // there is nothing to seat the roof on when no wall carries this eave
+    const xs = [...pts.map((q) => q[0] as number), pv.wall?.near ?? 0, pv.wall?.far ?? 0], zs = [...pts.map((q) => q[1] as number), -0.9, 0.6];
+    const x0 = Math.min(...xs) - 0.1, x1 = Math.max(...xs) + 0.1, z0 = Math.min(...zs), z1 = Math.max(...zs);
+    const svg = s("svg", { attrs: { viewBox: `${x0} ${-z1} ${x1 - x0} ${z1 - z0}`, role: "img", "aria-label": "Section across the eave: the roof end on its wall", preserveAspectRatio: "xMidYMid meet" }, css: { width: "100%", maxHeight: "22rem" } });
+    const k = (x1 - x0) / 300;
+    const g = s("g", { attrs: { transform: "scale(1,-1)" } });
+    if (pv.wall) g.append(s("rect", { attrs: { x: pv.wall.near, y: pv.wall.base, width: pv.wall.far - pv.wall.near, height: pv.wall.top - pv.wall.base, fill: "currentColor", "fill-opacity": 0.18, stroke: "currentColor", "stroke-width": k, "stroke-opacity": 0.5 } }));
+    g.append(s("polygon", { attrs: { points: pts.map((q) => q.join(",")).join(" "), fill: "var(--accent, #2f6fde)", "fill-opacity": 0.28, stroke: "currentColor", "stroke-width": k } }));
+    const a = pts[1] as number[], b = pts[2] as number[];
+    g.append(s("line", { attrs: { x1: a[0], y1: a[1], x2: b[0], y2: b[1], stroke: "#d9962b", "stroke-width": k * 3 } }));                     // the cut face
+    g.append(s("line", { attrs: { x1: pv.q_ref, y1: z0, x2: pv.q_ref, y2: z1, stroke: "#d33", "stroke-width": k, "stroke-dasharray": `${k * 4} ${k * 4}` } }));
+    g.append(s("circle", { attrs: { cx: pv.anchor[0], cy: pv.anchor[1], r: k * 4, fill: "#d33" } }));
+    svg.append(g);
+    picture.append(svg);
+  };
+  const refresh = async (mode: "preset" | "full" | "current"): Promise<void> => {
+    const mine = ++seq;
+    try {
+      const pv = await store.api.post<RoofEndPreview>("/roof/end/preview", request(mode));
+      if (mine !== seq) return;
+      latest = pv;
+      if (mode !== "full") {                                                                    // a preset (or the eave) was chosen: show its parameters
+        loading = true;
+        type.value = pv.end.type; cut.value = pv.end.cut; ref.value = pv.end.ref; anchor.value = pv.end.anchor; layers.value = pv.end.layers;
+        offset.value = String(Math.round(pv.end.offset * 1000)); heel.value = String(Math.round(pv.end.heel * 1000));
+        loading = false;
+      }
+      draw(pv);
+      clear(status);
+      status.append(h("div", { text: `Reference: ${pv.reference}. ${pv.wall ? `Carried by ${pv.wall.name}.` : "No wall under this eave."} Cut face ${pv.perpendicular_thickness_mm.toFixed(0)} mm square to the slope.` }));
+      if (pv.gap_mm !== null) status.append(h("div", { text: `Roof corner ${pv.gap_mm.toFixed(0)} mm above the wall top; seating moves the roof ${pv.seat_mm?.toFixed(0)} mm. Projection beyond the far face ${pv.projection_mm.toFixed(0)} mm.` }));
+      for (const n of pv.notes) status.append(h("div", { class: n.severity === "warning" ? "error" : "", text: `${n.severity === "warning" ? "⚠ " : ""}${n.message}` }));
+    } catch (e) { if (mine === seq) { latest = null; clear(status); status.append(h("div", { class: "error", text: e instanceof Error ? e.message : "Could not preview." })); } }
+  };
+  let timer: number | undefined;
+  const later = (mode: "preset" | "full" | "current"): void => { if (loading) return; window.clearTimeout(timer); timer = window.setTimeout(() => { void refresh(mode); }, 100); };
+  const hasEnd = (e: number): boolean => { const row = props.groups.find((g) => g.title === "End connections")?.rows.find((r) => r.key === `end:${e}:type`) as { value?: string } | undefined; return !!row?.value && row.value !== "default"; };
+  edge.addEventListener("change", () => later(hasEnd(Number(edge.value)) ? "current" : "preset"));
+  type.addEventListener("change", () => { loading = false; later("preset"); });
+  for (const el of [cut, ref, anchor, layers, offset, heel]) el.addEventListener("change", () => later("full"));
+  const two = (a: HTMLElement, b: HTMLElement): HTMLElement => h("div", { css: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" } }, a, b);
+  const handle = openDialog<true>({
+    title: "Roof end connections", size: "wide", focus: () => type,
+    body: h("div", { css: { display: "grid", gridTemplateColumns: "minmax(16rem, 1fr) minmax(18rem, 1.2fr)", gap: "1.25rem", alignItems: "start" } },
+      h("div", { css: { display: "grid", gap: "0.8rem" } },
+        labelled("Eave", edge), labelled("Connection", type, { hint: "A1 to D3 are presets of the parameters below; changing a parameter keeps the rest." }),
+        two(labelled("Cut", cut), labelled("Wall alignment", ref)),
+        labelled("Cut point over the wall line", anchor),
+        two(labelled("Cut position offset (mm, + outward)", offset), labelled("Heel above wall top (mm, − embedded)", heel)),
+        labelled("Layers", layers),
+        h("label", { css: { display: "flex", gap: "0.5rem", alignItems: "center" } }, seat, "Move the whole roof so the corner bears as designed (undoable)")),
+      h("div", { css: { display: "grid", gap: "0.5rem", position: "sticky", top: "0" } }, picture, status,
+        h("p", { class: "muted", text: "Section across the eave. Near is the wall face towards the ridge. Red: the wall line the cut stands over; amber: the cut face." }))),
+    actions: [{ label: "Apply", kind: "primary", run: async () => {
+      window.clearTimeout(timer);
+      await refresh("full");
+      if (!latest) { toast("This connection cannot be made.", { kind: "error" }); return undefined; }
+      const out = await store.run("model.set_roof_end", { ...request("full"), seat: seat.checked && !!latest.wall });
+      return out ? true : undefined;
+    } }],
+  });
+  const existing = hasEnd(edges[0] as number);
+  type.value = "B1";
+  loading = false;
+  void refresh(existing ? "current" : "preset");
+  await handle.result;
+  window.clearTimeout(timer);
+}
