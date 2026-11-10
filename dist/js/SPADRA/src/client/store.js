@@ -41,8 +41,9 @@ export class Store {
     snapGrid = readFlag("spadra.snapGrid", true);
     /** Whether the 3D view orbits about the selected element (otherwise about the point it looks at). */
     orbitSelection = readFlag("spadra.orbitSelection", true);
-    /** What the next wall will be: height in metres, thickness in millimetres. Shared by the 2D and 3D wall tools. */
-    wallOptions = { height: 3.2, thickness: 250 };
+    /** What the next wall will be: height in metres, thickness in millimetres, and which line the drawn path is: the wall's near face (the right-hand one looking along
+     *  the path), its centre, or its far face, plus an offset in millimetres toward the far side. Shared by the 2D and 3D wall tools. */
+    wallOptions = { height: 3.2, thickness: 250, reference: "centre", offset: 0 };
     /** One roof creation specification shared by plan and 3D modeling tools. */
     roofOptions = { kind: "flat", pitch: 30, thickness: 200 };
     /** What the Extrude, Void and Sweep tools make: depth and base in metres above the level, the sweep's profile in millimetres. */

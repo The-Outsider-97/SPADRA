@@ -15,8 +15,8 @@ import { familiesDialog, issueDialog, levelsDialog, newReportDialog, reportDialo
 import { optimizeDialog, scriptsDialog, stairDesignDialog } from "./parametric_ui.js";
 import { propertiesDialog, recoverDialog } from "./project_dialogs.js";
 import { appearanceDialog, arrayDialog, releaseArray, modifierDialog, ensureClean, newProjectDialog, openProjectDialog, reviewDialog } from "./dialogs.js";
-import { downpipeDialog, drainageDialog, gutterDialog } from "./gutters.js";
-import { foundationDialog, foundationReportDialog } from "./foundations.js";
+import { downpipeDialog, drainageDialog, gutterDialog, roofEndDialog } from "./gutters.js";
+import { foundationDialog, foundationReportDialog, reinforceDialog } from "./foundations.js";
 import { renderProperties } from "./properties.js";
 import { ScheduleView } from "./schedule.js";
 import { SheetView } from "./sheet.js";
@@ -212,6 +212,12 @@ export class Shell {
             case "arrange":
                 if (sheet)
                     void store.arrangeSheet(sheet);
+                break;
+            case "reinforce":
+                void reinforceDialog(store, ref);
+                break;
+            case "roof_end":
+                void roofEndDialog(store);
                 break;
             case "jobs":
                 jobsDialog(store);
@@ -438,6 +444,7 @@ export class Shell {
                     T("downpipe", "Downpipe", "downpipe", !!store.project, { run: () => downpipeDialog(store), note: "Select a gutter, then add a downpipe under it" }),
                     T("drainage", "Drainage", "report", !!store.project, { run: () => drainageDialog(store), note: "The rain each roof sends to its gutters and downpipes" }),
                     T("foundation", "Foundation", "foundation", !!store.project, { run: () => { void foundationDialog(store); }, note: "Pads, strips, foundation beams, rafts and ground-bearing slabs; select walls or columns to stand them on" }),
+                    T("reinforce", "Reinforce foundation", "foundation", !!store.project, { run: () => { void reinforceDialog(store); }, note: "Declare bars, concrete class and cover on the selected foundation, now or later; its shading follows" }),
                     T("foundationqty", "Foundation quantities", "report", !!store.project, { run: () => { void foundationReportDialog(store); }, note: "Concrete, build-up, thermal resistance and indicative bars of the selected foundation" }),
                     T("beam", "Beam", "beam", kind === "3d", { tool: "beam" }), T("column", "Column", "column", on3dOrPlan, { tool: "column" }),
                     T("room", "Room", "room", onPlan, { tool: "room" }),

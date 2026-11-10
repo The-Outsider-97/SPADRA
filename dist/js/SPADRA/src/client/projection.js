@@ -121,13 +121,15 @@ export function edgePath(item, map) {
 export function cutPath(item, map) {
     return item.cut.map((loop) => loop.map((p, i) => { const q = map(p); return `${i ? "L" : "M"}${r(q[0])} ${r(q[1])}`; }).join("") + "Z").join("");
 }
-/** How a cut material is drawn in a section: fill opacity and the hatch laid over it (concrete diagonal, insulation crossed, granular fill dotted). */
+/** How a cut material is drawn in a section: fill opacity and the hatch laid over it (concrete diagonal, reinforced concrete heavier and crossed, insulation crossed, granular fill dotted). */
 export function cutStyle(material) {
     const m = material.toLowerCase();
     if (/(eps|xps|pir|mineral wool|foam glass|insulation)/.test(m))
         return { alpha: 0.06, hatch: "cross" };
     if (/(sand|gravel|fill)/.test(m))
         return { alpha: 0.12, hatch: "dots" };
+    if (/reinforced/.test(m))
+        return { alpha: 0.6, hatch: "cross" }; // declared bars: a darker, crossed hatch than plain concrete
     if (/(concrete|masonry)/.test(m))
         return { alpha: 0.45, hatch: "diag" };
     return { alpha: 0.28, hatch: "none" };
@@ -191,11 +193,29 @@ export function hatchPath(loop, hatch, step) {
 export function swingPath(sym) {
     if (!(sym?.hinge && sym.leaf_end && sym.radius !== undefined && sym.start_angle !== undefined && sym.end_angle !== undefined))
         return "";
-    const one = (c, leaf, r, a0, a1) => {
+    const box = (q) => (q && q.length >= 3 ? `M${q.map((c) => `${c[0]} ${c[1]}`).join("L")}Z` : "");
+    const one = (c, leaf, r, a0, a1, poly) => {
         const sx = c[0] + r * Math.cos(a0), sy = c[1] + r * Math.sin(a0), ex = c[0] + r * Math.cos(a1), ey = c[1] + r * Math.sin(a1);
-        return `M${c[0]} ${c[1]}L${leaf[0]} ${leaf[1]}M${sx} ${sy}A${r} ${r} 0 ${a1 - a0 > Math.PI ? 1 : 0} 1 ${ex} ${ey}`;
+        return `${poly ? box(poly) : `M${c[0]} ${c[1]}L${leaf[0]} ${leaf[1]}`}M${sx} ${sy}A${r} ${r} 0 ${a1 - a0 > Math.PI ? 1 : 0} 1 ${ex} ${ey}`;
     };
-    return one(sym.hinge, sym.leaf_end, sym.radius, sym.start_angle, sym.end_angle) + (sym.more ?? []).map((l) => one(l.hinge, l.leaf_end, l.radius, l.start_angle, l.end_angle)).join(""); // a door of several panels: one per swinging panel
+    return one(sym.hinge, sym.leaf_end, sym.radius, sym.start_angle, sym.end_angle, sym.poly) + (sym.more ?? []).map((l) => one(l.hinge, l.leaf_end, l.radius, l.start_angle, l.end_angle, l.poly)).join(""); // a door of several panels: one per swinging panel
+}
+/** A door's leaves as SVG paths: each shape with its own dash, so a sheet draws the closed leaves solid, the open sliding leaf and the pocket dashed, the
+ *  track dash-dot and the travel arrow with its head. */
+export function shapePaths(sym) {
+    const out = [];
+    for (const sh of sym?.shapes ?? []) {
+        const pts = sh.p.map((c) => `${c[0]} ${c[1]}`);
+        let d = sh.t === "poly" ? `M${pts.join("L")}Z` : `M${pts.join("L")}`;
+        if (sh.t === "arrow" && sh.p.length === 2) {
+            const [a, b] = sh.p;
+            const ang = Math.atan2(b[1] - a[1], b[0] - a[0]), len = Math.hypot(b[0] - a[0], b[1] - a[1]) * 0.18;
+            for (const k of [-0.45, 0.45])
+                d += `M${b[0]} ${b[1]}L${b[0] - len * Math.cos(ang + k)} ${b[1] - len * Math.sin(ang + k)}`;
+        }
+        out.push({ d, dash: sh.dash ? (sh.role === "track" ? "10 3 2 3" : "5 4") : "", role: sh.role });
+    }
+    return out;
 }
 /** How a cut is filled given its hatch: a plain tint when there is no hatch (or the view hides it), solid ink for a solid pattern, and nothing
  *  under the lines for the others. Returns the fill opacity multiplier (1 = the element's own cut weight). */

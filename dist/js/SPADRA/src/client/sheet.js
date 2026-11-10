@@ -2,7 +2,7 @@
 import { h, replace, s } from "../../../tools/web/src/dom.js";
 import { openMenu } from "./menus.js";
 import { entityBounds, formatDimension, segments, textBox } from "./geom2d.js";
-import { cutPath, cutStyle, cutWeight, edgePath, hatchPath, levelLabel, markArrows, markLabel, hatchFill, patternPath, surfacePath, swingPath, visibleLevels } from "./projection.js";
+import { cutPath, cutStyle, cutWeight, edgePath, hatchPath, levelLabel, markArrows, markLabel, hatchFill, patternPath, surfacePath, swingPath, shapePaths, visibleLevels } from "./projection.js";
 import { formatCell } from "./schedule.js";
 import { iconFor } from "./browser.js";
 import { flatten, openable } from "./store.js";
@@ -346,6 +346,8 @@ export class SheetView {
                     const d = swingPath(sym);
                     if (d)
                         g.appendChild(s("path", { attrs: { d, fill: "none", ...stroke } }));
+                    for (const sh of shapePaths(sym))
+                        g.appendChild(s("path", { attrs: { d: sh.d, fill: "none", ...stroke, ...(sh.dash ? { "stroke-dasharray": sh.dash } : {}) } }));
                 }
             }
         }

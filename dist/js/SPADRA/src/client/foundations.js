@@ -9,13 +9,67 @@ const KINDS = [
     ["plaat", "Raft (plaat)"], ["vloer", "Ground-bearing slab (vloer op grondslag)"],
 ];
 const LAYER_MATERIALS = ["EPS", "XPS", "PIR", "Mineral wool", "Foam glass", "Sand", "Gravel", "Blinding concrete", "Screed", "Concrete", "Floor finish", "Damp-proof membrane"];
+const FORMWORK_MATERIALS = ["EPS", "XPS", "Timber", "Plywood", "Steel"];
+const FLOOR_CHOICES = [
+    ["adjust", "Adjust: cut the floor back to the foundation"],
+    ["merge", "Merge: lower the foundation top so the floor runs over it"],
+    ["keep", "Leave the floors as they are"],
+];
 const DIAMETERS = [6, 8, 10, 12, 14, 16, 20, 25, 28, 32, 40];
 const ROLES = { poer: ["x", "y"], plaat: ["x", "y"], vloer: ["x", "y"], strook: ["long", "link"], funderingsbalk: ["long", "link"] };
+const numberInput = (value, step = "any", min) => h("input", { type: "number", value, step, ...(min ? { min } : {}), attrs: { autocomplete: "off" } });
+const removerFor = (rows, row) => h("button", { class: "btn", type: "button", text: "Remove", attrs: { "aria-label": "Remove this row" }, on: { click: () => { rows.splice(rows.indexOf(row), 1); row.el.remove(); } } });
+/** A list of rows the person adds to and removes from. */
+function rowsBox(title, hint, add) {
+    const rows = [];
+    const list = h("div", { css: { display: "grid", gap: "0.4rem" } });
+    const append = (r) => { rows.push(r); list.append(r.el); };
+    const addBtn = h("button", { class: "btn", type: "button", text: "Add", on: { click: () => append(add()) } });
+    const box = h("fieldset", { css: { display: "grid", gap: "0.4rem", border: "1px solid var(--line, #8884)", padding: "0.5rem 0.75rem" } }, h("legend", { text: title }), h("p", { class: "muted", text: hint }), list, addBtn);
+    return { box, rows, clearAll: () => { rows.length = 0; clear(list); }, append };
+}
+/** One declared bar group: role, diameter, spacing or count, face. ``init`` fills it from what is already declared. */
+function barRow(rows, kind, init) {
+    const roles = ROLES[kind] ?? ["x", "y"];
+    const role = h("select", {}, ...roles.map((r) => h("option", { value: r, text: r })));
+    const dia = h("select", {}, ...DIAMETERS.map((d) => h("option", { value: String(d), text: `Ø${d}` })));
+    const by = h("select", {}, h("option", { value: "spacing", text: "at spacing (mm)" }), h("option", { value: "count", text: "number of bars" }));
+    const n = numberInput("200", "1", "1");
+    const face = h("select", {}, h("option", { value: "bottom", text: "bottom" }), h("option", { value: "top", text: "top" }), h("option", { value: "both", text: "both" }));
+    dia.value = String(init?.diameter ?? 12);
+    if (init) {
+        if (roles.includes(init.role))
+            role.value = init.role;
+        face.value = init.face;
+        if (init.count !== undefined) {
+            by.value = "count";
+            n.value = String(init.count);
+        }
+        else if (init.spacing !== undefined)
+            n.value = String(init.spacing);
+    }
+    const row = { el: null, read: () => ({ diameter: Number(dia.value), role: role.value, face: face.value, ...(init?.mark ? { mark: init.mark } : {}), [by.value]: Number(n.value) }) };
+    row.el = h("div", { css: { display: "grid", gridTemplateColumns: "0.8fr 0.8fr 1.2fr 0.8fr 0.8fr auto", gap: "0.4rem", alignItems: "end" } }, labelled("Role", role), labelled("Bar", dia), labelled("Given as", by), labelled("Value", n), labelled("Face", face), removerFor(rows, row));
+    return row;
+}
+/** What a floor adjustment did, in a sentence (empty when no floor was touched). */
+function floorNote(f) {
+    if (!f)
+        return "";
+    const parts = [];
+    if (f.adjusted?.length)
+        parts.push(`${f.adjusted.length} floor${f.adjusted.length === 1 ? "" : "s"} cut back to the foundation`);
+    if (f.merged?.length)
+        parts.push(`${f.merged.length} floor${f.merged.length === 1 ? "" : "s"} merged with it`);
+    if (f.unresolved?.length)
+        parts.push(`${f.unresolved.length} floor${f.unresolved.length === 1 ? "" : "s"} could not be adjusted (see Check Model)`);
+    return parts.length ? ` ${parts.join("; ")}.` : "";
+}
 export async function foundationDialog(store) {
     if (!store.project)
         return;
     const picked = store.selection?.kind === "model" ? store.selection.ids : [];
-    const number = (value, step = "any", min) => h("input", { type: "number", value, step, ...(min ? { min } : {}), attrs: { autocomplete: "off" } });
+    const number = numberInput;
     const kind = h("select", {}, ...KINDS.map(([v, l]) => h("option", { value: v, text: l })));
     if (!picked.length)
         kind.value = "poer";
@@ -30,55 +84,53 @@ export async function foundationDialog(store) {
     const steel = h("input", { type: "text", value: "", placeholder: "e.g. B500B", attrs: { maxlength: 20, autocomplete: "off" } });
     const rectW = number("6000", "10", "100"), rectD = number("5000", "10", "100");
     const status = h("p", { class: "muted", attrs: { role: "status", "aria-live": "polite" } });
-    const rowsBox = (title, hint, add) => {
-        const rows = [];
-        const list = h("div", { css: { display: "grid", gap: "0.4rem" } });
-        const addBtn = h("button", { class: "btn", type: "button", text: "Add", on: { click: () => { const r = add(); rows.push(r); list.append(r.el); } } });
-        const box = h("fieldset", { css: { display: "grid", gap: "0.4rem", border: "1px solid var(--line, #8884)", padding: "0.5rem 0.75rem" } }, h("legend", { text: title }), h("p", { class: "muted", text: hint }), list, addBtn);
-        return { box, rows, clearAll: () => { rows.length = 0; clear(list); } };
-    };
-    const remover = (rows, row) => h("button", { class: "btn", type: "button", text: "Remove", attrs: { "aria-label": "Remove this row" }, on: { click: () => { rows.splice(rows.indexOf(row), 1); row.el.remove(); } } });
+    const constrain = h("input", { type: "checkbox", checked: true, attrs: { "aria-label": "Constrained to the wall or column above" } });
+    const formworkOn = h("input", { type: "checkbox", checked: false, attrs: { "aria-label": "Add formwork" } });
+    const formworkT = number("50", "5", "5");
+    const formworkMat = h("select", {}, ...FORMWORK_MATERIALS.map((m) => h("option", { value: m, text: m })));
+    const floors = h("select", {}, ...FLOOR_CHOICES.map(([v, l]) => h("option", { value: v, text: l })));
     const layerRow = (rows, where) => {
         const material = h("select", {}, ...LAYER_MATERIALS.map((m) => h("option", { value: m, text: m })));
         const t = number("100", "5", "1"), k = number("", "0.001", "0.005");
         const row = { el: null, read: () => ({ material: material.value, thickness: Number(t.value), conductivity: k.value === "" ? undefined : Number(k.value), where }) };
-        row.el = h("div", { css: { display: "grid", gridTemplateColumns: "1.4fr 1fr 1fr auto", gap: "0.4rem", alignItems: "end" } }, labelled("Material", material), labelled("Thickness (mm)", t), labelled("λ (W/m·K)", k, { hint: "Leave empty if unknown" }), remover(rows, row));
+        row.el = h("div", { css: { display: "grid", gridTemplateColumns: "1.4fr 1fr 1fr auto", gap: "0.4rem", alignItems: "end" } }, labelled("Material", material), labelled("Thickness (mm)", t), labelled("λ (W/m·K)", k, { hint: "Leave empty if unknown" }), removerFor(rows, row));
         return row;
     };
     const below = rowsBox("Layers below the slab (nearest the slab first)", "Insulation, sand bed, blinding… Each is a solid of the slab's outline. The thermal resistance counts only layers that have a λ.", () => layerRow(below.rows, "below"));
     const above = rowsBox("Layers above the slab (nearest the slab first)", "Screed, finishes…", () => layerRow(above.rows, "above"));
-    const barRow = (rows) => {
-        const role = h("select", {}, ...(ROLES[kind.value] ?? ["x", "y"]).map((r) => h("option", { value: r, text: r })));
-        const dia = h("select", {}, ...DIAMETERS.map((d) => h("option", { value: String(d), text: `Ø${d}`, ...(d === 12 ? { selected: true } : {}) })));
-        const by = h("select", {}, h("option", { value: "spacing", text: "at spacing (mm)" }), h("option", { value: "count", text: "number of bars" }));
-        const n = number("200", "1", "1");
-        const face = h("select", {}, h("option", { value: "bottom", text: "bottom" }), h("option", { value: "top", text: "top" }), h("option", { value: "both", text: "both" }));
-        const row = { el: null, read: () => ({ diameter: Number(dia.value), role: role.value, face: face.value, [by.value]: Number(n.value) }) };
-        row.el = h("div", { css: { display: "grid", gridTemplateColumns: "0.8fr 0.8fr 1.2fr 0.8fr 0.8fr auto", gap: "0.4rem", alignItems: "end" } }, labelled("Role", role), labelled("Bar", dia), labelled("Given as", by), labelled("Value", n), labelled("Face", face), remover(rows, row));
-        return row;
-    };
-    const bars = rowsBox("Reinforcement (declared)", "Straight bars the take-off counts between the covers. Nothing here is designed or checked against any code.", () => barRow(bars.rows));
+    const bars = rowsBox("Reinforcement (declared)", "Straight bars the take-off counts between the covers. Nothing here is designed or checked against any code.", () => barRow(bars.rows, kind.value));
     const show = (el, on) => { el.hidden = !on; };
     const two = (a, b) => h("div", { css: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" } }, a, b);
+    const levelRow = labelled("Level", level, { hint: "Only used when the foundation does not stand on a wall or column; otherwise it takes the level of what it carries." });
     const selectionRow = h("label", { css: { display: "flex", gap: "0.5rem", alignItems: "center" } }, onSelection, `Stand on the selection (${picked.length} selected)`);
     const pointBox = h("div", { css: { display: "grid", gap: "0.5rem" } }, two(labelled("X (drawing units)", px), labelled("Y (drawing units)", py)));
     const lineBox = h("div", { css: { display: "grid", gap: "0.5rem" } }, two(labelled("Start X", sx), labelled("Start Y", sy)), two(labelled("End X", ex), labelled("End Y", ey)), labelled("Eccentricity (mm)", offset, { hint: "Sideways from the line, to the left of start→end." }));
     const areaBox = h("div", { css: { display: "grid", gap: "0.5rem" } }, two(labelled("Corner X", ax), labelled("Corner Y", ay)), two(labelled("Width (mm)", rectW), labelled("Depth (mm)", rectD)), h("p", { class: "muted", text: "A rectangle from the corner. Other outlines can be made with the API or the assistant." }));
     const sizeBox = h("div", { css: { display: "grid", gap: "0.5rem" } });
+    const constrainRow = h("label", { css: { display: "flex", gap: "0.5rem", alignItems: "center" } }, constrain, "Constrained to the wall or column above (it moves with it, sideways and up or down)");
+    const formworkBox = h("div", { css: { display: "grid", gap: "0.5rem" } }, h("label", { css: { display: "flex", gap: "0.5rem", alignItems: "center" } }, formworkOn, "Add formwork (lost formwork around the concrete)"), two(labelled("Formwork thickness (mm)", formworkT), labelled("Formwork material", formworkMat)));
+    const syncFormwork = () => { formworkT.disabled = !formworkOn.checked; formworkMat.disabled = !formworkOn.checked; };
+    formworkOn.addEventListener("change", syncFormwork);
+    syncFormwork();
     const layersBox = h("div", { css: { display: "grid", gap: "0.5rem" } }, below.box, above.box);
     const fresh = (restartBars = false) => {
         const k = kind.value;
         const stand = onSelection.checked && picked.length > 0 && k !== "plaat" && k !== "vloer";
         show(selectionRow, k !== "plaat" && k !== "vloer" && k !== "under" && picked.length > 0);
+        show(levelRow, !stand && k !== "under");
         show(pointBox, k === "poer" && !stand);
         show(lineBox, (k === "strook" || k === "funderingsbalk") && !stand);
         show(areaBox, k === "plaat" || k === "vloer");
+        show(constrainRow, k !== "plaat" && k !== "vloer" && (stand || k === "under"));
         show(layersBox, k === "plaat" || k === "vloer");
         clear(sizeBox);
         if (k === "poer")
             sizeBox.append(labelled("Shape", shape), two(labelled(shape.value === "round" ? "Diameter (mm)" : "Width (mm)", width), shape.value === "round" ? h("span") : labelled("Length (mm)", length)), labelled("Height (mm)", height));
-        else if (k === "strook" || k === "funderingsbalk" || k === "under")
+        else if (k === "strook" || k === "funderingsbalk" || k === "under") {
             sizeBox.append(two(labelled("Width (mm)", width), labelled("Height (mm)", height)));
+            if (k === "under" || (k === "strook" && stand && picked.length > 1))
+                sizeBox.append(h("p", { class: "muted", text: "A strip under each selected wall; strips that meet are joined at the corners. A pad under each selected column." }));
+        }
         else
             sizeBox.append(labelled("Thickness (mm)", thickness));
         width.placeholder = k === "strook" || k === "under" ? "wall + 2 × 200" : k === "poer" ? "column + 2 × 200" : "600";
@@ -92,10 +144,17 @@ export async function foundationDialog(store) {
     const layers = (where, box) => box.rows.map((r) => r.read()).filter((r) => !!r && r.where === where).map(({ where: _w, ...rest }) => rest);
     const handle = openDialog({
         title: "Foundation", size: "wide", focus: () => kind,
-        body: h("div", { css: { display: "grid", gap: "0.9rem" } }, labelled("Kind", kind), labelled("Level", level), selectionRow, pointBox, lineBox, areaBox, sizeBox, layersBox, two(labelled("Top above the level (m)", top, { hint: "Empty: the base of what it stands on, or the level." }), labelled("Cover (mm)", cover)), two(labelled("Concrete class", concreteClass), labelled("Reinforcement steel", steel)), bars.box, status, h("p", { class: "muted", text: "Concrete class, cover and reinforcement are declared by you. SPADRA does not design foundations, check bearing, settlement or capacity, or claim compliance with any code." })),
+        body: h("div", { css: { display: "grid", gap: "0.9rem" } }, labelled("Kind", kind), levelRow, selectionRow, pointBox, lineBox, areaBox, sizeBox, layersBox, two(labelled("Top above the level (m)", top, { hint: "Empty: the base of what it stands on, or the level." }), labelled("Cover (mm)", cover)), constrainRow, formworkBox, labelled("Existing floors it overlaps", floors), two(labelled("Concrete class", concreteClass), labelled("Reinforcement steel", steel)), bars.box, status, h("p", { class: "muted", text: "Concrete class, cover and reinforcement are declared by you. SPADRA does not design foundations, check bearing, settlement or capacity, or claim compliance with any code." })),
         actions: [{ label: "Add foundation", kind: "primary", run: async () => {
                     const k = kind.value;
-                    const common = { level: level.value, cover: Number(cover.value) };
+                    const standing = (k === "under") || (onSelection.checked && picked.length > 0 && k !== "plaat" && k !== "vloer");
+                    const common = { cover: Number(cover.value), floors: floors.value };
+                    if (!standing)
+                        common.level = level.value; // a foundation on a wall takes the wall's level; the dropdown must not contradict it
+                    if (standing)
+                        common.constrain = constrain.checked;
+                    if (formworkOn.checked)
+                        Object.assign(common, { formwork: Number(formworkT.value), formwork_material: formworkMat.value });
                     if (top.value !== "")
                         common.top = Number(top.value);
                     if (concreteClass.value.trim())
@@ -114,7 +173,7 @@ export async function foundationDialog(store) {
                             return undefined;
                         if (ids?.length) {
                             await store.select({ kind: "model", ids });
-                            store.setStatus(`${ids.length} foundation${ids.length === 1 ? "" : "s"} made. They follow the walls and columns they stand on.`);
+                            store.setStatus(`${ids.length} foundation${ids.length === 1 ? "" : "s"} made.${constrain.checked ? " They follow the walls and columns they stand on." : ""}${floorNote(out.result.floors)}`);
                         }
                         return true;
                     }
@@ -146,9 +205,11 @@ export async function foundationDialog(store) {
                     const out = await store.run("model.add_foundation", params);
                     if (!out)
                         return undefined;
-                    const id = out.result?.id;
-                    if (id)
-                        await store.select({ kind: "model", ids: [id] });
+                    const res = out.result;
+                    const ids = res?.ids?.length ? res.ids : res?.id ? [res.id] : [];
+                    if (ids.length)
+                        await store.select({ kind: "model", ids });
+                    store.setStatus(`${ids.length === 1 ? "Foundation" : `${ids.length} foundations`} made.${floorNote(res?.floors)}`);
                     return true;
                 } }],
     });
@@ -175,6 +236,50 @@ export async function foundationReportDialog(store) {
     const handle = openDialog({
         title: "Foundation quantities", size: "narrow", noCancel: true, actions: [{ label: "Close", kind: "primary", run: () => true }],
         body: h("div", { css: { display: "grid", gap: "0.4rem" } }, line("Plan area", `${r.plan_area_m2.toFixed(3)} m²`), line("Concrete", `${r.concrete_m3.toFixed(3)} m³`), line("Whole build-up", `${r.volume_m3.toFixed(3)} m³`), line("Formwork (edges only)", `${r.formwork_m2.toFixed(2)} m²`), ...r.layers.map((l) => line(`${l.name} (${l.material}) ${(l.thickness_m * 1000).toFixed(0)} mm`, `${l.volume_m3.toFixed(3)} m³`)), ...(th ? [line("Thermal resistance of the build-up", th.complete ? `${th.r_m2k_w.toFixed(2)} m²K/W` : `${th.r_m2k_w.toFixed(2)} m²K/W so far (no λ for ${th.missing.join(", ")})`)] : []), ...(r.reinforcement ? [line("Bars (indicative)", `${r.reinforcement.bars} · ${r.reinforcement.length_m.toFixed(1)} m${r.reinforcement.mass_kg !== null ? ` · ${r.reinforcement.mass_kg.toFixed(0)} kg` : ""}`), h("p", { class: "muted", text: r.reinforcement.note })] : []), h("p", { class: "muted", text: r.note })),
+    });
+    await handle.result;
+}
+/** Reinforce (or change the reinforcement of) the selected foundation after it was made. The bars, concrete class, steel and cover are *declared* here; the server
+ *  rebuilds the foundation, which is then shown, hatched and coloured as reinforced concrete. Nothing is designed or checked. */
+export async function reinforceDialog(store, ref) {
+    const sel = store.selection;
+    const id = ref ?? (sel?.kind === "model" && sel.ids.length === 1 ? String(sel.ids[0]) : undefined);
+    if (!id || (!ref && store.properties?.category !== "foundation")) {
+        toast("Select one foundation first.", { kind: "info" });
+        return;
+    }
+    let r;
+    try {
+        r = await store.api.post("/foundation/report", { id });
+    }
+    catch (e) {
+        toast(e instanceof Error ? e.message : "Could not read the foundation.", { kind: "error" });
+        return;
+    }
+    const kind = r.kind;
+    const concreteClass = h("input", { type: "text", value: r.concrete_class ?? "", placeholder: "e.g. C25/30", attrs: { maxlength: 20, autocomplete: "off" } });
+    const steel = h("input", { type: "text", value: r.steel ?? "", placeholder: "e.g. B500B", attrs: { maxlength: 20, autocomplete: "off" } });
+    const cover = numberInput(String(Math.round((r.cover_m ?? 0.05) * 1000)), "5", "10");
+    const bars = rowsBox("Reinforcement (declared)", "Straight bars the take-off counts between the covers. Nothing here is designed or checked against any code.", () => barRow(bars.rows, kind));
+    for (const b of r.bars ?? [])
+        bars.append(barRow(bars.rows, kind, b));
+    if (!(r.bars ?? []).length)
+        bars.append(barRow(bars.rows, kind));
+    const apply = async (clearBars) => {
+        const declared = clearBars ? [] : bars.rows.map((row) => row.read()).filter((row) => !!row);
+        const out = await store.run("model.set_foundation_data", { id, bars: declared, cover: Number(cover.value), concrete_class: concreteClass.value.trim(), steel: steel.value.trim() });
+        if (!out)
+            return undefined;
+        store.setStatus(declared.length ? "Reinforcement declared. The foundation is now shown as reinforced concrete." : "Reinforcement removed. The foundation is shown as plain concrete again.");
+        return true;
+    };
+    const handle = openDialog({
+        title: "Reinforce foundation", size: "wide", focus: () => concreteClass,
+        body: h("div", { css: { display: "grid", gap: "0.9rem" } }, h("p", { class: "muted", text: `Currently shown as ${r.display_material ?? "Concrete"}. Declaring bars changes its hatch in sections and its colour in 3D; removing them changes it back.` }), h("div", { css: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "0.75rem" } }, labelled("Concrete class", concreteClass), labelled("Reinforcement steel", steel), labelled("Cover (mm)", cover)), bars.box, h("p", { class: "muted", text: "Concrete class, cover and reinforcement are declared by you. SPADRA does not design foundations, check bearing, settlement or capacity, or claim compliance with any code." })),
+        actions: [
+            { label: "Apply", kind: "primary", run: () => apply(false) },
+            ...((r.bars ?? []).length ? [{ label: "Remove reinforcement", kind: "danger", run: () => apply(true) }] : []),
+        ],
     });
     await handle.result;
 }

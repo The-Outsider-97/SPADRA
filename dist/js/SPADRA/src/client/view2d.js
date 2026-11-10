@@ -4,7 +4,7 @@ import { h } from "../../../tools/web/src/dom.js";
 import { promptDialog, toast } from "../../../tools/web/src/ui.js";
 import { addLayerDialog, hatchDialog, mirrorKeepDialog, numberPrompt } from "./dialogs.js";
 import { clamp } from "../../../tools/web/src/util.js";
-import { alongFrom, angleBetween, closedLoop, distToSegment, dist, entityDistance, entityBounds, fitBox, formatDimension, gripAt, grips, hatchLoops, insideBox, mid, niceStep, normaliseRect, orthoConstrain, pointInPolygon, polygonDistance, polygonsBounds, rotateAbout, roundAngle, segments, snapPoint, textBox, wallBand, } from "./geom2d.js";
+import { alongFrom, angleBetween, closedLoop, distToSegment, dist, entityDistance, entityBounds, fitBox, formatDimension, gripAt, grips, hatchLoops, insideBox, mid, niceStep, normaliseRect, orthoConstrain, pointInPolygon, polygonDistance, polygonsBounds, rotateAbout, roundAngle, segments, snapPoint, textBox, wallBand, wallCentreShift, } from "./geom2d.js";
 import { cssColor, withAlpha } from "./palette.js";
 import { cutStyle, cutWeight, hatchFill, patternPath, levelLabel, markArrows, markLabel, itemContains, projectionAt, snapPolygons, visibleLevels } from "./projection.js";
 const MM_PER = { mm: 1, cm: 10, m: 1000 };
@@ -80,8 +80,16 @@ export class DrawingView {
         };
         const [heightLabel, height] = option("Height (m)", this.store.wallOptions.height, "0.1", "0.1", (n) => { this.store.wallOptions.height = n; });
         const [thicknessLabel, thickness] = option("Thickness (mm)", this.store.wallOptions.thickness, "10", "10", (n) => { this.store.wallOptions.thickness = n; });
-        this.wallFields = { height, thickness };
-        this.wallHud = h("div", { class: "wall-hud", hidden: true }, heightLabel, thicknessLabel, h("span", { class: "muted", text: "Click for each corner. Shift keeps it straight. Double-click or Esc ends." }));
+        const reference = h("select", { attrs: { "aria-label": "Wall reference line" } }, h("option", { value: "near", text: "Near face" }), h("option", { value: "centre", text: "Centre" }), h("option", { value: "far", text: "Far face" }));
+        reference.value = this.store.wallOptions.reference;
+        reference.addEventListener("change", () => { this.store.wallOptions.reference = reference.value; this.draw(); });
+        const offset = h("input", { type: "number", value: String(this.store.wallOptions.offset), step: "10", attrs: { "aria-label": "Wall offset from the reference line (mm)" } });
+        offset.addEventListener("input", () => { const n = Number(offset.value); if (offset.value !== "" && Number.isFinite(n)) {
+            this.store.wallOptions.offset = n;
+            this.draw();
+        } });
+        this.wallFields = { height, thickness, reference, offset };
+        this.wallHud = h("div", { class: "wall-hud", hidden: true }, heightLabel, thicknessLabel, h("label", {}, "Reference line", reference), h("label", {}, "Offset (mm)", offset), h("span", { class: "muted", text: "Click each corner · Shift keeps it straight · Esc ends", attrs: { title: "The path you draw is the reference line (near face = right of the path). Shift keeps it straight. Double-click or Esc ends." } }));
         this.buildFormHuds();
         this.el = h("div", { class: "canvas-wrap" }, this.canvas, this.layerControls, this.junctionControls, this.contextAnchor, this.wallHud, ...[...this.formHuds.values()].map((x) => x.el), this.hint);
         new ResizeObserver(() => this.resize()).observe(this.el);
@@ -245,6 +253,8 @@ export class DrawingView {
             if (w.axis && !seen.has(w.id) && w.id !== own) {
                 seen.add(w.id);
                 out.push([w.axis.a, w.axis.b]);
+                if (w.reference && (w.reference.kind !== "centre" || w.reference.offset))
+                    out.push([w.reference.a, w.reference.b]);
             }
         return out;
     }
@@ -609,12 +619,12 @@ export class DrawingView {
                     this.pts = [p];
                     break;
                 }
-                const { height, thickness } = this.store.wallOptions;
+                const { height, thickness, reference, offset } = this.store.wallOptions;
                 if (!(height > 0) || !(thickness > 0)) {
                     toast("Enter a positive wall height and thickness.", { kind: "error" });
                     break;
                 }
-                if (await this.store.run("model.add_wall", { start: last, end: p, level, height, thickness }))
+                if (await this.store.run("model.add_wall", { start: last, end: p, level, height, thickness, reference, reference_offset: offset }))
                     this.pts = [p]; // the chain goes on from the new end
                 break;
             }
@@ -1560,6 +1570,8 @@ export class DrawingView {
         if (show) {
             this.wallFields.height.value = String(this.store.wallOptions.height);
             this.wallFields.thickness.value = String(this.store.wallOptions.thickness);
+            this.wallFields.reference.value = this.store.wallOptions.reference;
+            this.wallFields.offset.value = String(this.store.wallOptions.offset);
         }
     }
     mmPerUnit() { return MM_PER[this.store.unit]; }
@@ -1610,6 +1622,29 @@ export class DrawingView {
         const wall = this.edit?.kind === "end" ? null : ends.length === 2 && !this.markSel ? this.data?.model.find((w) => w.axis && (w.category === "wall" || w.category === "grid") && this.allSelectedIds()[0] === w.id) : undefined;
         if (wall?.axis && !this.edit)
             this.paintLength(wall.axis.a, wall.axis.b, wall.axis.thickness, wall.id, k, true);
+        const placed = this.data?.model.find((w) => w.category === "wall" && w.reference && this.allSelectedIds().includes(w.id));
+        if (placed?.reference && !this.edit)
+            this.paintReference(placed.reference, k);
+    }
+    /** The line a selected wall was placed on, drawn as a dashed accent line with a small tag saying which it is ("near face", "centre", "far face", plus any offset). */
+    paintReference(ref, k) {
+        const ctx = this.ctx;
+        ctx.save();
+        ctx.strokeStyle = k.select;
+        ctx.fillStyle = k.select;
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([2, 3]);
+        ctx.beginPath();
+        this.line(ref.a, ref.b);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        const [x, y] = this.toScreen([(ref.a[0] + ref.b[0]) / 2, (ref.a[1] + ref.b[1]) / 2]);
+        const tag = `${ref.kind === "centre" ? "centre line" : `${ref.kind} face`}${ref.offset ? ` ${ref.offset > 0 ? "+" : ""}${Math.round(ref.offset)} mm` : ""}`;
+        ctx.font = "11px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "bottom";
+        ctx.fillText(tag, x, y - 4);
+        ctx.restore();
     }
     /** The temporary dimension of a wall: its length, drawn beside it. A selected wall's can be clicked to type a new length. */
     paintLength(a, b, thickness, id, k, clickable) {
@@ -2209,6 +2244,21 @@ export class DrawingView {
             ctx.stroke();
             return;
         }
+        if (w.category === "roof_window") { // the opening in the roof, crossed as a window in the roof plane is
+            trace();
+            ctx.setLineDash([]);
+            ctx.fillStyle = withAlpha(color, selected ? 0.35 : 0.14);
+            ctx.fill();
+            ctx.stroke();
+            const c = w.polygon;
+            if (c.length === 4) {
+                ctx.beginPath();
+                this.line(c[0], c[2]);
+                this.line(c[1], c[3]);
+                ctx.stroke();
+            }
+            return;
+        }
         if (w.category === "downpipe") { // a ring with a dot: a pipe seen end-on, filled where it is cut
             trace();
             ctx.setLineDash(w.cut === false ? (w.overhead ? [6, 3] : [2, 4]) : []);
@@ -2286,6 +2336,40 @@ export class DrawingView {
             edge(1, 2);
             ctx.stroke(); // the jambs
             this.paintSwing(w.symbol);
+            this.paintShapes(w.symbol); // the leaves themselves, a sliding door's track and arrow
+        }
+    }
+    polyPath(pts, close) {
+        const ctx = this.ctx;
+        ctx.beginPath();
+        pts.forEach((q, i) => { const [x, y] = this.toScreen(q); if (i)
+            ctx.lineTo(x, y);
+        else
+            ctx.moveTo(x, y); });
+        if (close)
+            ctx.closePath();
+    }
+    /** A door's leaves in plan: closed-leaf rectangles, an open sliding leaf and its pocket dashed, the track dash-dot, and the arrow of its travel. */
+    paintShapes(s) {
+        const ctx = this.ctx;
+        for (const sh of s?.shapes ?? []) {
+            ctx.save();
+            ctx.setLineDash(sh.dash ? (sh.role === "track" ? [10, 3, 2, 3] : [5, 4]) : []);
+            ctx.lineWidth = 1;
+            this.polyPath(sh.p, sh.t === "poly");
+            ctx.stroke();
+            if (sh.t === "arrow" && sh.p.length === 2) {
+                const [a, b] = sh.p;
+                const [ax, ay] = this.toScreen(a), [bx, by] = this.toScreen(b);
+                const ang = Math.atan2(by - ay, bx - ax), len = Math.max(5, Math.hypot(bx - ax, by - ay) * 0.18);
+                ctx.beginPath();
+                for (const k of [-0.45, 0.45]) {
+                    ctx.moveTo(bx, by);
+                    ctx.lineTo(bx - len * Math.cos(ang + k), by - len * Math.sin(ang + k));
+                }
+                ctx.stroke();
+            }
+            ctx.restore();
         }
     }
     /** The opening direction of a door or casement on a plan: the open leaf and the arc it sweeps. Absent when the view hides it. */
@@ -2293,10 +2377,14 @@ export class DrawingView {
         if (!(s?.hinge && s.leaf_end && s.radius !== undefined && s.start_angle !== undefined && s.end_angle !== undefined))
             return;
         const ctx = this.ctx;
-        for (const l of [{ hinge: s.hinge, leaf_end: s.leaf_end, radius: s.radius, start_angle: s.start_angle, end_angle: s.end_angle }, ...(s.more ?? [])]) { // one leaf per swinging panel
-            ctx.beginPath();
-            this.line(l.hinge, l.leaf_end);
-            ctx.stroke(); // the open leaf
+        for (const l of [{ hinge: s.hinge, leaf_end: s.leaf_end, radius: s.radius, start_angle: s.start_angle, end_angle: s.end_angle, poly: s.poly }, ...(s.more ?? [])]) { // one leaf per swinging panel
+            if (l.poly && l.poly.length >= 3)
+                this.polyPath(l.poly, true);
+            else {
+                ctx.beginPath();
+                this.line(l.hinge, l.leaf_end);
+            }
+            ctx.stroke(); // the open leaf, as the thin rectangle it is
             const [cx, cy] = this.toScreen(l.hinge);
             ctx.lineWidth = 1;
             ctx.beginPath();
@@ -2577,9 +2665,15 @@ export class DrawingView {
                 this.line(all[i], all[i + 1]);
             const from = this.pts[this.pts.length - 1];
             if (tool === "wall" && dist(from, p) > 1e-9) {
-                this.tracePolygon(wallBand(from, p, this.store.wallOptions.thickness / this.mmPerUnit()));
+                const wo = this.store.wallOptions, mm = this.mmPerUnit();
+                this.tracePolygon(wallBand(from, p, wo.thickness / mm, wallCentreShift(wo.reference, wo.offset, wo.thickness) / mm));
                 ctx.fillStyle = withAlpha(k.select, 0.14);
-                ctx.fill();
+                ctx.fill(); // the wall as it will stand
+                ctx.setLineDash([]);
+                ctx.lineWidth = 2.5;
+                ctx.beginPath();
+                this.line(from, p);
+                ctx.stroke(); // and the line that is drawn: the reference
             }
         }
         else if (tool === "rotate") {

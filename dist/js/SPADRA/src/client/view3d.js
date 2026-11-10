@@ -4,7 +4,8 @@ import { h } from "../../../tools/web/src/dom.js";
 import { glyph } from "../../../tools/web/src/icons.js";
 import { toast } from "../../../tools/web/src/ui.js";
 import { cameraEye, cameraMatrices, centreOf, cross, featureEdges, HOME_VIEW, lookAround, normalise, orbitAbout, rayPlaneZ, rayThrough, rayTriangle, sub, transform, viewerDirection, walk, zoomAt, } from "./math3d.js";
-import { cssColor, rgba } from "./palette.js";
+import { cssColor, rgba, withAlpha } from "./palette.js";
+import { wallCentreShift } from "./geom2d.js";
 import { addLayerDialog } from "./dialogs.js";
 const MM_PER = { mm: 1, cm: 10, m: 1000 };
 const MATERIAL_COLOR = {
@@ -76,7 +77,7 @@ export class ModelView {
         };
         const group = (tool, hint, ...inputs) => h("div", { class: "hud-group", hidden: true, data: { tool } }, ...inputs, h("span", { class: "muted", text: hint }));
         this.hudGroups = [
-            group("wall", "Click two points. Shift keeps it straight. Esc ends.", num("wall.height", "Height (m)", "3.2", "0.1", "0.1"), num("wall.thickness", "Thickness (mm)", "250", "10", "10")),
+            group("wall", "Click two points. Shift keeps it straight. Esc ends.", num("wall.height", "Height (m)", "3.2", "0.1", "0.1"), num("wall.thickness", "Thickness (mm)", "250", "10", "10"), pick("wall.reference", "Reference line", [["near", "Near face"], ["centre", "Centre"], ["far", "Far face"]]), num("wall.offset", "Offset (mm)", "0", "-100000", "10")),
             group("door", "Click on a wall to place a door.", num("door.width", "Width (mm)", "900", "100", "50"), num("door.height", "Height (mm)", "2100", "100", "50")),
             group("window", "Click on a wall to place a window.", num("window.width", "Width (mm)", "1200", "100", "50"), num("window.height", "Height (mm)", "1200", "100", "50"), num("window.sill", "Sill (mm)", "900", "0", "50")),
             group("floor", "Click the corners. Enter or double-click finishes, Esc cancels.", num("floor.thickness", "Thickness (mm)", "200", "10", "10")),
@@ -91,6 +92,14 @@ export class ModelView {
             input?.addEventListener("input", () => { const n = Number(input.value); if (n > 0)
                 this.store.wallOptions[option] = n; });
         }
+        const wallRef = this.fields["wall.reference"], wallOffset = this.fields["wall.offset"];
+        if (wallRef)
+            wallRef.value = this.store.wallOptions.reference;
+        wallRef?.addEventListener("change", () => { this.store.wallOptions.reference = wallRef.value; this.draw(); });
+        wallOffset?.addEventListener("input", () => { const n = Number(wallOffset.value); if (wallOffset.value !== "" && Number.isFinite(n)) {
+            this.store.wallOptions.offset = n;
+            this.draw();
+        } });
         const roof = this.store.roofOptions;
         const roofKind = this.fields["roof.kind"];
         roofKind?.addEventListener("change", () => { roof.kind = roofKind.value; });
@@ -707,7 +716,8 @@ export class ModelView {
             return;
         }
         const level = this.levelSelect.value;
-        const out = await this.store.run("model.add_wall", { start: [start[0] * f, start[1] * f], end: [p[0] * f, p[1] * f], level, height, thickness });
+        const out = await this.store.run("model.add_wall", { start: [start[0] * f, start[1] * f], end: [p[0] * f, p[1] * f], level, height, thickness,
+            reference: this.store.wallOptions.reference, reference_offset: this.store.wallOptions.offset });
         // Keep the chain going from the new end, as drawing tools do, unless it was ended (Esc, another tool) while the server was answering.
         if (out && this.wallStart === start)
             this.wallStart = p;
@@ -875,6 +885,13 @@ export class ModelView {
                 if (input && document.activeElement !== input && Number(input.value) !== this.store.wallOptions[option])
                     input.value = String(this.store.wallOptions[option]);
             }
+        if (tool === "wall") {
+            const ref = this.fields["wall.reference"], off = this.fields["wall.offset"];
+            if (ref && ref.value !== this.store.wallOptions.reference)
+                ref.value = this.store.wallOptions.reference;
+            if (off && document.activeElement !== off && Number(off.value) !== this.store.wallOptions.offset)
+                off.value = String(this.store.wallOptions.offset);
+        }
         if (tool === "roof")
             for (const [key, value] of [["roof.kind", this.store.roofOptions.kind], ["roof.pitch", this.store.roofOptions.pitch], ["roof.thickness", this.store.roofOptions.thickness]]) {
                 const input = this.fields[key];
@@ -901,6 +918,11 @@ export class ModelView {
         const pipe = this.drawables.find((d) => d.id === id && d.category === "downpipe");
         if (pipe) {
             this.syncDownpipeGrip(pipe);
+            return;
+        }
+        const opening = this.drawables.find((d) => d.id === id && (d.category === "door" || d.category === "window"));
+        if (opening) {
+            this.syncElevationGrip(opening);
             return;
         }
         const item = this.drawables.find((d) => d.id === id && ["wall", "floor", "roof"].includes(d.category));
@@ -955,6 +977,51 @@ export class ModelView {
     /** Direct downpipe-length edit: only the free bottom endpoint moves.
      *  Projected world Z supplies the drag axis; the gutter-attached top never
      *  changes. The guide is temporary and the backend validates the final mesh. */
+    /** A door's or window's elevation grip at the middle of its head: drag it up or down and the whole opening (frame, leaf and the cut in its wall) is
+     *  raised or lowered, its size untouched. The server refuses a head above the wall or a base below it. Shift snaps to 50 mm. */
+    syncElevationGrip(item) {
+        if (!item.verts.length)
+            return;
+        const z0 = Math.min(...item.verts.map(v => v[2])), z1 = Math.max(...item.verts.map(v => v[2]));
+        const cx = (Math.min(...item.verts.map(v => v[0])) + Math.max(...item.verts.map(v => v[0]))) / 2;
+        const cy = (Math.min(...item.verts.map(v => v[1])) + Math.max(...item.verts.map(v => v[1]))) / 2;
+        const base = this.project([cx, cy, z1]), unit = this.project([cx, cy, z1 + 1]);
+        if (!base || !unit || base[0] < 8 || base[1] < 8 || base[0] > this.width - 8 || base[1] > this.height - 8)
+            return;
+        const vertical = [unit[0] - base[0], unit[1] - base[1]];
+        const norm2 = vertical[0] ** 2 + vertical[1] ** 2;
+        if (norm2 < 1e-6)
+            return; // looking straight down: use Base Elevation in Properties
+        const grip = h("button", { class: "ridge-grip", type: "button", text: "◆", attrs: { "aria-label": "Raise or lower this opening", title: "Drag to raise or lower the opening (Shift: 50 mm steps)" } });
+        grip.style.left = `${base[0]}px`;
+        grip.style.top = `${base[1]}px`;
+        this.layerControls.append(grip);
+        let origin = null, dz = 0;
+        grip.addEventListener("pointerdown", e => { if (e.button !== 0)
+            return; e.preventDefault(); e.stopPropagation(); grip.setPointerCapture(e.pointerId); origin = [e.clientX, e.clientY]; dz = 0; });
+        grip.addEventListener("pointermove", e => {
+            if (!origin)
+                return;
+            const raw = ((e.clientX - origin[0]) * vertical[0] + (e.clientY - origin[1]) * vertical[1]) / norm2;
+            dz = Math.max(-z0 + 0, e.shiftKey ? Math.round(raw * 20) / 20 : raw); // never below the level the opening is measured from; the server checks the wall
+            grip.style.left = `${base[0] + dz * vertical[0]}px`;
+            grip.style.top = `${base[1] + dz * vertical[1]}px`;
+            grip.title = `${dz >= 0 ? "+" : ""}${(dz * 1000).toFixed(0)} mm — release to apply`;
+        });
+        grip.addEventListener("pointerup", e => {
+            if (!origin)
+                return;
+            origin = null;
+            grip.releasePointerCapture(e.pointerId);
+            if (Math.abs(dz) > 1e-4)
+                void this.store.run("model.move", { id: item.id, dx: 0, dy: 0, dz });
+            else {
+                grip.style.left = `${base[0]}px`;
+                grip.style.top = `${base[1]}px`;
+            }
+        });
+        grip.addEventListener("pointercancel", () => { origin = null; grip.style.left = `${base[0]}px`; grip.style.top = `${base[1]}px`; });
+    }
     syncDownpipeGrip(item) {
         if (!item.verts.length)
             return;
@@ -1132,6 +1199,18 @@ export class ModelView {
             if (this.wallStart && g) {
                 const s = this.project(this.wallStart);
                 if (s) {
+                    if (this.store.tool === "wall") { // the footprint the wall will have, beside the line that is drawn
+                        const wo = this.store.wallOptions, a = this.wallStart, b = this.ground, len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+                        const ux = -(b[1] - a[1]) / len, uy = (b[0] - a[0]) / len, half = wo.thickness / 2000, shift = wallCentreShift(wo.reference, wo.offset, wo.thickness) / 1000;
+                        const quad = [[a, 1], [b, 1], [b, -1], [a, -1]].map(([q, sgn]) => this.project([q[0] + ux * (shift + sgn * half), q[1] + uy * (shift + sgn * half), q[2]]));
+                        if (quad.every((q) => q)) {
+                            ctx.beginPath();
+                            quad.forEach((q, i) => (i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1])));
+                            ctx.closePath();
+                            ctx.fillStyle = withAlpha(select, 0.14);
+                            ctx.fill();
+                        }
+                    }
                     ctx.setLineDash([6, 4]);
                     ctx.beginPath();
                     ctx.moveTo(s[0], s[1]);
