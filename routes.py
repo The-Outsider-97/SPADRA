@@ -182,6 +182,17 @@ def foundation_report(app: SpadraApp, req: Request) -> Any:
         return app.require().foundation_report(body.get("id"))
 
 
+@router.route("POST", "/api/curtainwall/preview")
+def curtainwall_preview(app: SpadraApp, req: Request) -> Any:
+    with app.lock:
+        return app.require().preview_curtainwall(req.json())
+
+
+@router.route("GET", "/api/curtainwall/profiles")
+def curtainwall_profiles(app: SpadraApp, req: Request) -> Any:
+    return app.require().curtainwall_profiles()
+
+
 @router.route("POST", "/api/gutters/preview")
 def gutters_preview(app: SpadraApp, req: Request) -> Any:
     with app.lock:

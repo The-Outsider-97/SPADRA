@@ -37,6 +37,7 @@ SUGGESTED: dict[str, tuple[str, ...]] = {
     "downpipe": ("(52.12)", "(52.11)"),
     "structural": ("(28.1)", "(28.2)"),
     "stair": ("(24.1)",),
+    "curtainwall": ("(21.14)",),
     "foundation": ("(16.11)", "(16.12)", "(16.13)", "(13.2)"),
 }
 

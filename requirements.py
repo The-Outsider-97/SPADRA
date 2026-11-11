@@ -485,7 +485,7 @@ def _r_official_dup(c: Context) -> str | None:
 BASELINE: list[dict[str, Any]] = [
     {"id": "ILS-3.6-SFB", "title": "NL-SfB classification, table 1, four-digit notation", "chapter": "3-6-classification-system", "strength": "directive",
      "text": "Classify the object with the most appropriate NL-SfB (table 1) code, in the 4-digit notation without brackets. The page does not say which IFC property carries it.",
-     "applies": lambda c: c.category in {"wall", "floor", "roof", "door", "window", "structural", "stair", "foundation"}, "check": _r_sfb},
+     "applies": lambda c: c.category in {"wall", "floor", "roof", "door", "window", "structural", "stair", "foundation", "curtainwall"}, "check": _r_sfb},
     {"id": "ILS-3.7-OFFICIAL", "title": "Official properties belong in the official set", "chapter": "3-7-use-property-sets", "strength": "directive",
      "text": "Properties that buildingSMART assigns to a property set should also be found there; own properties go in an own set.",
      "applies": lambda c: bool(BD.sets_for(c.meta, "pset")), "check": _r_official_dup},

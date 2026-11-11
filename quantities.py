@@ -103,10 +103,15 @@ def _row(project: Any, oid: str, densities: Mapping[str, tuple[float, str]], mat
         row["notes"].append(f"centre: {exc}")
     from . import layers as LY
     stacked = LY.layer_volumes(project, oid) if LY.is_layered(meta) else []
-    layered = bool(stacked) or (row["category"] == "foundation" and bool(E.m(meta, "above") or E.m(meta, "below")))
+    layered = bool(stacked) or (row["category"] == "foundation" and bool(E.m(meta, "above") or E.m(meta, "below"))) or row["category"] == "curtainwall"
     if layered:                                                       # several materials in one element: the mass is the sum over its layers (see take_off)
         row["notes"].append("built up of layers of different materials: volumes and mass are given per material")
-        row["layers"] = [{"material": l["material"], "volume_m3": l["volume_m3"]} for l in stacked] if stacked else _layer_volumes(project, oid)
+        if row["category"] == "curtainwall":
+            from . import curtainwall as CW
+            row["notes"][-1] = "frame, glazing, panels and door leaves are different materials: volumes and mass are given per material"
+            row["layers"] = CW.material_volumes(project, oid)
+        else:
+            row["layers"] = [{"material": l["material"], "volume_m3": l["volume_m3"]} for l in stacked] if stacked else _layer_volumes(project, oid)
     elif material in densities:
         density, source = densities[material]
         row.update(density_kg_m3=density, density_source=source, mass_kg=volume * density)

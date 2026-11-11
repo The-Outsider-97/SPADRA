@@ -25,10 +25,12 @@ from . import classifications as CL
 
 NS = "spadra"
 MATERIALS = ("Concrete", "Timber", "Glass", "Masonry", "Steel", "Plasterboard")
-MATERIAL_COLORS = {"Reinforced concrete": "#8E939B", "Concrete": "#B8BABF", "Timber": "#B3804D", "Glass": "#8CBFE0", "Masonry": "#B86B57", "Steel": "#808FA3", "Plasterboard": "#EBE8E0"}
+MATERIAL_COLORS = {"Reinforced concrete": "#8E939B", "Concrete": "#B8BABF", "Timber": "#B3804D", "Glass": "#8CBFE0", "Masonry": "#B86B57", "Steel": "#808FA3", "Aluminium": "#B9C0C8", "Plasterboard": "#EBE8E0"}
 BEAM_MATERIALS = ("Steel", "Concrete", "Timber")
 CUT_HEIGHT = 1.5                      # default cut plane, relative to the associated level (metres)
 DOOR_LEAF = 0.05                      # thickness of the drawn door leaf, m
+MIN_OPENING_ANGLE, MAX_OPENING_ANGLE = 5.0, 170.0     # degrees: how far a hinged leaf is drawn open in plan (a leaf folded flat against the wall is not a swing)
+DEFAULT_OPENING_ANGLE = 90.0
 GLASS = 0.03                          # thickness of the drawn glazing panel, m
 ROOF_TYPES = {"flat": "Flat Roof", "shed": "Shed Roof", "gable": "Gable Roof", "hip": "Hip Roof"}      # the four everyday roofs; each can be changed to another later
 OPENINGS = ("door", "window")
@@ -38,7 +40,7 @@ SLIDE_DIRECTIONS = ("left", "right", "both")      # as seen from the face the le
 SLIDE_GAP = 0.02                                   # m: between a sliding leaf and the wall face, and between two rails
 RAIL = 0.04                                        # m: the drawn track above a surface-mounted sliding door
 WINDOW_OPERATIONS = ("fixed", "casement")        # a casement has one sash hinged at one jamb; a fixed window does not open
-SPECIAL = ("wall", "door", "window", "roof_window", "opening_profile", "floor", "roof", "structural", "room", "stair", "generic", "extrusion", "void", "sweep", "gutter", "downpipe", "foundation")
+SPECIAL = ("wall", "door", "window", "roof_window", "opening_profile", "floor", "roof", "structural", "room", "stair", "generic", "extrusion", "void", "sweep", "gutter", "downpipe", "foundation", "curtainwall")
 FORMS = ("extrusion", "void", "sweep")                     # solids made from a profile (see forms.py)
 FLOOR_TYPES = ("Generic Floor", "Structural Slab")
 IDENTITY = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
@@ -391,15 +393,30 @@ def opening_span(meta: Mapping[str, Any]) -> tuple[float, float, float, float]:
     return centre - width / 2, centre + width / 2, sill, sill + height
 
 
-def depth_shift(meta: Mapping[str, Any], wall_thickness: float, component: float) -> float:
+def frame_depth_offset(meta: Mapping[str, Any]) -> float:
+    """The frame's own offset across the wall (m, + toward the far face). A door or window saved before frame and leaf were separate has only the single
+    ``depth_offset``, which moved both: it is what each falls back to, so an older project looks exactly as it did."""
+    v = m(meta, "frame_depth_offset")
+    return float(m(meta, "depth_offset", 0.0) if v is None else v)
+
+
+def leaf_depth_offset(meta: Mapping[str, Any]) -> float:
+    """The leaf's own offset across the wall (m, + toward the far face); falls back to the legacy ``depth_offset`` like ``frame_depth_offset``."""
+    v = m(meta, "leaf_depth_offset")
+    return float(m(meta, "depth_offset", 0.0) if v is None else v)
+
+
+def depth_shift(meta: Mapping[str, Any], wall_thickness: float, component: float, which: str = "leaf") -> float:
     """Where the middle of a door or window component ``component`` thick sits across its wall, in metres from the wall's centre line.
 
     The wall's directed path (start to end) gives the sides: **near** is the right-hand face, **far** the left-hand face, and a positive value moves
     toward the far face. ``depth_ref`` picks what the offset is measured from: *near* puts the component's near face flush with the wall's near face,
-    *far* likewise, *centre* and *custom* start on the centre line; ``depth_offset`` is then added in every case."""
+    *far* likewise, *centre* and *custom* start on the centre line; the offset is then added in every case. The reference plane is the same for the
+    frame and the leaf, but each has its own offset: ``which`` is ``"frame"`` (``frame_depth_offset``) or ``"leaf"`` (``leaf_depth_offset``)."""
     room = max(0.0, wall_thickness / 2 - component / 2)
     ref = str(m(meta, "depth_ref", "centre"))
-    return {"near": -room, "far": room}.get(ref, 0.0) + float(m(meta, "depth_offset", 0.0))
+    offset = frame_depth_offset(meta) if which == "frame" else leaf_depth_offset(meta)
+    return {"near": -room, "far": room}.get(ref, 0.0) + offset
 
 
 def slide_toward(direction: str, face: int) -> str:
@@ -423,9 +440,57 @@ def _slide_y(meta: Mapping[str, Any], panel: Mapping[str, Any], wall_t: float, l
     return int(panel.get("swing", 1)) * (wall_t / 2 + SLIDE_GAP + leaf / 2 + layer * (leaf + SLIDE_GAP))
 
 
+def _profile_depth(profile: Mapping[str, Any], wall_t: float) -> float:
+    return wall_t if m(profile, "depth_mode", "host") == "host" else float(m(profile, "depth"))
+
+
 def _profile_shift(opening: Mapping[str, Any], profile: Mapping[str, Any], wall_t: float) -> float:
-    depth = wall_t if m(profile, "depth_mode", "host") == "host" else float(m(profile, "depth"))
-    return depth_shift(opening, wall_t, depth)
+    """Where the frame's middle stands across the wall: the depth reference, then the door's or window's *frame* depth offset."""
+    return depth_shift(opening, wall_t, _profile_depth(profile, wall_t), "frame")
+
+
+def _leaf_shift_in_frame(opening: Mapping[str, Any], profile: Mapping[str, Any], wall_t: float) -> float:
+    """Where the leaf's middle stands across the wall when it has a frame: centred in the frame's depth at the depth reference, then the *leaf* depth offset.
+    The frame's own offset does not enter, so the two move independently."""
+    return depth_shift(opening, wall_t, _profile_depth(profile, wall_t), "leaf")
+
+
+def leaf_layout(project: Any, oid: str, wall_t: float, meta: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """The one place that says where a door's or window's leaf is and how big it is, for the 3D solid, the plan symbol, the elevation symbol and the checks.
+
+    ``raw_x0 .. raw_x1`` is the nominal opening along the wall; ``x0 .. x1`` and ``z0 .. z1`` the effective leaf, which is the opening less the frame's face width
+    and the clearance when the opening has a frame; ``y_leaf`` and ``y_frame`` are where the leaf and the frame stand across the wall (m from the centre line,
+    + toward the far face; ``y_frame`` is None without a frame). The hinge axis is vertical at ``(hinge_x, y_hinge)``: on the hinge edge of the leaf, on the leaf's
+    face toward the side it swings to (``y_leaf + swing * thickness / 2``). That is where a real hinge pin is: the leaf turns away from the jamb instead of
+    scraping it, and the plan's arc starts at that point, on the leaf, not on the wall face."""
+    meta = meta if meta is not None else meta_of(project, oid)
+    door = m(meta, "category") == "door"
+    raw_x0, raw_x1, z0, z1 = opening_span(meta)
+    x0, x1 = raw_x0, raw_x1
+    profile = opening_profile(project, oid)
+    thickness = DOOR_LEAF if door else GLASS
+    y_leaf = depth_shift(meta, wall_t, thickness, "leaf")
+    y_frame = None
+    inset = clearance = 0.0
+    if profile:
+        pm = meta_of(project, profile)
+        inset, clearance = float(m(pm, "face_width")), float(m(pm, "clearance", 0.003))
+        x0, x1 = x0 + inset + clearance, x1 - inset - clearance
+        z0, z1 = z0 + (inset if not door else 0.0) + clearance, z1 - inset - clearance
+        y_leaf = _leaf_shift_in_frame(meta, pm, wall_t)
+        y_frame = _profile_shift(meta, pm, wall_t)
+    return {"raw_x0": raw_x0, "raw_x1": raw_x1, "x0": x0, "x1": x1, "z0": z0, "z1": z1, "y_leaf": y_leaf, "y_frame": y_frame, "frame": profile,
+            "frame_width": inset, "clearance": clearance, "thickness": thickness, "hinge_x": x0 if m(meta, "hinge", "start") == "start" else x1,
+            "y_hinge": y_leaf + int(m(meta, "swing", 1)) * thickness / 2}
+
+
+def map_span(lay: Mapping[str, Any], a: float, b: float) -> tuple[float, float]:
+    """A span along the wall inside the nominal opening (a panel's), fitted into the effective leaf span: the identity when there is no frame."""
+    raw = lay["raw_x1"] - lay["raw_x0"]
+    if raw <= 1e-12:
+        return a, b
+    k = (lay["x1"] - lay["x0"]) / raw
+    return lay["x0"] + (a - lay["raw_x0"]) * k, lay["x0"] + (b - lay["raw_x0"]) * k
 
 
 WALL_REFS = ("near", "centre", "far")
@@ -573,6 +638,9 @@ def flip_wall(project: Any, oid: str) -> None:
         h = meta_of(project, hid)
         values: dict[str, Any] = {"offset": length - float(m(h, "offset")), "depth_offset": -float(m(h, "depth_offset", 0.0)),
                                   "depth_ref": swap[str(m(h, "depth_ref", "centre"))]}
+        for key in ("frame_depth_offset", "leaf_depth_offset"):                      # near and far swap, so every across-the-wall offset changes sign
+            if m(h, key) is not None:
+                values[key] = -float(m(h, key))
         if m(h, "category") == "door":
             values["hinge"] = "end" if m(h, "hinge", "start") == "start" else "start"
             values["swing"] = -int(m(h, "swing", 1))
@@ -714,28 +782,18 @@ def _build_wall(project: Any, oid: str, table: Mapping[str, _WallRow]) -> None:
 
 
 def _place_opening(project: Any, oid: str, frame: Mapping[str, Any]) -> None:
-    """Position a door or window's own solid inside its opening. The object's origin is its hinge: a vertical axis at the hinge edge (for a door, on
-    the wall face the plan's swing arc is drawn from; for a window, on the wall's centre line), so an animated turn swings the leaf about its hinge,
-    as the plan shows, and not about its own centre. The leaf itself sits in the opening, across the wall where ``depth_shift`` puts it (on the centre
-    line unless the door was given a depth reference or offset; where its frame is, when it has one). A sliding door's leaves stand in their closed
-    position, on their own plane (in front of the wall face, or in the wall's pocket), with the track above them when it is surface-mounted."""
+    """Position a door or window's own solid inside its opening. The object's origin is its hinge: the vertical axis at the hinge edge of the leaf, on its face
+    toward the swing side, wherever the leaf stands across the wall (``leaf_layout``). An animated turn therefore swings the leaf about its real
+    hinge, as the plan's swing arc does, and not about the wall face or its own centre. The leaf sits where the depth reference and the *leaf* depth offset put it
+    (centred in its frame's depth when it has one); the frame has its own offset. A sliding door's leaves stand in their closed position, on their own plane (in
+    front of the wall face, or in the wall's pocket), with the track above them when it is surface-mounted."""
     meta = project.model.get(oid)["metadata"]
-    x0, x1, z0, z1 = opening_span(meta)
     door = m(meta, "category") == "door"
     thickness = DOOR_LEAF if door else GLASS
-    raw_x0, raw_x1 = x0, x1
-    profile = opening_profile(project, oid)
-    yd = depth_shift(meta, frame["thickness"], thickness)
-    if profile:
-        pm = meta_of(project, profile)
-        inset, clearance = float(m(pm, "face_width")), float(m(pm, "clearance", 0.003))
-        x0, x1 = x0 + inset + clearance, x1 - inset - clearance
-        z0, z1 = z0 + (inset if not door else 0.0) + clearance, z1 - inset - clearance
-        yd = _profile_shift(meta, pm, frame["thickness"])                           # the leaf stays in its frame
-        if x1 - x0 < MIN_PANEL or z1 - z0 < MIN_PANEL:
-            raise BadRequest("The opening profile leaves insufficient clear space for the panel", hint="Reduce the profile face width or enlarge the rough opening")
-    hinge_x = x0 if m(meta, "hinge", "start") == "start" else x1
-    face = int(m(meta, "swing", 1)) * frame["thickness"] / 2 if door else 0.0
+    lay = leaf_layout(project, oid, frame["thickness"], meta)
+    raw_x0, raw_x1, x0, x1, z0, z1, yd, hinge_x, yh = (lay[k] for k in ("raw_x0", "raw_x1", "x0", "x1", "z0", "z1", "y_leaf", "hinge_x", "y_hinge"))
+    if lay["frame"] and (x1 - x0 < MIN_PANEL or z1 - z0 < MIN_PANEL):
+        raise BadRequest("The opening profile leaves insufficient clear space for the panel", hint="Reduce the profile face width or enlarge the rough opening")
     c, s = math.cos(frame["angle"]), math.sin(frame["angle"])
     if has_panels(meta):                                                          # one leaf per panel, side by side, each its own closed shell; the origin is the door's start edge
         verts: list[list[float]] = []
@@ -761,8 +819,8 @@ def _place_opening(project: Any, oid: str, frame: Mapping[str, Any]) -> None:
         _set_mesh(project, oid, (verts, faces), _rot(frame["angle"], frame["start"][0] + c * x0, frame["start"][1] + s * x0, frame["base"] + (z0 + z1) / 2))
         _attach(project, oid, {"level": m(frame["meta"], "level")})
         return
-    project.model.set_geometry(oid, {"kind": "box", "center": [(x0 + x1) / 2 - hinge_x, yd - face, 0.0], "size": [x1 - x0, thickness, z1 - z0]})
-    project.model.set_transform(oid, _rot(frame["angle"], frame["start"][0] + c * hinge_x - s * face, frame["start"][1] + s * hinge_x + c * face, frame["base"] + (z0 + z1) / 2))
+    project.model.set_geometry(oid, {"kind": "box", "center": [(x0 + x1) / 2 - hinge_x, yd - yh, 0.0], "size": [x1 - x0, thickness, z1 - z0]})
+    project.model.set_transform(oid, _rot(frame["angle"], frame["start"][0] + c * hinge_x - s * yh, frame["start"][1] + s * hinge_x + c * yh, frame["base"] + (z0 + z1) / 2))
     _attach(project, oid, {"level": m(frame["meta"], "level")})
 
 
@@ -1103,6 +1161,11 @@ def add_opening(project: Any, kind: str, p: Mapping[str, Any], to_m: float) -> s
     values["hinge"] = _choice(p.get("hinge", "start"), ("start", "end"), "hinge")
     values["depth_ref"] = _choice(p.get("depth_ref", "centre"), DEPTH_REFS, "depth reference")
     values["depth_offset"] = number(p.get("depth_offset", 0), "depth offset", -5000, 5000) / 1000.0
+    for key, label in (("frame_depth_offset", "frame depth offset"), ("leaf_depth_offset", "leaf depth offset")):      # independent of each other; absent = follow ``depth_offset``
+        if p.get(key) is not None:
+            values[key] = number(p[key], label, -5000, 5000) / 1000.0
+    if kind == "door" and p.get("opening_angle") is not None:
+        values["opening_angle"] = number(p["opening_angle"], "opening angle", MIN_OPENING_ANGLE, MAX_OPENING_ANGLE)
     if kind == "window":
         values["operation"] = _choice(p.get("operation", "fixed"), WINDOW_OPERATIONS, "operation")
     values["swing"] = 1 if _choice(p.get("swing", "left"), ("left", "right"), "swing") == "left" else -1      # which side of the wall the leaf opens to
@@ -1166,11 +1229,8 @@ def make_hinged(project: Any, oid: str) -> None:
 
 
 def opening_depth_y(project: Any, oid: str, meta: Mapping[str, Any], wall_t: float) -> float:
-    """Across-the-wall position of a door's or window's own leaf (its profile's, when it has a frame), m from the wall's centre line."""
-    profile = opening_profile(project, oid)
-    if profile:
-        return _profile_shift(meta, meta_of(project, profile), wall_t)
-    return depth_shift(meta, wall_t, DOOR_LEAF if m(meta, "category") == "door" else GLASS)
+    """Across-the-wall position of a door's or window's own leaf, m from the wall's centre line (``leaf_layout``'s ``y_leaf``)."""
+    return leaf_layout(project, oid, wall_t, meta)["y_leaf"]
 
 
 # ------------------------------------------------------------------------------------------------------------------------ floors
@@ -2189,7 +2249,8 @@ def regenerate_roof_accessory(project: Any, oid: str) -> None:
             raise BadRequest("The roof edge reference is no longer valid")
         _set_mesh(project, oid, _roof_edge_mesh(project, roof, edge, float(m(meta, "width")), float(m(meta, "depth")), float(m(meta, "vertical_offset", 0.0)),
                                                 float(m(meta, "lateral_offset", 0.0))))
-        start, end = boundary[edge], boundary[(edge + 1) % len(boundary)]
+        placed = effective_boundary(project, roof)                                    # where the eave really ends: the member's plan line must lie on its roof end, as its solid does
+        start, end = placed[edge], placed[(edge + 1) % len(placed)]
         vx, vy = end[0] - start[0], end[1] - start[1]
         at = float(m(meta, "lateral_offset", 0.0)) / math.hypot(vx, vy)
         moved = ((start[0] + vy * at, start[1] - vx * at), (end[0] + vy * at, end[1] - vx * at))
@@ -2360,6 +2421,9 @@ def regenerate(project: Any, oid: str) -> None:
     elif cat == "foundation":
         from . import foundations as FD
         FD.regenerate(project, oid)
+    elif cat == "curtainwall":
+        from . import curtainwall as CW
+        CW.regenerate(project, oid)
     elif cat == "room":
         from . import rooms as R
         R.check_boundary(meta)
@@ -2381,7 +2445,7 @@ def regenerate_all(project: Any) -> None:
         if m(project.model.get(oid)["metadata"], "category") == "wall":
             regenerate_wall(project, oid)
     for oid in ids:
-        if m(project.model.get(oid)["metadata"], "category") in ("floor", "roof", "structural", "stair", "generic", "gutter", "downpipe", "foundation", *FORMS):
+        if m(project.model.get(oid)["metadata"], "category") in ("floor", "roof", "structural", "stair", "generic", "gutter", "downpipe", "foundation", "curtainwall", *FORMS):
             regenerate(project, oid)
 
 
@@ -2554,8 +2618,12 @@ def set_property(project: Any, oid: str, key: str, value: Any) -> None:
             values["offset"] = number(value, "offset", 0, 100000)
         elif key == "depth_ref":
             values["depth_ref"] = _choice(value, DEPTH_REFS, "depth reference")
-        elif key == "depth_offset":
-            values["depth_offset"] = _mm(value, "depth offset", -5000, 5000)
+        elif key == "depth_offset":                                                # the older, single offset: it moves the frame and the leaf together
+            values["depth_offset"] = values["frame_depth_offset"] = values["leaf_depth_offset"] = _mm(value, "depth offset", -5000, 5000)
+        elif key in ("frame_depth_offset", "leaf_depth_offset"):                   # each moves on its own, whatever the other is
+            values[key] = _mm(value, key.replace("_", " "), -5000, 5000)
+        elif key == "opening_angle" and cat == "door":
+            values["opening_angle"] = number(value, "opening angle", MIN_OPENING_ANGLE, MAX_OPENING_ANGLE)
         elif key == "door_type" and cat == "door":
             if _choice(value, ("hinged", "sliding"), "door type") == "sliding":
                 make_sliding(project, oid)
@@ -2704,6 +2772,12 @@ def set_property(project: Any, oid: str, key: str, value: Any) -> None:
     elif cat == "foundation":
         from . import foundations as FD
         values.update(FD.set_property(project, oid, meta, key, value))
+    elif cat == "curtainwall":
+        from . import curtainwall as CW
+        values.update(CW.set_property(project, oid, meta, key, value))
+        if not values:                                                              # a member, panel or spacing edit already wrote its own parameters
+            regenerate(project, oid)
+            return
     elif cat == "array":
         from . import arrays as AY
         AY.set_property(project, oid, key, value)
@@ -2801,6 +2875,9 @@ def move(project: Any, oid: str, dx: float, dy: float, dz: float) -> None:
     elif cat == "foundation":
         from . import foundations as FD
         FD.move(project, oid, meta, dx, dy, dz)
+    elif cat == "curtainwall":
+        from . import curtainwall as CW
+        CW.move(project, oid, meta, dx, dy, dz)
     elif cat == "grid":
         s, e = m(meta, "start"), m(meta, "end")
         _attach(project, oid, {"start": [s[0] + dx, s[1] + dy], "end": [e[0] + dx, e[1] + dy]})
@@ -2869,6 +2946,9 @@ def rotate(project: Any, oid: str, angle: float, centre: tuple[float, float], re
     elif cat == "foundation":
         from . import foundations as FD
         FD.rotate(project, oid, meta, angle, centre)
+    elif cat == "curtainwall":
+        from . import curtainwall as CW
+        CW.rotate(project, oid, meta, angle, centre)
     else:
         raise BadRequest(f"A {cat} cannot be rotated in plan")
     if rebuild and cat != "grid":
@@ -3145,6 +3225,11 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
         elif cat == "foundation":
             from . import foundations as FD
             out.append(FD.plan_item(project, oid, f))
+        elif cat == "curtainwall":
+            from . import curtainwall as CW
+            item = CW.plan_item(project, oid, f, cut_z, show_hatching, show_opening)
+            if item:
+                out.append(item)
         elif cat == "structural" and is_column(meta):
             x, y = m(meta, "point")
             ang = float(m(meta, "rotation", 0.0))
@@ -3203,7 +3288,8 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
         cut = sill <= wall_cuts[m(meta, "host")] < head
         item: dict[str, Any] = {"id": oid, "category": cat, "name": obj["name"], "polygon": _rect(fr["start"], fr["angle"], x0, x1, fr["thickness"] / 2, f),
                                 "cut": cut, "overhead": not cut and fr["base"] + sill >= cut_z}
-        item["symbol"] = _symbol(cat, meta, fr, x0, x1, f, show_opening=show_opening and cut, yd=opening_depth_y(project, oid, meta, fr["thickness"]), shapes=cut)
+        lay = leaf_layout(project, oid, fr["thickness"], meta)
+        item["symbol"] = _symbol(cat, meta, fr, lay["x0"], lay["x1"], f, show_opening=show_opening and cut, yd=lay["y_leaf"], shapes=cut, lay=lay)
         out.append(item)
     return out
 
@@ -3222,29 +3308,38 @@ def opens(meta: Mapping[str, Any]) -> bool:
     return cat == "window" and m(meta, "operation", "fixed") == "casement"
 
 
-def _leaf_symbol(cat: str, fr: Mapping[str, Any], f: float, x0: float, x1: float, swing: int, hinge_side: str, yd: float = 0.0) -> dict[str, Any]:
-    """One leaf's swing in plan: the hinge, the open leaf's end, and the arc between the open and the closed leaf (angles counter-clockwise). ``poly`` is the
-    open leaf itself, as the thin rectangle it is (the leaf's thickness is drawn, not just its centre line). A leaf moved across the wall by ``yd`` swings about
-    that same offset."""
+def _leaf_symbol(cat: str, fr: Mapping[str, Any], f: float, x0: float, x1: float, swing: int, hinge_side: str, yd: float = 0.0,
+                 degrees: float = DEFAULT_OPENING_ANGLE) -> dict[str, Any]:
+    """One leaf's swing in plan: the hinge, the open leaf's end, and the arc between the closed leaf and the leaf opened by ``degrees`` (angles counter-clockwise).
+    ``x0 .. x1`` is the *effective* leaf (the opening less its frame, ``leaf_layout``), so the radius is the real leaf width; ``yd`` is where the leaf stands across the
+    wall. The hinge is the leaf's own hinge axis, ``(hinge edge, yd + swing * thickness / 2)``, which is where the 3D object's origin is: the arc starts at the leaf, not at the wall face.
+    ``poly`` is the open leaf as the thin rectangle it is: its thickness is drawn, turned about the hinge exactly as the 3D leaf turns."""
     c, s = math.cos(fr["angle"]), math.sin(fr["angle"])
     at = lambda x, y: ((fr["start"][0] + c * x - s * y) * f, (fr["start"][1] + s * x + c * y) * f)       # noqa: E731
-    face = (swing * fr["thickness"] / 2 if cat == "door" else 0.0) + yd                                  # a sash hangs on the wall's centre line
     hinge_x, free_x = (x0, x1) if hinge_side == "start" else (x1, x0)
-    hinge, jamb = at(hinge_x, face), at(free_x, face)
-    leaf_end = at(hinge_x, face + swing * (x1 - x0))
-    radius = (x1 - x0) * f
+    width = x1 - x0
+    along = 1.0 if hinge_side == "start" else -1.0                                # the closed leaf runs from its hinge toward +x (start hinge) or -x (end hinge)
+    a = math.radians(degrees)
+    open_dx, open_dy = along * math.cos(a), swing * math.sin(a)                   # the open leaf's direction in the wall's own frame
+    th = DOOR_LEAF if cat == "door" else GLASS
+    yh = yd + swing * th / 2                                                      # the hinge pin: on the leaf's swing-side face, as in 3D (leaf_layout)
+    hinge, jamb = at(hinge_x, yh), at(free_x, yh)
+    leaf_end = at(hinge_x + width * open_dx, yh + width * open_dy)
+    radius = width * f
     a_leaf = math.atan2(leaf_end[1] - hinge[1], leaf_end[0] - hinge[0])
     a_jamb = math.atan2(jamb[1] - hinge[1], jamb[0] - hinge[0])
-    start, end = (a_leaf, a_jamb) if G.cross((math.cos(a_leaf), math.sin(a_leaf)), (math.cos(a_jamb), math.sin(a_jamb))) > 0 else (a_jamb, a_leaf)
+    start, end = (a_jamb, a_leaf) if G.cross((math.cos(a_jamb), math.sin(a_jamb)), (math.cos(a_leaf), math.sin(a_leaf))) > 0 else (a_leaf, a_jamb)
     while end <= start:
         end += 2 * math.pi
-    inward = 1.0 if hinge_side == "start" else -1.0
-    th = DOOR_LEAF if cat == "door" else GLASS
-    poly = [list(hinge), list(leaf_end), list(at(hinge_x + inward * th, face + swing * (x1 - x0))), list(at(hinge_x + inward * th, face))]
-    return {"hinge": list(hinge), "leaf_end": list(leaf_end), "radius": radius, "start_angle": start, "end_angle": end, "poly": poly}
+    turn = a if along * swing > 0 else -a                                         # the leaf's thickness lies on the far side of the hinge face from the swing, and turns with it
+    t0x, t0y = 0.0, -swing * th
+    tx, ty = t0x * math.cos(turn) - t0y * math.sin(turn), t0x * math.sin(turn) + t0y * math.cos(turn)
+    ex, ey = hinge_x + width * open_dx, yh + width * open_dy
+    poly = [list(at(hinge_x, yh)), list(at(ex, ey)), list(at(ex + tx, ey + ty)), list(at(hinge_x + tx, yh + ty))]
+    return {"hinge": list(hinge), "leaf_end": list(leaf_end), "radius": radius, "start_angle": start, "end_angle": end, "poly": poly, "opening_angle": degrees}
 
 
-def _slide_shapes(meta: Mapping[str, Any], fr: Mapping[str, Any], f: float, yd: float) -> list[dict[str, Any]]:
+def _slide_shapes(meta: Mapping[str, Any], fr: Mapping[str, Any], f: float, yd: float, lay: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
     """The plan notation of a door's leaves: each leaf as the thin rectangle it is in its closed position; a sliding leaf also dashed where it stands when
     the door is open, its track (dash-dot, a dashed cavity for a pocket door) and an arrow that points the way it slides.
 
@@ -3257,6 +3352,8 @@ def _slide_shapes(meta: Mapping[str, Any], fr: Mapping[str, Any], f: float, yd: 
     out: list[dict[str, Any]] = []
     sl = sliding_of(meta)
     for q, px0, px1 in panel_spans(meta):
+        if lay is not None:
+            px0, px1 = map_span(lay, px0, px1)                                     # the leaf is what the frame leaves of the opening, in 2D as in 3D
         sliding = q["operation"] == "slide"
         y = _slide_y(meta, q, t, th) if sliding else yd
         out.append({"t": "poly", "p": rect(px0, px1, y), "dash": False, "role": "leaf"})
@@ -3281,27 +3378,32 @@ def _slide_shapes(meta: Mapping[str, Any], fr: Mapping[str, Any], f: float, yd: 
 
 
 def _symbol(cat: str, meta: Mapping[str, Any], fr: Mapping[str, Any], x0: float, x1: float, f: float, *, show_opening: bool = True, yd: float = 0.0,
-            shapes: bool = True) -> dict[str, Any]:
+            shapes: bool = True, lay: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """The plan symbol of a door or window. The swing arc and open leaf are the opening direction: ``show_opening=False`` leaves them out.
     A door of several panels draws each swinging panel's own leaf: the first in the symbol itself, the others in ``more``. ``shapes`` lists the door's
     leaves drawn as what they are (closed leaf rectangles, an open sliding leaf dashed, a track and an arrow): they come from the door object itself,
-    one drawing for every view that shows it; ``yd`` is where the leaf stands across the wall."""
+    one drawing for every view that shows it; ``yd`` is where the leaf stands across the wall, and ``x0 .. x1`` the effective leaf (``lay``, from
+    ``leaf_layout``, also maps a panelled door's spans into it). ``leaf`` reports the leaf's width and where the leaf and the frame stand across the wall."""
     c, s = math.cos(fr["angle"]), math.sin(fr["angle"])
     at = lambda x, y: ((fr["start"][0] + c * x - s * y) * f, (fr["start"][1] + s * x + c * y) * f)       # noqa: E731
     out: dict[str, Any] = {"kind": cat}
+    if lay is not None:
+        out["leaf"] = {"width": (x1 - x0) * f, "y": yd * f, "frame_y": None if lay["y_frame"] is None else lay["y_frame"] * f}
     if cat == "window":
         out.update({"a": list(at(x0, yd)), "b": list(at(x1, yd))})
     if cat == "door" and shapes:
-        out["shapes"] = _slide_shapes(meta, fr, f, yd)
+        out["shapes"] = _slide_shapes(meta, fr, f, yd, lay)
     if not show_opening or not opens(meta):
         return out
+    degrees = float(m(meta, "opening_angle", DEFAULT_OPENING_ANGLE))
     if cat == "door" and has_panels(meta):
-        leaves = [_leaf_symbol(cat, fr, f, px0, px1, q["swing"], q["hinge"], yd) for q, px0, px1 in panel_spans(meta) if q["operation"] == "swing"]
+        leaves = [_leaf_symbol(cat, fr, f, *(map_span(lay, px0, px1) if lay is not None else (px0, px1)), q["swing"], q["hinge"], yd, degrees)
+                  for q, px0, px1 in panel_spans(meta) if q["operation"] == "swing"]
         out.update(leaves[0])
         if len(leaves) > 1:
             out["more"] = leaves[1:]
         return out
-    out.update(_leaf_symbol(cat, fr, f, x0, x1, int(m(meta, "swing", 1)), str(m(meta, "hinge", "start")), yd))
+    out.update(_leaf_symbol(cat, fr, f, x0, x1, int(m(meta, "swing", 1)), str(m(meta, "hinge", "start")), yd, degrees))
     return out
 
 
@@ -3328,11 +3430,12 @@ def elevation_symbol(project: Any, oid: str, look: tuple[float, float]) -> dict[
     if not opens(meta) or not alive(project, m(meta, "host", "")):
         return None
     fr = wall_frame(project, m(meta, "host"))
-    x0, x1, sill, head = opening_span(meta)
+    lay = leaf_layout(project, oid, fr["thickness"], meta)                         # the leaf the frame leaves, as in 3D and in plan
+    x0, x1, sill, head = lay["x0"], lay["x1"], lay["z0"], lay["z1"]
     kind = str(m(meta, "category"))
     if has_panels(meta):
         found = [sym for q, px0, px1 in panel_spans(meta) if q["operation"] == "swing"
-                 if (sym := _elevation_leaf(fr, look, px0, px1, sill, head, q["swing"], q["hinge"], kind)) is not None]
+                 if (sym := _elevation_leaf(fr, look, *map_span(lay, px0, px1), sill, head, q["swing"], q["hinge"], kind)) is not None]
         if not found:
             return None
         return {**found[0], **({"more": found[1:]} if len(found) > 1 else {})}
@@ -3507,7 +3610,7 @@ def _properties(project: Any, oid: str) -> dict[str, Any]:
     name_row = {"key": "name", "label": "Name", "type": "text", "value": obj["name"]}
     mm = lambda v: f"{v * 1000:,.0f} mm"                                                    # noqa: E731
     volume = volume_row(project, oid) if cat not in ("room", "void") else {}                # a room has no solid; a void's volume is not a quantity
-    if cat in ("stair", "generic", "grid", "gutter", "downpipe", "foundation", "array", *FORMS):
+    if cat in ("stair", "generic", "grid", "gutter", "downpipe", "foundation", "curtainwall", "array", *FORMS):
         if cat == "array":
             from . import arrays as AY
             return AY.properties(project, oid, out)
@@ -3517,6 +3620,10 @@ def _properties(project: Any, oid: str) -> dict[str, Any]:
         elif cat == "foundation":
             from . import foundations as FD
             FD.properties(project, oid, out, volume)
+        elif cat == "curtainwall":
+            from . import curtainwall as CW
+            CW.properties(project, oid, out, volume)
+            return out
         elif cat in FORMS:
             from . import forms as FX
             FX.properties(project, oid, out, {} if cat == "void" else volume)
@@ -3606,7 +3713,8 @@ def _properties(project: Any, oid: str) -> dict[str, Any]:
                      {"key": "depth_ref", "label": "Depth reference", "type": "choice", "value": m(meta, "depth_ref", "centre"),
                       "choices": [{"value": "centre", "label": "Centre line"}, {"value": "near", "label": "Near face (right of the wall's path)"},
                                   {"value": "far", "label": "Far face (left of the wall's path)"}, {"value": "custom", "label": "Custom offset from the centre line"}]},
-                     {"key": "depth_offset", "label": "Depth offset (+ toward far face)", "type": "number", "unit": "mm", "value": round(float(m(meta, "depth_offset", 0.0)) * 1000, 6)},
+                     {"key": "frame_depth_offset", "label": "Frame depth offset (+ toward far face)", "type": "number", "unit": "mm", "value": round(frame_depth_offset(meta) * 1000, 6)},
+                     {"key": "leaf_depth_offset", "label": "Leaf depth offset (+ toward far face)", "type": "number", "unit": "mm", "value": round(leaf_depth_offset(meta) * 1000, 6)},
                      {"label": "Area", "type": "readonly", "value": f"{w * h:.3f} m²"}]
         if cat == "door":
             sl = sliding_of(meta)
@@ -3621,6 +3729,8 @@ def _properties(project: Any, oid: str) -> dict[str, Any]:
         placement.append({"key": "hinge", "label": "Hinge", "type": "choice", "value": m(meta, "hinge", "start"), "choices": _choices(("start", "end"))})
         if opens(meta):
             placement += [{"key": "swing", "label": "Swing side", "type": "choice", "value": "left" if int(m(meta, "swing", 1)) > 0 else "right", "choices": _choices(("left", "right"))}]
+            if cat == "door":
+                placement += [{"key": "opening_angle", "label": "Opening angle (plan)", "type": "number", "unit": "°", "value": float(m(meta, "opening_angle", DEFAULT_OPENING_ANGLE))}]
         out["groups"] = [{"title": "Placement", "rows": placement}, {"title": "Identity", "rows": [name_row]}]
         return out
     if cat == "opening_profile":
@@ -3821,6 +3931,12 @@ def check(project: Any) -> list[dict[str, str]]:
                         out_by = abs(opening_depth_y(project, oid, meta, float(m(hm, "thickness")))) + th / 2 - float(m(hm, "thickness")) / 2
                         if out_by > 1e-6:
                             issues.append(issue("warning", oid, f"{label}: its leaf stands {out_by * 1000:.0f} mm outside the faces of its wall (depth offset)", "geometry"))
+                        lay = leaf_layout(project, oid, float(m(hm, "thickness")), meta)
+                        if lay["y_frame"] is not None:
+                            fdepth = _profile_depth(meta_of(project, lay["frame"]), float(m(hm, "thickness")))
+                            f_out = abs(lay["y_frame"]) + fdepth / 2 - float(m(hm, "thickness")) / 2
+                            if f_out > 1e-6:
+                                issues.append(issue("warning", oid, f"{label}: its frame stands {f_out * 1000:.0f} mm outside the faces of its wall (frame depth offset)", "geometry"))
         elif cat == "opening_profile":
             opening = str(m(meta, "opening", ""))
             if not alive(project, opening) or category(project, opening) not in OPENINGS:
@@ -3843,6 +3959,9 @@ def check(project: Any) -> list[dict[str, str]]:
         elif cat == "foundation":
             from . import foundations as FD
             issues.extend(FD.issues(project, oid, label, issue))
+        elif cat == "curtainwall":
+            from . import curtainwall as CW
+            issues.extend(CW.issues(project, oid, label, issue))
         elif cat == "stair":
             from . import stairs as SR
             if m(meta, "top_level") not in level_ids:

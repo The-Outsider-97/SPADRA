@@ -71,6 +71,7 @@ from . import scripting as SC
 from . import procedural as PG
 from . import stairs as SR
 from . import gutters as GU
+from . import curtainwall as CW
 from . import sheets as SH
 from . import checks as CK
 
@@ -85,9 +86,9 @@ _BACKUP_ID = re.compile(r"^\d{8}T\d{6}Z-r\d{1,9}(-\d{1,3})?$")
 NO_DRAWING = ("3d", "schedule")                 # view kinds that have no SDRW document of their own
 MAX_COORD = 1.0e9                              # drawing units; anything larger is a typo, not a building
 MAX_POINTS = 10_000
-CATEGORIES = ("Walls", "Doors", "Windows", "Roof windows", "Floors", "Roofs", "Gutters", "Downpipes", "Stairs", "Structural", "Rooms", "Grids", "Generic Models", "Extrusions", "Voids", "Sweeps", "Foundations", "Arrays")
+CATEGORIES = ("Walls", "Doors", "Windows", "Roof windows", "Floors", "Roofs", "Gutters", "Downpipes", "Stairs", "Structural", "Rooms", "Grids", "Generic Models", "Extrusions", "Voids", "Sweeps", "Foundations", "Curtain walls", "Arrays")
 CATEGORY_KEY = {"wall": "Walls", "door": "Doors", "window": "Windows", "roof_window": "Roof windows", "floor": "Floors", "roof": "Roofs", "gutter": "Gutters", "downpipe": "Downpipes", "stair": "Stairs", "structural": "Structural", "room": "Rooms",
-                "grid": "Grids", "generic": "Generic Models", "extrusion": "Extrusions", "void": "Voids", "sweep": "Sweeps", "foundation": "Foundations", "array": "Arrays"}
+                "grid": "Grids", "generic": "Generic Models", "extrusion": "Extrusions", "void": "Voids", "sweep": "Sweeps", "foundation": "Foundations", "curtainwall": "Curtain walls", "array": "Arrays"}
 
 
 def _finite(value: Any, label: str, limit: float = MAX_COORD) -> float:
@@ -672,6 +673,8 @@ class Project:
                             for n, lay in zip(counts, layers)] if len(counts) == len(layers) and sum(counts) == len(mesh["faces"]) else [])
             if category == "foundation":                                       # the concrete, each layer and the formwork in their own colours
                 layer_colors = FD.part_colors(self, meta, len(mesh["faces"]))
+            if category == "curtainwall":                                      # frame, glazing and door leaves, each in its own colour
+                layer_colors = CW.part_colors(self, meta, len(mesh["faces"]))
             ridge = E.roof_ridge(meta) if category == "roof" else None
             ridge_handle = None
             if ridge:
@@ -911,6 +914,15 @@ class Project:
     def preview_roof_end(self, params: Mapping[str, Any]) -> dict[str, Any]:
         """What ``model.set_roof_end`` would make for one eave: the cross-section, the numbers and the findings, without making it. Read-only."""
         return E.preview_roof_end(self, params)
+
+    def preview_curtainwall(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        """What ``model.add_curtainwall`` would make for the same parameters: member positions, bays and panel count. Read-only."""
+        return CW.preview(self, params, MM_PER[self.manifest["unit"]] / 1000.0)
+
+    @staticmethod
+    def curtainwall_profiles() -> dict[str, Any]:
+        """The Stabalux profile library with the catalogue page every size was read from. Read-only."""
+        return CW.library_listing()
 
     def preview_gutters(self, params: Mapping[str, Any]) -> dict[str, Any]:
         """What ``model.add_gutters`` would make for the same parameters, as plan outlines, without making it. Read-only."""
@@ -2185,6 +2197,42 @@ class _Commands:
         return {"ids": made, "gutters": [i for i in made if E.category(project, i) == "gutter"]}
 
     @staticmethod
+    @command(_model_target("Add curtain wall"))
+    def model__add_curtainwall(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """A curtain wall on the plan line ``start`` to ``end`` of ``level`` (``height``, ``base_offset`` mm). The field is divided by ``v_mode`` / ``h_mode``
+        (centre = hart-op-hart, max, min, count) with ``v_value`` / ``h_value`` (mm, or a number of members for count) and ``v_align`` / ``h_align``; the frame by
+        ``frame_material`` (Aluminium, Steel, Timber), ``frame_profile`` (a Stabalux library id, which fixes the width and depth), ``frame_width``, ``frame_depth``,
+        ``corner_radius`` (mm) and ``join`` (mullions, transoms, mitre); the panels by ``panel_type`` (Window, Opaque panel), ``panel_material``, ``panel_thickness`` and
+        ``panel_offset`` (mm). ``door_type`` (Single Flush Door, Double Door, Sliding Door), ``door_hinge`` and ``door_swing`` are what a field turned into a door starts with."""
+        oid = CW.add_curtainwall(project, p, MM_PER[project.manifest["unit"]] / 1000.0)
+        return {"id": oid}
+
+    @staticmethod
+    @command(_model_target("Edit curtain wall members"))
+    def model__curtainwall_line(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Remove, restore or add one member of a curtain wall: ``id``, ``direction`` (v mullions, h transoms), ``action`` (remove, restore, add) and the member's
+        ``index`` (as listed in its Properties) or, for add, ``at`` mm from the wall's start (v) or base (h)."""
+        oid = text(p.get("id"), "id", 80)
+        if not E.alive(project, oid) or E.category(project, oid) != "curtainwall":
+            raise NotFound(f"Curtain wall {oid} does not exist")
+        CW.line_edit(project, oid, str(p.get("direction")), str(p.get("action")), index=p.get("index"), at=p.get("at"))
+        E.regenerate(project, oid)
+        return {"id": oid}
+
+    @staticmethod
+    @command(_model_target("Edit curtain wall panel"))
+    def model__curtainwall_panel(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Change one field of a curtain wall: ``id``, ``col`` and ``row`` (0-based, row 0 at the bottom), then ``field`` (type, material, thickness, offset, door_type,
+        hinge, swing, slide, opening_angle, or reset) and its ``value``. A field becomes a door with ``field`` type and ``value`` Door."""
+        oid = text(p.get("id"), "id", 80)
+        if not E.alive(project, oid) or E.category(project, oid) != "curtainwall":
+            raise NotFound(f"Curtain wall {oid} does not exist")
+        key, field = CW._cell_key(project, oid, f"panel:{int(p.get('col', -1))}:{int(p.get('row', -1))}:{p.get('field')}")
+        CW.set_panel_field(project, oid, key, field, p.get("value"))
+        E.regenerate(project, oid)
+        return {"id": oid}
+
+    @staticmethod
     @command(_model_target("Add foundation"))
     def model__add_foundation(project: Project, p: dict[str, Any]) -> dict[str, Any]:
         """A foundation of ``kind``: poer (pad: ``point`` or a column in ``support``; ``width``, ``length``, ``height`` mm; ``shape`` rect or round), strook (strip:
@@ -2623,7 +2671,7 @@ class _Commands:
         against the other elements at its height first (an overlap of ``tolerance_mm``, 5 by default, is not counted). Refused if it would hit something before
         ``degrees`` unless ``allow_obstructed`` is true."""
         oid = project._animatable(p.get("id"))
-        plan = DS.plan(project, oid, p.get("degrees", 90.0), tolerance_mm=p.get("tolerance_mm", DS.PENETRATION * 1000))
+        plan = DS.plan(project, oid, p.get("degrees"), tolerance_mm=p.get("tolerance_mm", DS.PENETRATION * 1000))
         if plan["obstructions"] and not p.get("allow_obstructed"):
             raise Conflict(f"The door would hit {', '.join(plan['obstructions'])} after opening {abs(plan['clear_to_degrees']):g} of {plan['requested_degrees']:g} degrees",
                            hint="Ask for a smaller angle, move the obstruction, or pass allow_obstructed to animate it anyway")

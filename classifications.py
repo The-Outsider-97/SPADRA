@@ -47,6 +47,7 @@ OMNICLASS_TABLES = {
 FIELDS = frozenset({"assembly_code", "ifc_type", "ifc_predefined_type"} |
                    {"omniclass_" + str(t) for t in OMNICLASS_TABLES})
 IFC_SUGGEST = {
+    "curtainwall": ("IfcCurtainWallType",),
     "wall": ("IfcWallType", "IfcCurtainWallType"),
     "door": ("IfcDoorType",),
     "window": ("IfcWindowType",),

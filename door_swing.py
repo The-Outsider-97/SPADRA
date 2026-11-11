@@ -1,6 +1,7 @@
 """Hinged-door swing: a door's opening motion worked out from the door itself (its hinge side, swing side and leaf), with a swept-leaf clearance check.
 
-A door's object origin is its hinge axis (see ``elements._place_opening``), so a turn about that origin is the leaf swinging on its hinge. This module only
+A door's object origin is its hinge axis, in the middle of the leaf's thickness on its hinge edge wherever the leaf stands across the wall (see ``elements.leaf_layout`` and
+``_place_opening``), so a turn about that origin is the leaf swinging on its hinge, and the plan's swing arc starts at the same point. This module only
 decides *which way and how far*: the sign of the turn comes from the hinge edge and the swing side, and the clearance check sweeps the leaf's plan footprint
 through the angle against the bounding boxes of the other elements at the same height. The motion itself is written by the ordinary ``spin`` animation preset
 (two keys, undoable, evaluated by SGEO); nothing here animates.
@@ -22,7 +23,7 @@ MAX_DEGREES = 180.0
 STEP_DEGREES = 1.0
 Z_TOLERANCE = 0.002                        # m: floors under the leaf and lintels above it touch it without being in its way
 PENETRATION = 0.005                        # m: the leaf must enter another element by more than this to count, as in the model's own clash check (checks.PENETRATION);
-#                                            the door sits on the wall centre line but hinges on the wall face, so its corner passes a jamb by a few millimetres
+#                                            the leaf's corner passes a jamb or a frame by a few millimetres as it turns about its hinge
 
 
 def turn_sign(hinge: str, swing: int) -> int:
@@ -119,11 +120,13 @@ def _box_xy(tris: Any) -> tuple[list[tuple[float, float]], float, float]:
     return [(min(xs), min(ys)), (max(xs), min(ys)), (max(xs), max(ys)), (min(xs), max(ys))], min(zs), max(zs)
 
 
-def plan(project: Any, door_id: str, degrees: Any = 90.0, *, check: bool = True, tolerance_mm: Any = PENETRATION * 1000) -> dict[str, Any]:
+def plan(project: Any, door_id: str, degrees: Any = None, *, check: bool = True, tolerance_mm: Any = PENETRATION * 1000) -> dict[str, Any]:
     """What a swing of ``degrees`` would do for this door: the signed turn to key, and (with ``check``) how far the leaf can open before it enters something by more
     than ``tolerance_mm``. ``contacts_mm`` lists every element the leaf enters at all and how deep, so what was tolerated is visible."""
     if isinstance(tolerance_mm, bool) or not isinstance(tolerance_mm, (int, float)) or not math.isfinite(tolerance_mm) or not 0 <= tolerance_mm <= 50:
         raise BadRequest("tolerance_mm must be between 0 and 50")
+    if degrees is None:                                                  # no angle asked for: the door's own opening angle
+        degrees = float(E.m(E.meta_of(project, door_id), "opening_angle", E.DEFAULT_OPENING_ANGLE))
     if isinstance(degrees, bool) or not isinstance(degrees, (int, float)) or not math.isfinite(degrees) or not 0 < degrees <= MAX_DEGREES:
         raise BadRequest(f"The opening angle must be above 0 and at most {MAX_DEGREES:g} degrees")
     meta = E.meta_of(project, door_id)

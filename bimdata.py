@@ -33,7 +33,7 @@ from . import elements as E
 DATA = Path(__file__).with_name("data") / "ifc_psets.json"
 SCHEMA = "spadra.ifc_psets.v1"
 PSET_KEY, QTO_KEY, BSDD_KEY = "spadra:psets", "spadra:qto", "spadra:bsdd"
-ENTITY = {"wall": "IfcWall", "floor": "IfcSlab", "roof": "IfcRoof", "door": "IfcDoor", "window": "IfcWindow", "room": "IfcSpace", "stair": "IfcStair",
+ENTITY = {"curtainwall": "IfcCurtainWall", "wall": "IfcWall", "floor": "IfcSlab", "roof": "IfcRoof", "door": "IfcDoor", "window": "IfcWindow", "room": "IfcSpace", "stair": "IfcStair",
           "generic": "IfcBuildingElementProxy"}
 MAX_TEXT = 255
 QTO_TOLERANCE = 1e-4                       # relative difference between an imported/overridden quantity and the calculated one that is reported

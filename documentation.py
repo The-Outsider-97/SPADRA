@@ -57,7 +57,7 @@ HATCH_PATTERNS: dict[str, dict[str, Any]] = {
 }
 DEFAULT_HATCH = {"Reinforced concrete": "cross-45", "Plywood": "lines-0", "Concrete": "lines-45", "Masonry": "lines-135", "Timber": "lines-0", "Steel": "solid", "Plasterboard": "none", "Glass": "none",
                  "EPS": "cross-45", "XPS": "cross-45", "PIR": "cross-45", "Mineral wool": "cross-45", "Foam glass": "cross-45",       # insulation
-                 "Sand": "dots", "Gravel": "dots", "Blinding concrete": "lines-45", "Screed": "none", "Floor finish": "none", "Damp-proof membrane": "solid"}
+                 "Aluminium": "lines-45", "Sand": "dots", "Gravel": "dots", "Blinding concrete": "lines-45", "Screed": "none", "Floor finish": "none", "Damp-proof membrane": "solid"}
 
 
 def hatch_pattern(project: Any, material: Any) -> dict[str, Any] | None:
@@ -403,10 +403,25 @@ def project_view(project: Any, view: Mapping[str, Any], f: float) -> dict[str, A
                                   for row in item["cut_layers"]]
             if show_hatching:
                 item["cut_hatches"] = [hatch_pattern(project, row["material"]) for row in item["cut_layers"]]
-        elif loops and show_hatching and category != "foundation":
+        elif loops and show_hatching and category not in ("foundation", "curtainwall"):
             item["cut_hatch"] = hatch_pattern(project, E.m(obj["metadata"], "material"))
         if category in E.OPENINGS and show_opening:
             item["opening"] = _opening_lines(project, oid, fr, f)                # None for a fixed window or a wall seen edge-on
+        if category == "curtainwall":
+            from . import curtainwall as CW
+            if fr.cut:                                                           # every member, panel and leaf is cut on its own, so each loop has its own material and hatch
+                cut_loops_, mats = [], []
+                for part in CW.cut_parts(project, oid):
+                    for loop in cut_loops(fr, part["verts"], part["faces"]):
+                        cut_loops_.append([[round(x * f, 4), round(y * f, 4)] for x, y in loop])
+                        mats.append(part["material"])
+                item["cut"] = cut_loops_
+                item["cut_materials"] = mats
+                if show_hatching:
+                    item["cut_hatches"] = [hatch_pattern(project, mat) for mat in mats]
+                item["cut_colors"] = [E.m(meta, "color") or palette.get(mat) for mat in mats]
+            if show_opening:
+                item["opening"] = _opening_lines(project, oid, fr, f)
         if category == "foundation" and loops and fr.cut:
             from . import foundations as FD
             item["cut_material"] = FD.loop_materials(project, obj["metadata"], loops)           # each layer of a build-up is hatched as its own material
@@ -437,7 +452,13 @@ def _opening_lines(project: Any, oid: str, fr: Frame, f: float) -> dict[str, Any
     """The opening-direction symbol of a door or window as two lines in the picture's (across, z), in the drawing's unit. Solid when the leaf
     opens toward the viewer, dashed when it opens away (``toward``). A symbol that the frame would cut (a section's limits) is left out
     whole, rather than drawn as half a symbol."""
-    sym = E.elevation_symbol(project, oid, (fr.fx, fr.fy))
+    if E.category(project, oid) == "curtainwall":                              # the door fields of a curtain wall: the same symbol, from the same leaf code
+        from . import curtainwall as CW
+        return _symbol_lines(CW.elevation_symbol(project, oid, (fr.fx, fr.fy)), fr, f)
+    return _symbol_lines(E.elevation_symbol(project, oid, (fr.fx, fr.fy)), fr, f)
+
+
+def _symbol_lines(sym: dict[str, Any] | None, fr: Frame, f: float) -> dict[str, Any] | None:
     if sym is None:
         return None
 
@@ -489,6 +510,7 @@ SCHEDULES: dict[str, dict[str, Any]] = {
     "stair": {"title": "Stair Schedule", "noun": "Stair"},
     "generic": {"title": "Generic Model Schedule", "noun": "Generic model"},
     "foundation": {"title": "Foundation Schedule", "noun": "Foundation"},
+    "curtainwall": {"title": "Curtain Wall Schedule", "noun": "Curtain wall"},
     "count": {"title": "Element Count", "noun": "Category", "summary": True},                       # one row per category, over the whole model
     "material": {"title": "Material Quantities", "noun": "Material", "summary": True},            # one row per material, from the quantity take-off
 }
@@ -539,6 +561,11 @@ COLUMNS: dict[str, list[dict[str, Any]]] = {
                    _col("concrete", "Concrete", "m³", total=True), _col("formwork", "Formwork (edges)", "m²", total=True), _col("layers", "Layers", text=True),
                    _col("r_value", "R (build-up)", "m²K/W"), _col("class", "Concrete class", text=True), _col("bars", "Bars (indicative)", total=True),
                    _col("steel_kg", "Steel (indicative)", "kg", total=True), _col("material", "Material", text=True)],
+    "curtainwall": [_col("no", "No.", text=True), _col("name", "Name", text=True), _col("level", "Level", text=True), _col("length", "Length", "m", total=True), _col("height", "Height", "m"),
+                    _col("gross", "Gross area", "m²", total=True), _col("mullions", "Mullions", total=True), _col("transoms", "Transoms", total=True), _col("panels", "Panels", total=True),
+                    _col("glazing", "Glazing", "m²", total=True), _col("opaque", "Opaque panels", "m²", total=True), _col("doors", "Doors", total=True), _col("frame_length", "Frame length", "m", total=True),
+                    _col("profile", "Profile", text=True), _col("frame_width", "Frame width", "mm"), _col("frame_depth", "Frame depth", "mm"), _col("frame_mass", "Frame mass (catalogue)", "kg", total=True),
+                    _col("join", "Join", text=True), _col("volume", "Volume", "m³", total=True), _col("material", "Frame material", text=True)],
     "count": [_col("category", "Category", text=True), _col("count", "Elements", total=True), _col("detail", "Counted as", text=True)],
     "material": [_col("material", "Material", text=True), _col("count", "Elements", total=True), _col("volume", "Volume", "m³", total=True),
                  _col("area", "Surface area", "m²", total=True), _col("mass", "Mass", "kg", total=True)],
@@ -552,7 +579,7 @@ for _category, _columns in COLUMNS.items():                                     
                          _col("ifc_predefined_type", "IFC PredefinedType", text=True),
                          _col("sfb", "NL-SfB", text=True)])
 COUNT_AS = {"wall": "Walls", "door": "Doors", "window": "Windows", "roof_window": "Roof windows", "floor": "Floors", "roof": "Roofs", "gutter": "Gutters", "downpipe": "Downpipes", "structural": "Columns and beams", "room": "Rooms",
-            "stair": "Stairs", "generic": "Generic models", "grid": "Grids", "foundation": "Foundations"}
+            "stair": "Stairs", "generic": "Generic models", "grid": "Grids", "foundation": "Foundations", "curtainwall": "Curtain walls"}
 
 
 def _r(value: float, digits: int = 3) -> float:
@@ -715,6 +742,17 @@ def schedule_data(project: Any, category: str) -> dict[str, Any]:
                 row["steel_kg"] = _r(rf["mass_kg"], 1)
             ctr = project.model.world_bounds(oid)
             order = (order[0], (ctr[0][0] + ctr[1][0]) / 2, (ctr[0][1] + ctr[1][1]) / 2)
+        elif category == "curtainwall":
+            from . import curtainwall as CW
+            q = CW.quantities(project, oid)
+            sp = CW.spec(meta)
+            row.update(length=_r(sp["length"]), height=_r(sp["height"]), gross=_r(q["gross_area"]), mullions=q["mullion_lines"],
+                       transoms=q["transom_lines"], panels=q["panel_count"], glazing=_r(q["glazing_area"]), opaque=_r(q["panel_area"]), doors=q["door_count"],
+                       frame_length=_r(q["frame_length"]), profile=(CW.profile(sp["frame_profile"])["name"] if sp["frame_profile"] else "Custom"), frame_width=_r(sp["frame_width"] * 1000, 1),
+                       frame_depth=_r(sp["frame_depth"] * 1000, 1), join=CW.JOIN_LABELS[sp["join"]], volume=volume, material=sp["frame_material"])
+            if q["frame_mass"] is not None:
+                row["frame_mass"] = _r(q["frame_mass"], 1)
+            order = (order[0], (sp["start"][0] + sp["end"][0]) / 2, (sp["start"][1] + sp["end"][1]) / 2)
         elif category == "generic":
             lo, hi = project.model.world_bounds(oid)
             from . import families as FM
@@ -734,7 +772,7 @@ def schedule_data(project: Any, category: str) -> dict[str, Any]:
             order = (order[0], (s[0] + e[0]) / 2, (s[1] + e[1]) / 2)
         rows.append({"_order": order, **row})
     rows.sort(key=lambda r: r["_order"])
-    prefix = {"door": "D", "window": "W", "roof_window": "RW", "wall": "WL", "floor": "F", "roof": "R", "gutter": "GT", "downpipe": "DP", "structural": "S", "room": "RM", "stair": "ST", "generic": "G", "foundation": "FD"}[category]
+    prefix = {"door": "D", "window": "W", "roof_window": "RW", "wall": "WL", "floor": "F", "roof": "R", "gutter": "GT", "downpipe": "DP", "structural": "S", "room": "RM", "stair": "ST", "generic": "G", "foundation": "FD", "curtainwall": "CW"}[category]
     for n, r in enumerate(rows, 1):
         r.pop("_order")
         r["no"] = f"{prefix}{n:02d}"
