@@ -9,7 +9,7 @@ import {
   type Camera, type Mat4, type Ray,
 } from "./math3d.js";
 import { cssColor, rgba, withAlpha } from "./palette.js";
-import { wallCentreShift } from "./geom2d.js";
+import { niceStep, snapToGrid, wallCentreShift } from "./geom2d.js";
 import { addLayerDialog } from "./dialogs.js";
 import type { Store } from "./store.js";
 import type { Pt3, Scene } from "./types.js";
@@ -51,6 +51,7 @@ export class ModelView {
   private meshProgram: WebGLProgram | null = null;
   private lineProgram: WebGLProgram | null = null;
   private gridBuffer: WebGLBuffer | null = null;
+  private axisBuffer: WebGLBuffer | null = null;                       // the world X and Y axes on the ground: two lines, X then Y
   private gridCount = 0;
   private drawables: Drawable[] = [];
   private bounds: [Pt3, Pt3] | null = null;
@@ -173,6 +174,7 @@ export class ModelView {
       in vec3 a_pos; uniform mat4 u_vp; void main() { gl_Position = u_vp * vec4(a_pos, 1.0); }`, `#version 300 es
       precision highp float; uniform vec4 u_color; out vec4 o; void main() { o = u_color; }`);
     this.gridBuffer = gl.createBuffer();
+    this.axisBuffer = gl.createBuffer();
     gl.enable(gl.DEPTH_TEST);
     gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(1, 1);          // so edges drawn on the faces are not eaten by them
   }
@@ -229,13 +231,20 @@ export class ModelView {
     if (!gl || !this.gridBuffer) return;
     const [lo, hi] = this.bounds ?? [[-10, -10, 0], [10, 10, 0]];
     const span = Math.max(hi[0] - lo[0], hi[1] - lo[1], 10);
-    const step = span > 80 ? 10 : span > 30 ? 5 : span > 12 ? 2 : 1;
-    const cx = Math.round((lo[0] + hi[0]) / 2 / step) * step, cy = Math.round((lo[1] + hi[1]) / 2 / step) * step;
-    const half = Math.ceil((span * 0.9) / step) * step;
+    let step = span > 80 ? 10 : span > 30 ? 5 : span > 12 ? 2 : 1;
+    const fixed = this.store.gridSpacingMm === null ? null : this.store.gridSpacingMm / 1000;     // a fixed spacing: lines at 1, 2, 5, 10... times it, never finer than the view can show
+    if (fixed) step = fixed * (step / fixed > 1 ? niceStep(step / fixed) : 1);
+    const cx = Math.round((lo[0] + hi[0]) / 2 / step), cy = Math.round((lo[1] + hi[1]) / 2 / step);       // in whole steps, so every line is a multiple of the step from the world origin
+    const n = Math.min(400, Math.ceil((span * 0.9) / step));
     const pts: number[] = [];
-    for (let v = -half; v <= half; v += step) { pts.push(cx + v, cy - half, 0, cx + v, cy + half, 0, cx - half, cy + v, 0, cx + half, cy + v, 0); }
+    for (let i = -n; i <= n; i++) {
+      const x = (cx + i) * step, y = (cy + i) * step, x0 = (cx - n) * step, x1 = (cx + n) * step, y0 = (cy - n) * step, y1 = (cy + n) * step;
+      pts.push(x, y0, 0, x, y1, 0, x0, y, 0, x1, y, 0);
+    }
     this.gridCount = pts.length / 3;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.gridBuffer); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(pts), gl.STATIC_DRAW);
+    const reach = Math.max(Math.abs(cx) + n, Math.abs(cy) + n, 10) * step;                          // the axes run through the origin as far as the grid reaches from it
+    if (this.axisBuffer) { gl.bindBuffer(gl.ARRAY_BUFFER, this.axisBuffer); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-reach, 0, 0, reach, 0, 0, 0, -reach, 0, 0, reach, 0]), gl.STATIC_DRAW); }
   }
 
   // ------------------------------------------------------------------------------------------------------------ camera
@@ -567,13 +576,15 @@ export class ModelView {
   // ---------------------------------------------------------------------------------------------------------------- walls
   private levelElevation(): number { return this.store.levels.find((l) => l.id === this.levelSelect.value)?.elevation ?? 0; }
 
-  /** The ground point under the pointer on the active level, snapped to a vertex of the model when one is near, else (when grid snap is on) to a 0.1 m grid. */
+  /** The ground point under the pointer on the active level, snapped to a vertex of the model when one is near, else (when grid snap is on) to the grid spacing (100 mm unless fixed). */
   private groundPoint(x: number, y: number, ortho: boolean): Pt3 | null {
     const ray = this.rayAt(x, y);
     const z = this.levelElevation();
     const hit = ray ? rayPlaneZ(ray, z) : null;
     if (!hit || !this.matrices) return null;
-    let point: Pt3 = this.store.snapGrid ? [Math.round(hit[0] * 10) / 10, Math.round(hit[1] * 10) / 10, z] : [hit[0], hit[1], z];
+    const step = (this.store.gridSpacingMm ?? 100) / 1000;                                         // metres: the status bar's fixed spacing, else the 100 mm ground grid
+    const onGrid = snapToGrid([hit[0], hit[1]], step);
+    let point: Pt3 = this.store.snapGrid ? [onGrid[0], onGrid[1], z] : [hit[0], hit[1], z];
     let best = 12;
     for (const d of this.drawables) for (const v of d.verts) {
       if (Math.abs(v[2] - z) > 0.01) continue;
@@ -905,7 +916,14 @@ export class ModelView {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.gridBuffer);
     gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
     gl.uniform4f(uColor, gridColor[0], gridColor[1], gridColor[2], 1);
-    gl.drawArrays(gl.LINES, 0, this.gridCount);
+    if (this.store.showGrid) gl.drawArrays(gl.LINES, 0, this.gridCount);                            // a hidden grid keeps its axes
+    if (this.axisBuffer) {                                                                          // the world axes on the ground: X (y = 0) red, Y (x = 0) green
+      const ax = this.parseColor(this.css("--axis-x", "#d9483b")), ay = this.parseColor(this.css("--axis-y", "#3aa655"));
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.axisBuffer);
+      gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
+      gl.uniform4f(uColor, ax[0], ax[1], ax[2], 1); gl.drawArrays(gl.LINES, 0, 2);
+      gl.uniform4f(uColor, ay[0], ay[1], ay[2], 1); gl.drawArrays(gl.LINES, 2, 2);
+    }
 
     const mesh = this.meshProgram; gl.useProgram(mesh);
     gl.uniformMatrix4fv(gl.getUniformLocation(mesh, "u_vp"), false, vp);

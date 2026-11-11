@@ -4,7 +4,7 @@ import { openDialog, openMenu, promptDialog, toast } from "../../../tools/web/sr
 import { h } from "../../../tools/web/src/dom.js";
 import { Emitter } from "../../../tools/web/src/util.js";
 import { oneLine, present, presentUnexpected } from "./errors.js";
-import { closedPolylinePoints } from "./geom2d.js";
+import { closedPolylinePoints, UNIT_MM } from "./geom2d.js";
 import { importDialog } from "./interchange.js";
 const formatOf = (ref) => (ref.kind === "3d" ? "SGEO" : ref.kind === "schedule" ? "Schedule" : "SDRW");
 /** A true/false setting kept in this browser only (a convenience for this person; the project does not depend on it). */
@@ -23,6 +23,26 @@ function writeFlag(key, value) {
     }
     catch { /* storage unavailable (private window): the setting lasts for this page only */ }
 }
+/** A number setting kept in this browser only; null when it was never set or storage is unavailable. */
+function readNumber(key) {
+    try {
+        const v = window.localStorage.getItem(key);
+        const n = v === null ? NaN : Number(v);
+        return Number.isFinite(n) && n > 0 ? n : null;
+    }
+    catch {
+        return null;
+    }
+}
+function writeNumber(key, value) {
+    try {
+        if (value === null)
+            window.localStorage.removeItem(key);
+        else
+            window.localStorage.setItem(key, String(value));
+    }
+    catch { /* storage unavailable: the setting lasts for this page only */ }
+}
 export class Store {
     api = createClient({ slug: "spadra" });
     changed = new Emitter();
@@ -39,6 +59,9 @@ export class Store {
     tool = "select";
     /** Whether the pointer snaps to the grid in the 2D and 3D views. Snapping to geometry (ends, midpoints, intersections) is separate and always on. */
     snapGrid = readFlag("spadra.snapGrid", true);
+    showGrid = readFlag("spadra.showGrid", true);
+    /** A fixed grid spacing in millimetres (the same for every 2D and 3D view and every drawing unit), or null for automatic: the 2D grid then follows the zoom. */
+    gridSpacingMm = readNumber("spadra.gridSpacingMm");
     /** Whether the 3D view orbits about the selected element (otherwise about the point it looks at). */
     orbitSelection = readFlag("spadra.orbitSelection", true);
     /** What the next wall will be: height in metres, thickness in millimetres, and which line the drawn path is: the wall's near face (the right-hand one looking along
@@ -510,7 +533,16 @@ export class Store {
     }
     cancelPendingOpeningSketch() { this.pendingOpeningSketch = null; }
     setOrbitSelection(on) { this.orbitSelection = on; writeFlag("spadra.orbitSelection", on); this.changed.emit(); }
+    setShowGrid(on) { this.showGrid = on; writeFlag("spadra.showGrid", on); this.changed.emit(); }
     setSnapGrid(on) { this.snapGrid = on; writeFlag("spadra.snapGrid", on); this.changed.emit(); }
+    /** Fix the grid spacing (millimetres, 0.001 to 1,000,000) or give null to let it follow the zoom. */
+    setGridSpacingMm(mm) {
+        this.gridSpacingMm = mm !== null && Number.isFinite(mm) && mm >= 0.001 && mm <= 1e6 ? mm : null;
+        writeNumber("spadra.gridSpacingMm", this.gridSpacingMm);
+        this.changed.emit();
+    }
+    /** The fixed grid spacing in the open project's drawing unit, or null when automatic. */
+    gridSpacing() { return this.gridSpacingMm === null ? null : this.gridSpacingMm / (UNIT_MM[this.unit] ?? 1); }
     async select(selection) {
         this.selection = selection;
         await this.loadProperties();

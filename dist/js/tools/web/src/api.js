@@ -44,10 +44,14 @@ export function createClient(options) {
     const base = options.base ?? "/api";
     const marker = markerHeader(options.slug);
     const fail = (error) => { options.onError?.(error); throw error; };
-    async function request(method, path, body, query) {
+    async function request(method, path, body, query, raw) {
         const headers = { Accept: "application/json", [marker]: "1" };
         const init = { method, headers, credentials: "same-origin", cache: "no-store" };
-        if (body !== undefined) {
+        if (raw) {
+            headers["Content-Type"] = raw.type;
+            init.body = raw.body;
+        }
+        else if (body !== undefined) {
             headers["Content-Type"] = "application/json";
             init.body = JSON.stringify(body);
         }
@@ -58,8 +62,8 @@ export function createClient(options) {
             return fail(new ApiError(0, "offline", "Can't reach the local server.", "Check that the application is still running, then try again.", String(cause)));
         }
     }
-    async function json(method, path, body, query) {
-        const response = await request(method, path, body, query);
+    async function json(method, path, body, query, raw) {
+        const response = await request(method, path, body, query, raw);
         let parsed = null;
         try {
             parsed = (await response.json());
@@ -78,8 +82,9 @@ export function createClient(options) {
         put: (path, body) => json("PUT", path, body ?? {}),
         patch: (path, body) => json("PATCH", path, body ?? {}),
         del: (path) => json("DELETE", path),
-        async download(path, query) {
-            const response = await request("GET", path, undefined, query);
+        upload: (path, body, contentType = "application/octet-stream") => json("POST", path, undefined, undefined, { body, type: contentType }),
+        async download(path, query, body) {
+            const response = await request(body === undefined ? "GET" : "POST", path, body, query);
             if (!response.ok) {
                 let parsed = null;
                 try {

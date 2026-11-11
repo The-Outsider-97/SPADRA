@@ -262,7 +262,7 @@ export class SheetView {
     if (vp.solid) this.solidFaces(g, vp.solid);
     const outline = (w: { polygon: Pt[] }): string => `M${w.polygon.map((p) => `${p[0]} ${p[1]}`).join("L")}Z`;
     const stroke = { stroke: "var(--ink)", "stroke-width": 1, "vector-effect": "non-scaling-stroke", "stroke-linejoin": "round" };
-    for (const cat of ["foundation", "floor", "roof", "room", "generic", "stair", "wall", "structural", "window", "door", "column", "gutter", "downpipe", "grid"]) {
+    for (const cat of ["foundation", "floor", "roof", "room", "generic", "stair", "wall", "curtainwall", "structural", "window", "door", "column", "gutter", "downpipe", "grid"]) {
       for (const w of (vp.model ?? []).filter((m) => m.category === cat)) {
         if (cat === "room" || cat === "generic" || cat === "column" || cat === "stair" || cat === "grid" || cat === "gutter" || cat === "downpipe") this.otherItem(g, w, 1 / k);
         else if (cat === "foundation") g.appendChild(s("path", { attrs: { d: outline(w), fill: "var(--ink)", "fill-opacity": 0.06, "stroke-dasharray": "5 2 1 2", ...stroke, "stroke-width": 0.5 } }));
@@ -274,6 +274,20 @@ export class SheetView {
             g.appendChild(s("path", { attrs: { d: outline({ polygon: poly }), fill: "none", ...stroke, "stroke-width": 0.5 } }));
             const bd = band.hatch ? patternPath([poly], band.hatch, band.hatch.spacing_mm / k) : "";
             if (bd) g.appendChild(s("path", { attrs: { d: bd, fill: "none", "stroke-width": 0.3, stroke: "var(--ink)", "vector-effect": "non-scaling-stroke" } }));
+          }
+        }
+        else if (cat === "curtainwall") {                                                     // every member, panel and leaf cut at the plane, hatched by its own material; door symbols on top
+          if (!w.cut_polygons?.length) g.appendChild(s("path", { attrs: { d: outline(w), fill: "none", ...stroke, "stroke-width": 0.5, "stroke-dasharray": "6 3" } }));
+          (w.cut_polygons ?? []).forEach((loop, n) => {
+            const glass = w.cut_materials?.[n] === "Glass", hatch = w.cut_hatches?.[n] ?? null;
+            g.appendChild(s("path", { attrs: { d: outline({ polygon: loop }), fill: glass ? "var(--paper)" : "var(--ink)", "fill-opacity": glass ? 1 : hatchFill(hatch) * 0.3, ...stroke, "stroke-width": glass ? 0.4 : 0.6 }, data: { cut: w.id } }));
+            const bd = hatch ? patternPath([loop], hatch, hatch.spacing_mm / k) : "";
+            if (bd) g.appendChild(s("path", { attrs: { d: bd, fill: "none", "stroke-width": 0.3, stroke: "var(--ink)", "vector-effect": "non-scaling-stroke" } }));
+          });
+          for (const sym of w.symbols ?? []) {
+            const d = swingPath(sym);
+            if (d) g.appendChild(s("path", { attrs: { d, fill: "none", ...stroke, "stroke-width": 0.5 } }));
+            for (const sh of shapePaths(sym)) g.appendChild(s("path", { attrs: { d: sh.d, fill: "none", ...stroke, "stroke-width": 0.5, ...(sh.dash ? { "stroke-dasharray": sh.dash } : {}) } }));
           }
         }
         else if (cat === "floor" || cat === "roof") {
@@ -408,6 +422,15 @@ export class SheetView {
           g.appendChild(s("path", { attrs: { d, fill: it.cut_colors?.[n] || "var(--ink)", "fill-opacity": style.alpha, stroke: "none" }, data: { cut: it.id } }));
           if (style.hatch !== "none") g.appendChild(s("path", { attrs: { d: hatchPath(loop, style.hatch, 2.2 * unitsPerMm), fill: "none", "stroke-width": 0.35, ...ink } }));
           g.appendChild(s("path", { attrs: { d, fill: "none", "stroke-width": 0.9, ...ink } }));
+        });
+        continue;
+      }
+      if (it.cut_materials && it.cut_hatches) {                                   // a curtain wall: each member, panel and leaf is its own loop, hatched by its material
+        it.cut.forEach((loop, n) => {
+          const hatch = it.cut_hatches?.[n] ?? null, glass = it.cut_materials?.[n] === "Glass";
+          g.appendChild(s("path", { attrs: { d: cutPath({ ...it, cut: [loop] }, same), fill: it.cut_colors?.[n] || "var(--ink)", "fill-opacity": glass ? 0.06 : cutWeight(it.category) * hatchFill(hatch), "stroke-width": 0.7, ...ink }, data: { cut: it.id } }));
+          const d = hatch ? patternPath([loop], hatch, hatch.spacing_mm * unitsPerMm) : "";
+          if (d) g.appendChild(s("path", { attrs: { d, fill: "none", "stroke-width": 0.3, ...ink } }));
         });
         continue;
       }

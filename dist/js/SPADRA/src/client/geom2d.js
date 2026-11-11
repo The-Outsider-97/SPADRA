@@ -172,6 +172,50 @@ export function niceStep(minimum) {
             return base * m;
     return base * 10;
 }
+/** Strip the last binary-float digits: 3 * 0.1 is 0.30000000000000004, and a grid coordinate should be 0.3. Twelve significant digits is far below any drawing's precision. */
+export function cleanNumber(v) {
+    if (!Number.isFinite(v) || v === 0)
+        return 0;
+    return Number(v.toPrecision(12));
+}
+export function gridSpec(scale, user = null, minPx = 24, minSnapPx = 4) {
+    const s = scale > 0 && Number.isFinite(scale) ? scale : 1;
+    if (!user || !(user > 0) || !Number.isFinite(user)) {
+        const step = niceStep(minPx / s);
+        return { display: step, snap: step, major: cleanNumber(step * 5), auto: true, collapsed: false };
+    }
+    const need = minPx / (s * user);
+    const display = cleanNumber(user * (need > 1 ? niceStep(need) : 1));
+    const collapsed = user * s < minSnapPx;
+    return { display, snap: collapsed ? display : user, major: cleanNumber(display * 5), auto: false, collapsed };
+}
+/** The grid lines of one direction from `from` to `to`: index times step, never a running sum, so no error accumulates however far the view is panned. The line at zero is
+ *  the axis, every fifth is major. A range that would need more than `maxLines` lines gives none (the grid is finer than the screen can show). */
+export function gridLines(from, to, step, maxLines = 2000) {
+    if (!(step > 0) || !Number.isFinite(from) || !Number.isFinite(to) || to < from)
+        return [];
+    const first = Math.floor(from / step), last = Math.ceil(to / step);
+    if (last - first + 1 > maxLines)
+        return [];
+    const out = [];
+    for (let i = first; i <= last; i++)
+        out.push({ value: cleanNumber(i * step), kind: i === 0 ? "axis" : i % 5 === 0 ? "major" : "minor" });
+    return out;
+}
+/** The nearest grid intersection, computed as an integer multiple of the step so that 3 steps is exactly 0.3 and not 0.30000000000000004. */
+export function snapToGrid(p, step) {
+    if (!(step > 0) || !Number.isFinite(step))
+        return p;
+    return [cleanNumber(Math.round(p[0] / step) * step), cleanNumber(Math.round(p[1] / step) * step)];
+}
+/** Millimetres in one drawing unit. */
+export const UNIT_MM = { mm: 1, cm: 10, m: 1000 };
+/** "10.0 mm": a grid size as the status bar shows it, with at least one decimal and as many more (up to four) as the number needs. */
+export function formatGridSize(step, unit) {
+    const v = cleanNumber(step);
+    const decimals = Math.min(4, Math.max(1, (String(v).split(".")[1] ?? "").length));
+    return `${v.toFixed(decimals)} ${unit}`;
+}
 /** Keep the dominant axis of a drag (the Shift constraint while drawing). */
 export function orthoConstrain(from, to) {
     return Math.abs(to[0] - from[0]) >= Math.abs(to[1] - from[1]) ? [to[0], from[1]] : [from[0], to[1]];
@@ -261,7 +305,7 @@ export function snapPoint(p, entities, tolerance, gridStep, polygons = []) {
     if (best)
         return best;
     if (gridStep && gridStep > 0)
-        return { point: [Math.round(p[0] / gridStep) * gridStep, Math.round(p[1] / gridStep) * gridStep], kind: "grid" };
+        return { point: snapToGrid(p, gridStep), kind: "grid" };
     return { point: p, kind: "none" };
 }
 /** Fit a world box into a viewport: scale (pixels per unit) and the world point that sits at the viewport centre. */

@@ -8,19 +8,21 @@ import { beamAnalysisDialog } from "./engineering.js";
 import { AssistantPanel } from "./assistant.js";
 import { agentsDialog, calculatorDialog, optimizationDialog, simulationDialog } from "./agents_ui.js";
 import { quantitiesDialog } from "./quantities.js";
-import { opensShortcutList, shortcutsDialog, toolHotkey } from "./shortcuts.js";
+import { actionById, ChordReader, keymap, recordingKey, shortcutsDialog, tokenOf } from "./shortcuts.js";
 import { diagnosticsDialog, jobChip, jobsDialog } from "./jobs_ui.js";
 import { exportDialog, importDialog } from "./interchange.js";
 import { familiesDialog, issueDialog, levelsDialog, newReportDialog, reportDialog } from "./project_ui.js";
 import { optimizeDialog, scriptsDialog, stairDesignDialog } from "./parametric_ui.js";
 import { propertiesDialog, recoverDialog } from "./project_dialogs.js";
-import { appearanceDialog, arrayDialog, releaseArray, modifierDialog, ensureClean, newProjectDialog, openProjectDialog, reviewDialog } from "./dialogs.js";
+import { appearanceDialog, arrayDialog, releaseArray, modifierDialog, ensureClean, newProjectDialog, numberPrompt, openProjectDialog, reviewDialog } from "./dialogs.js";
 import { downpipeDialog, drainageDialog, gutterDialog, roofEndDialog } from "./gutters.js";
+import { curtainWallDialog } from "./curtainwall.js";
 import { foundationDialog, foundationReportDialog, reinforceDialog } from "./foundations.js";
 import { renderProperties } from "./properties.js";
 import { ScheduleView } from "./schedule.js";
 import { SheetView } from "./sheet.js";
 import { flatten, openable, store, type Tool } from "./store.js";
+import { formatGridSize, UNIT_MM } from "./geom2d.js";
 import { DrawingView } from "./view2d.js";
 import { ModelView } from "./view3d.js";
 import { Timeline } from "./timeline.js";
@@ -36,6 +38,8 @@ const nope = (id: string, label: string, icon: string, note?: string): ToolDef =
 
 export class Shell {
   private menu: MenuName = "Model";
+  private readonly chords = new ChordReader(keymap);
+  private chordTimer = 0;
   private readonly browser = new Browser(store);
   private readonly drawing = new DrawingView(store);
   private readonly model = new ModelView(store);
@@ -86,6 +90,7 @@ export class Shell {
   constructor() {
     this.area.append(this.drawing.el, this.model.el, this.sheet.el, this.schedule.el, this.empty);
     this.sheet.source = { camera: () => this.model.cameraDirection() };
+    this.drawing.onGrid = () => this.renderStatus();                                              // a zoom or a new spacing changes the size the status bar shows
     const stage = h("div", { class: "stage" }, this.tabs, this.area, this.timeline.el);
     const right = h("section", { class: "panel", attrs: { "aria-label": "Properties" } }, h("div", { class: "panel-head" }, h("span", { text: "Properties" })), this.props);
     const workspace = h("main", { class: "workspace" }, this.browser.el, stage, right);
@@ -164,7 +169,7 @@ export class Shell {
 
   private scheduleMenu(anchor: HTMLElement): void {
     const have = new Set(flatten(store.tree).filter((n) => n.view_kind === "schedule").map((n) => n.label));
-    const kinds: Array<[string, string]> = [["door", "Door Schedule"], ["window", "Window Schedule"], ["wall", "Wall Schedule"], ["floor", "Floor Schedule"], ["roof", "Roof Schedule"], ["gutter", "Gutter Schedule"], ["downpipe", "Downpipe Schedule"], ["foundation", "Foundation Schedule"], ["structural", "Beam & Column Schedule"], ["room", "Room Schedule"]];
+    const kinds: Array<[string, string]> = [["door", "Door Schedule"], ["window", "Window Schedule"], ["wall", "Wall Schedule"], ["curtainwall", "Curtain Wall Schedule"], ["floor", "Floor Schedule"], ["roof", "Roof Schedule"], ["gutter", "Gutter Schedule"], ["downpipe", "Downpipe Schedule"], ["foundation", "Foundation Schedule"], ["structural", "Beam & Column Schedule"], ["room", "Room Schedule"]];
     const entries: MenuEntry[] = kinds.filter(([, label]) => !have.has(label)).map(([category, label]) => ({ label, icon: "table", run: () => { void this.addView("view.add_schedule", { category }, "schedule"); } }));
     openMenu(anchor, entries.length ? entries : [{ label: "Every schedule already exists", disabled: true, run: () => undefined }], { label: "New schedule" });
   }
@@ -207,33 +212,70 @@ export class Shell {
 
   private async closeProject(): Promise<void> { if (await ensureClean(store)) await store.close(true); }
 
+  /** One key press: the keymap says which action it runs (a chord waits for its next key), and the action runs here. Typing in a field, recording a new
+   *  shortcut and keys a view already used (default prevented) are left alone; single keys also wait while a dialog is open or no project is. */
   private shortcut(e: KeyboardEvent): void {
-    const t = e.target;
     const field = (x: unknown): boolean => x instanceof HTMLInputElement || x instanceof HTMLSelectElement || x instanceof HTMLTextAreaElement;
-    if (opensShortcutList(e, field)) { e.preventDefault(); shortcutsDialog(); return; }
-    if (field(t)) return;
-    if (e.key === "F9" && !e.ctrlKey && !e.metaKey && !e.altKey && store.project) { e.preventDefault(); store.setSnapGrid(!store.snapGrid); return; }
-    if (!(e.ctrlKey || e.metaKey)) { this.plainKey(e); return; }
-    const k = e.key.toLowerCase();
-    if (k === "z" && !e.shiftKey) { e.preventDefault(); void store.undo(); }
-    else if ((k === "z" && e.shiftKey) || k === "y") { e.preventDefault(); void store.redo(); }
-    else if (k === "s") { e.preventDefault(); void (e.shiftKey ? this.saveAs() : this.save()); }
-  }
-
-  /** Single keys: a tool by letter, "/" for search, 2 and 3 for the view mode, F to fit. Nothing happens while a dialog is open or a modifier is held. */
-  private plainKey(e: KeyboardEvent): void {
-    if (e.altKey || e.defaultPrevented || document.querySelector("dialog[open]") || !store.project) return;
-    const tool = toolHotkey(e);
-    if (tool) {
-      // The tool may live on another tab (Grid is under Insert, Tag under Annotate): show that tab so the pressed tool is visible.
-      const home = ([this.menu, "Model", "Modifier", "Insert", "Annotate"] as const).find((m) => this.tools(m).flat().some((d) => d.tool === tool && d.implemented));
-      if (home) { e.preventDefault(); this.menu = home; store.setTool(tool); this.drawing.reset(); }
+    if (field(e.target) || recordingKey || e.defaultPrevented) return;
+    const token = tokenOf(e);
+    if (!token) return;
+    const step = this.chords.feed(token, performance.now());
+    window.clearTimeout(this.chordTimer);
+    if (step.kind === "none") return;
+    if (step.kind === "wait") {
+      e.preventDefault();
+      store.setStatus(`${step.typed.join(" ")} …`);
+      this.chordTimer = window.setTimeout(() => { this.chords.reset(); store.setStatus(""); }, 1500);
       return;
     }
-    if (e.key === "/") { e.preventDefault(); this.browser.focusSearch(); }
-    else if (e.key === "2") { e.preventDefault(); this.goto2D(); }
-    else if (e.key === "3") { e.preventDefault(); this.goto3D(); }
-    else if (e.key === "f" || e.key === "F") { const kind = store.tab?.ref.kind; if (kind === "3d" || kind === "drawing") { e.preventDefault(); if (kind === "3d") this.model.fit(); else this.drawing.fit(); } }
+    const def = actionById(step.action);
+    const dialog = !!document.querySelector("dialog[open]");
+    const modified = /(?:^|\s)(?:Ctrl|Alt)\+[^\s]+$/.test(token);
+    if (dialog && (!modified || step.action === "ui.shortcuts")) return;
+    if (!modified && !store.project && !def?.anywhere) return;
+    e.preventDefault();
+    void this.runAction(step.action);
+  }
+
+  /** Run one keymap action. An action that does not apply to the current view says so in the status line instead of failing silently. */
+  private async runAction(id: string): Promise<void> {
+    const kind = store.tab?.ref.kind;
+    const view = kind === "3d" ? "3d" : kind === "drawing" ? "2d" : null;
+    const need = (ok: boolean, what: string): boolean => { if (!ok) store.setStatus(`${what} is not available in this view.`); return ok; };
+    if (id.startsWith("tool.")) { this.pickTool(id.slice(5) as Tool); return; }
+    switch (id) {
+      case "file.save": if (store.project) await this.save(); break;
+      case "file.saveAs": if (store.project) await this.saveAs(); break;
+      case "file.open": await openProjectDialog(store); break;
+      case "edit.undo": await store.undo(); break;
+      case "edit.redo": await store.redo(); break;
+      case "ui.shortcuts": shortcutsDialog(keymap, () => this.render()); break;
+      case "ui.search": this.browser.focusSearch(); break;
+      case "view.to2d": this.goto2D(); break;
+      case "view.to3d": this.goto3D(); break;
+      case "view.snap": store.setSnapGrid(!store.snapGrid); break;
+      case "view.grid": store.setShowGrid(!store.showGrid); this.drawing.draw(); this.model.draw(); store.setStatus(`Grid ${store.showGrid ? "shown" : "hidden"}`); break;
+      case "view.fit": if (need(view !== null, "Zoom to fit")) { if (view === "3d") this.model.fit(); else this.drawing.fit(); } break;
+      case "view.zoomIn": if (need(view === "2d", "Zoom in")) this.drawing.zoom(1.5); break;
+      case "view.zoomOut": if (need(view === "2d", "Zoom out")) this.drawing.zoom(1 / 1.5); break;
+      case "view.home": if (need(view === "3d", "Home view")) this.model.home(); break;
+      case "view.projection": if (need(view === "3d", "Perspective / orthographic")) this.model.setOrtho(!this.model.cam.ortho); break;
+      default: break;
+    }
+  }
+
+  /** " (W)" or " (W, Ctrl+M)": the keys the keymap gives a ribbon button's action, for its tooltip. */
+  private keyHint(d: ToolDef): string {
+    const action = d.tool ? `tool.${d.tool}` : ({ undo: "edit.undo", redo: "edit.redo", fit: "view.fit", zin: "view.zoomIn", zout: "view.zoomOut", snap: "view.snap", showgrid: "view.grid", home: "view.home", proj: "view.projection" } as Record<string, string>)[d.id];
+    const keys = action ? keymap.bindings(action) : [];
+    return keys.length ? ` (${keys.map((k) => k.split(" ").join(" ")).join(", ")})` : "";
+  }
+
+  /** Select a tool by its key. The tool may live on another tab (Grid is under Insert, Tag under Annotate): show that tab so the pressed tool is visible. */
+  private pickTool(tool: Tool): void {
+    const home = ([this.menu, "Model", "Modifier", "Insert", "Annotate"] as const).find((m) => this.tools(m).flat().some((d) => d.tool === tool && d.implemented));
+    if (home) { this.menu = home; store.setTool(tool); this.drawing.reset(); return; }
+    store.setStatus(`${actionById(`tool.${tool}`)?.label ?? tool} is not available in this view.`);
   }
 
   private goto2D(): void {
@@ -259,7 +301,7 @@ export class Shell {
       { label: "Save As…", icon: "save", disabled: !has, run: () => { void this.saveAs(); } },
       { label: "Close project", icon: "close", disabled: !has, run: () => { void this.closeProject(); } },
       "separator",
-      { label: "Keyboard shortcuts…", icon: "info", run: () => shortcutsDialog() },
+      { label: "Keyboard shortcuts…", icon: "info", run: () => shortcutsDialog(keymap, () => this.render()) },
       { label: "Project properties…", icon: "info", disabled: !has, run: () => { void propertiesDialog(store, () => { void recoverDialog(store); }); } },
       { label: "Recover from a backup…", icon: "folder", disabled: !has, run: () => { void recoverDialog(store); } },
       "separator",
@@ -328,11 +370,13 @@ export class Shell {
         T("zin", "Zoom in", "zoomin", kind === "drawing", { run: () => this.drawing.zoom(1.5) }),
         T("zout", "Zoom out", "zoomout", kind === "drawing", { run: () => this.drawing.zoom(1 / 1.5) }),
         T("proj", this.model.cam.ortho ? "Perspective" : "Orthographic", "cube", kind === "3d", { run: () => this.model.setOrtho(!this.model.cam.ortho) }),
-        T("snap", store.snapGrid ? "Grid snap: on" : "Grid snap: off", "grid", kind === "3d" || kind === "drawing", { run: () => store.setSnapGrid(!store.snapGrid), note: "Snap the pointer to the grid (F9)" }),
+        T("snap", store.snapGrid ? "Grid snap: on" : "Grid snap: off", "grid", kind === "3d" || kind === "drawing", { run: () => store.setSnapGrid(!store.snapGrid), note: "Snap the pointer to the grid" }),
+        T("showgrid", store.showGrid ? "Grid: shown" : "Grid: hidden", "grid", kind === "3d" || kind === "drawing", { run: () => { store.setShowGrid(!store.showGrid); this.drawing.draw(); this.model.draw(); }, note: "Show or hide the grid lines (the axes stay)" }),
         T("theme", "Appearance", "palette", true, { run: () => appearanceDialog() }),
       ]];
       case "Insert": return [[T("wall", "Wall", "wall", on3dOrPlan, { tool: "wall" }), T("sheet", "New sheet", "page", !!store.project, { run: () => this.newSheet() }),
         T("door", "Door", "door", on3dOrPlan, { tool: "door" }), T("window", "Window", "window", on3dOrPlan, { tool: "window" }),
+        T("curtainwall", "Curtain wall", "curtainwall", on3dOrPlan, onPlan ? { tool: "curtainwall" } : { run: () => void curtainWallDialog(store), note: "Parametric mullion/transom framing with panels and doors" }),
         T("floor", "Floor", "floor", on3dOrPlan, { tool: "floor" }), T("roof", "Roof", "roof", on3dOrPlan, { tool: "roof" }),
           T("gutter", "Gutter", "gutter", !!store.project, { run: () => gutterDialog(store), note: "Select a roof, then hang gutters (and downpipes) on its eaves" }),
           T("downpipe", "Downpipe", "downpipe", !!store.project, { run: () => downpipeDialog(store), note: "Select a gutter, then add a downpipe under it" }),
@@ -423,7 +467,8 @@ export class Shell {
       default: break;
     }
     // Model: the tools of the active view, as in the design.
-    if (kind === "3d") return [[sel], [T("wall", "Wall", "wall", true, { tool: "wall" }), T("door", "Door", "door", true, { tool: "door" }), T("window", "Window", "window", true, { tool: "window" })],
+    if (kind === "3d") return [[sel], [T("wall", "Wall", "wall", true, { tool: "wall" }), T("door", "Door", "door", true, { tool: "door" }), T("window", "Window", "window", true, { tool: "window" }),
+        T("curtainwall", "Curtain wall", "curtainwall", true, { run: () => curtainWallDialog(store), note: "Parametric mullion/transom framing with panels and doors" })],
       [T("floor", "Floor", "floor", true, { tool: "floor" }), T("roof", "Roof", "roof", true, { tool: "roof" }),
         T("gutter", "Gutter", "gutter", true, { run: () => gutterDialog(store), note: "Select a roof, then hang gutters (and downpipes) on its eaves" }),
         T("downpipe", "Downpipe", "downpipe", true, { run: () => downpipeDialog(store), note: "Select a gutter, then add a downpipe under it" }),
@@ -453,6 +498,7 @@ export class Shell {
       [T("wall", "Wall", "wall", onPlan, { tool: "wall" }),
        T("door", "Door", "door", onPlan, { tool: "door" }),
        T("window", "Window", "window", onPlan, { tool: "window" }),
+       T("curtainwall", "Curtain wall", "curtainwall", onPlan, { tool: "curtainwall" }),
        T("floor", "Floor", "floor", onPlan, { tool: "floor" }),
        T("roof", "Roof", "roof", onPlan, { tool: "roof" })],
       [T("section", "Section", "section", onPlan, { tool: "section" }),
@@ -502,7 +548,7 @@ export class Shell {
       ...g.map((d) => {
       const pressed = d.tool !== undefined && store.tool === d.tool;
       return h("button", {
-        class: "tool", type: "button", disabled: !d.implemented, attrs: { "aria-pressed": d.tool ? String(pressed) : undefined, title: d.implemented ? d.note || d.label : `${d.label}: ${d.note ?? NOT_YET}` },
+        class: "tool", type: "button", disabled: !d.implemented, attrs: { "aria-pressed": d.tool ? String(pressed) : undefined, title: d.implemented ? `${d.note || d.label}${this.keyHint(d)}` : `${d.label}: ${d.note ?? NOT_YET}` },
         on: { click: () => { if (d.tool) { store.setTool(d.tool); this.drawing.reset(); } else void d.run?.(); } },
       }, glyph(d.icon), h("span", { text: d.label }));
     })));
@@ -576,12 +622,46 @@ export class Shell {
     replace(this.status,
       h("span", { text: store.status }), h("div", { class: "spacer" }),
       jobChip(store), this.syncIndicator(),
-      store.project && (kind === "3d" || kind === "drawing") ? h("button", { type: "button", class: "snap-toggle", text: "Grid snap", attrs: { "aria-pressed": String(store.snapGrid), title: "Snap the pointer to the grid (F9). Snapping to ends, midpoints and intersections stays on." },
+      store.project && (kind === "3d" || kind === "drawing") ? this.gridReadout(kind) : null,
+      store.project && (kind === "3d" || kind === "drawing") ? h("button", { type: "button", class: "snap-toggle", text: "Grid snap", attrs: { "aria-pressed": String(store.snapGrid), title: `Snap the pointer to the grid${keymap.bindings("view.snap")[0] ? ` (${keymap.bindings("view.snap")[0]})` : ""}. Snapping to ends, midpoints and intersections stays on.` },
         on: { click: () => store.setSnapGrid(!store.snapGrid) } }) : null,
       store.project ? h("span", { attrs: { title: "Drawing unit" } }, store.unit) : null, modeBtn,
       store.project ? h("span", { text: selection }) : null,
       kind === "3d" && !gl.webgl ? h("span", { text: "WebGL unavailable" }) : null,
       h("button", { class: "iconbtn", type: "button", attrs: { "aria-label": "Appearance" }, on: { click: () => appearanceDialog() } }, glyph("settings")));
+  }
+
+  /** "Grid = 10.0 mm": the grid's size, beside the snap switch. This is the increment the pointer snaps to (with a fixed spacing, the spacing itself; automatic, the lines
+   *  that are drawn). Clicking it sets a fixed spacing or returns to automatic. */
+  private gridReadout(kind: "3d" | "drawing"): HTMLElement {
+    const unit = store.unit, factor = UNIT_MM[unit] ?? 1;
+    let size: number, title: string;
+    if (kind === "drawing") {
+      const g = this.drawing.grid();
+      size = g.snap;
+      title = g.auto ? "Grid spacing follows the zoom. Click to fix it."
+        : g.collapsed ? `Fixed spacing ${formatGridSize((store.gridSpacingMm ?? 0) / factor, unit)} is too fine to aim at this zoom: lines and snapping use ${formatGridSize(g.display, unit)}. Click to change it.`
+        : g.display === g.snap ? "Fixed grid spacing. Click to change it." : `Fixed grid spacing; lines are drawn every ${formatGridSize(g.display, unit)} at this zoom, the pointer snaps to every ${formatGridSize(g.snap, unit)}. Click to change it.`;
+    } else {
+      size = (store.gridSpacingMm ?? 100) / factor;
+      title = store.gridSpacingMm === null ? "The 3D ground snaps to 100 mm. Click to fix a spacing for every view." : "Fixed grid spacing. Click to change it.";
+    }
+    const button: HTMLButtonElement = h("button", { type: "button", class: "grid-size", text: `Grid = ${formatGridSize(size, unit)}`, attrs: { title, "aria-label": `Grid size ${formatGridSize(size, unit)}. Change` },
+      on: { click: () => this.gridMenu(button) } });
+    return button;
+  }
+
+  private gridMenu(anchor: HTMLElement): void {
+    const unit = store.unit, factor = UNIT_MM[unit] ?? 1;
+    const fix = (mm: number): MenuEntry => ({ label: `${formatGridSize(mm / factor, unit)}${store.gridSpacingMm === mm ? "  ✓" : ""}`, icon: "grid", run: () => store.setGridSpacingMm(mm) });
+    openMenu(anchor, [
+      { label: `Automatic (follows the zoom)${store.gridSpacingMm === null ? "  ✓" : ""}`, icon: "grid", run: () => store.setGridSpacingMm(null) },
+      "separator",
+      ...[1, 5, 10, 50, 100, 500, 1000].map(fix),
+      "separator",
+      { label: "Set spacing…", icon: "edit", run: () => { void numberPrompt({ title: "Grid spacing", label: "Spacing", unit, value: (store.gridSpacingMm ?? 100) / factor, confirmLabel: "Set spacing" })
+        .then((v) => { if (v !== null) store.setGridSpacingMm(v * factor); }); } },
+    ], { label: "Grid spacing" });
   }
 
   /** How the documentation stands against the model: sheets that differ from their last issue and tags whose element is gone. Silent when all is in step. */

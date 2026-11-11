@@ -4,8 +4,9 @@ import { h } from "../../../tools/web/src/dom.js";
 import { promptDialog, toast } from "../../../tools/web/src/ui.js";
 import { addLayerDialog, hatchDialog, mirrorKeepDialog, numberPrompt } from "./dialogs.js";
 import { clamp } from "../../../tools/web/src/util.js";
-import { alongFrom, angleBetween, closedLoop, distToSegment, dist, entityDistance, entityBounds, fitBox, formatDimension, gripAt, grips, hatchLoops, insideBox, mid, niceStep, normaliseRect, orthoConstrain, pointInPolygon, polygonDistance, polygonsBounds, rotateAbout, roundAngle, segments, snapPoint, textBox, wallBand, wallCentreShift, } from "./geom2d.js";
+import { alongFrom, angleBetween, closedLoop, distToSegment, dist, entityDistance, entityBounds, fitBox, formatDimension, gripAt, grips, gridLines, gridSpec, hatchLoops, insideBox, mid, normaliseRect, orthoConstrain, pointInPolygon, polygonDistance, polygonsBounds, rotateAbout, roundAngle, segments, snapPoint, textBox, wallBand, wallCentreShift, } from "./geom2d.js";
 import { cssColor, withAlpha } from "./palette.js";
+import { curtainWallDialog } from "./curtainwall.js";
 import { cutStyle, cutWeight, hatchFill, patternPath, levelLabel, markArrows, markLabel, itemContains, projectionAt, snapPolygons, visibleLevels } from "./projection.js";
 const MM_PER = { mm: 1, cm: 10, m: 1000 };
 const SNAP_PX = 10;
@@ -15,7 +16,7 @@ const DRAG_PX = 4;
 const TOOL_KINDS = {
     offset: ["line", "polyline", "circle"], trim: ["line", "polyline"], extend: ["line", "polyline"], fillet: ["line"],
 };
-const PAINT_ORDER = ["foundation", "floor", "roof", "room", "extrusion", "sweep", "generic", "stair", "wall", "structural", "window", "door", "opening_profile", "column", "gutter", "downpipe", "void", "grid"];
+const PAINT_ORDER = ["foundation", "floor", "roof", "room", "extrusion", "sweep", "generic", "stair", "wall", "curtainwall", "structural", "window", "door", "opening_profile", "column", "gutter", "downpipe", "void", "grid"];
 const CURVE_TOOLS = new Set(["offset", "trim", "extend", "fillet", "hatch"]);
 const TURN_OFFSET_PX = 30;
 const PIVOTS = ["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"];
@@ -236,7 +237,11 @@ export class DrawingView {
         const r = this.canvas.getBoundingClientRect();
         return [e.clientX - r.left, e.clientY - r.top];
     }
-    gridStep() { return niceStep(24 / this.scale); }
+    /** What the grid shows and snaps to at this zoom (see ``gridSpec``): the fixed spacing from the status bar, or automatic. */
+    grid() { return gridSpec(this.scale, this.store.gridSpacing()); }
+    /** Called when what the grid shows or snaps to changes (a zoom, a new spacing), so the status bar can say so. */
+    onGrid = null;
+    gridKey = "";
     entities() { return this.data?.entities ?? []; }
     /** What can be snapped to in a section or elevation: the corners of the cut and the ends of every drawn line. */
     projectionPolygons() {
@@ -262,7 +267,7 @@ export class DrawingView {
     pointFor(e) {
         const [x, y] = this.local(e);
         const raw = this.toWorld(x, y);
-        const snap = snapPoint(raw, this.entities().filter((en) => this.visible(en)), SNAP_PX / this.scale, this.store.snapGrid ? this.gridStep() : null, [...(this.data?.model ?? []).map((w) => w.polygon), ...this.axisPolygons(), ...this.projectionPolygons()]);
+        const snap = snapPoint(raw, this.entities().filter((en) => this.visible(en)), SNAP_PX / this.scale, this.store.snapGrid ? this.grid().snap : null, [...(this.data?.model ?? []).map((w) => w.polygon), ...this.axisPolygons(), ...this.projectionPolygons()]);
         let point = snap.point;
         const last = this.pts[this.pts.length - 1] ?? this.anchor;
         if (e.shiftKey && last && (this.store.tool !== "select" || this.anchor) && this.store.tool !== "circle") {
@@ -682,6 +687,23 @@ export class DrawingView {
                 this.pts = [];
                 if (id)
                     await this.store.select({ kind: "model", ids: [id] });
+                break;
+            }
+            case "curtainwall": {
+                const level = this.data?.view.level_id;
+                if (!level) {
+                    toast("Curtain walls are drawn on a floor plan. Open a plan, or choose Curtain wall in the 3D view to type the line.", { kind: "info" });
+                    break;
+                }
+                if (!last) {
+                    this.pts = [p];
+                    break;
+                }
+                if (dist(last, p) < 1e-9)
+                    break;
+                this.pts = [];
+                this.draw();
+                await curtainWallDialog(this.store, { start: last, end: p, level });
                 break;
             }
             case "stair": {
@@ -1374,6 +1396,7 @@ export class DrawingView {
     }
     readColors() {
         return { paper: cssColor("--paper", "#ffffff"), grid: cssColor("--grid", "#e4e7ec"), gridMajor: cssColor("--grid-major", "#cfd4dc"), ink: cssColor("--ink", "#1a1d23"),
+            axisX: cssColor("--axis-x", "#d9483b"), axisY: cssColor("--axis-y", "#3aa655"),
             muted: cssColor("--muted", "#566070"), select: cssColor("--select", "#1a5fd1"), accent: cssColor("--accent", "#b89b00"), hover: cssColor("--hover-line", "#5b8def") };
     }
     draw() {
@@ -2047,30 +2070,94 @@ export class DrawingView {
             }
         }
     }
+    /** The world grid: lines at whole multiples of the spacing from the origin (every fifth major), then the two axes through the origin on top, X (y = 0) in red and Y (x = 0)
+     *  in green as in 3ds Max. The lines are indexed, not summed, so panning a long way adds no error, and the axes stay on world zero however the view moves or zooms. */
     paintGrid(k) {
         const ctx = this.ctx;
-        const step = this.gridStep();
+        const g = this.grid();
+        const key = `${g.display}|${g.snap}|${g.auto}|${g.collapsed}`;
+        if (key !== this.gridKey) {
+            this.gridKey = key;
+            this.onGrid?.(g);
+        }
         const lo = this.toWorld(0, this.height), hi = this.toWorld(this.width, 0);
-        const major = step * 5;
         ctx.lineWidth = 1;
+        ctx.setLineDash([]);
         for (const [axis, from, to] of [[0, lo[0], hi[0]], [1, lo[1], hi[1]]]) {
-            for (let v = Math.floor(from / step) * step; v <= to + step; v += step) {
-                const isMajor = Math.abs(v / major - Math.round(v / major)) < 1e-9;
-                ctx.strokeStyle = isMajor ? k.gridMajor : k.grid;
+            if (!this.store.showGrid)
+                break; // a hidden grid keeps its axes: the world zero stays marked
+            for (const line of gridLines(from, to, g.display)) {
+                if (line.kind === "axis")
+                    continue;
+                ctx.strokeStyle = line.kind === "major" ? k.gridMajor : k.grid;
                 ctx.beginPath();
                 if (axis === 0) {
-                    const x = Math.round(this.toScreen([v, 0])[0]) + 0.5;
+                    const x = Math.round(this.toScreen([line.value, 0])[0]) + 0.5;
                     ctx.moveTo(x, 0);
                     ctx.lineTo(x, this.height);
                 }
                 else {
-                    const y = Math.round(this.toScreen([0, v])[1]) + 0.5;
+                    const y = Math.round(this.toScreen([0, line.value])[1]) + 0.5;
                     ctx.moveTo(0, y);
                     ctx.lineTo(this.width, y);
                 }
                 ctx.stroke();
             }
         }
+        this.paintAxes(k);
+    }
+    /** The X and Y axes and the origin. An axis that is out of view is hinted at the edge it lies beyond, so the view never loses its bearings. */
+    paintAxes(k) {
+        const ctx = this.ctx;
+        const [ox, oy] = this.toScreen([0, 0]);
+        const inX = ox >= 0 && ox <= this.width, inY = oy >= 0 && oy <= this.height;
+        ctx.save();
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([]);
+        ctx.font = "600 11px system-ui, sans-serif";
+        ctx.textBaseline = "middle";
+        if (inY) {
+            const y = Math.round(oy) + 0.5;
+            ctx.strokeStyle = k.axisX;
+            ctx.beginPath();
+            ctx.moveTo(0, y);
+            ctx.lineTo(this.width, y);
+            ctx.stroke();
+            ctx.fillStyle = k.axisX;
+            ctx.textAlign = "right";
+            ctx.fillText("X", this.width - 8, Math.min(Math.max(y - 9, 10), this.height - 6));
+        }
+        else {
+            ctx.fillStyle = k.axisX;
+            ctx.textAlign = "right";
+            ctx.fillText(oy < 0 ? "▲ X axis" : "▼ X axis", this.width - 8, oy < 0 ? 10 : this.height - 8);
+        }
+        if (inX) {
+            const x = Math.round(ox) + 0.5;
+            ctx.strokeStyle = k.axisY;
+            ctx.beginPath();
+            ctx.moveTo(x, 0);
+            ctx.lineTo(x, this.height);
+            ctx.stroke();
+            ctx.fillStyle = k.axisY;
+            ctx.textAlign = "left";
+            ctx.fillText("Y", Math.min(Math.max(x + 7, 4), this.width - 12), 10);
+        }
+        else {
+            ctx.fillStyle = k.axisY;
+            ctx.textAlign = ox < 0 ? "left" : "right";
+            ctx.fillText(ox < 0 ? "◀ Y axis" : "Y axis ▶", ox < 0 ? 6 : this.width - 6, this.height / 2);
+        }
+        if (inX && inY) {
+            ctx.fillStyle = k.paper;
+            ctx.strokeStyle = k.ink;
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.arc(ox, oy, 3.5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+        } // the origin
+        ctx.restore();
     }
     /** One model element as the plan shows it: walls solid, floors a light tint, beams dashed, doors with their swing, windows with a glazing line. */
     paintItem(w, color, selected, k) {
@@ -2228,6 +2315,10 @@ export class DrawingView {
             this.paintGrid2(w, color, selected, k);
             return;
         }
+        if (w.category === "curtainwall") {
+            this.paintCurtainWall(w, color, selected, k);
+            return;
+        }
         if (w.category === "generic") {
             trace();
             ctx.setLineDash([]);
@@ -2337,6 +2428,44 @@ export class DrawingView {
             ctx.stroke(); // the jambs
             this.paintSwing(w.symbol);
             this.paintShapes(w.symbol); // the leaves themselves, a sliding door's track and arrow
+        }
+    }
+    /** A curtain wall in plan: the exact cut of every member, panel and leaf at the cut plane, each hatched as its own material (the project's hatch assignment), and the
+     *  swing or sliding notation of each door field. Out of the cut plane only its footprint shows, dashed. */
+    paintCurtainWall(w, color, selected, k) {
+        const ctx = this.ctx;
+        const ink = selected ? k.select : color;
+        const ring = (loop) => { ctx.beginPath(); loop.forEach((p, i) => { const [x, y] = this.toScreen(p); if (i)
+            ctx.lineTo(x, y);
+        else
+            ctx.moveTo(x, y); }); ctx.closePath(); };
+        const loops = w.cut_polygons ?? [];
+        if (!loops.length) {
+            ring(w.polygon);
+            ctx.setLineDash([6, 3]);
+            ctx.lineWidth = selected ? 2 : 1;
+            ctx.strokeStyle = ink;
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+        loops.forEach((loop, n) => {
+            const glass = w.cut_materials?.[n] === "Glass";
+            const hatch = w.cut_hatches?.[n] ?? null;
+            ring(loop);
+            ctx.setLineDash([]);
+            ctx.fillStyle = glass ? withAlpha(k.paper, 1) : withAlpha(ink, hatch?.kind === "solid" ? 0.9 : 0.18);
+            ctx.fill();
+            ctx.lineWidth = glass ? (selected ? 1.6 : 1) : (selected ? 2.2 : 1.4);
+            ctx.strokeStyle = ink;
+            ctx.stroke();
+            if (hatch)
+                this.paintCutHatch([loop], hatch, ink);
+        });
+        for (const sym of w.symbols ?? []) {
+            this.ctx.strokeStyle = ink;
+            this.ctx.lineWidth = 1;
+            this.paintSwing(sym);
+            this.paintShapes(sym);
         }
     }
     polyPath(pts, close) {
@@ -2659,7 +2788,7 @@ export class DrawingView {
         ctx.setLineDash([6, 4]);
         ctx.beginPath();
         const first = this.pts[0];
-        if (tool === "line" || tool === "polyline" || tool === "floor" || tool === "roof" || tool === "room" || tool === "section" || tool === "grid" || tool === "stair" || tool === "wall" || tool === "extrude" || tool === "void" || tool === "sweep") {
+        if (tool === "line" || tool === "polyline" || tool === "floor" || tool === "roof" || tool === "room" || tool === "section" || tool === "grid" || tool === "stair" || tool === "wall" || tool === "curtainwall" || tool === "extrude" || tool === "void" || tool === "sweep") {
             const all = [...this.pts, p, ...((tool === "floor" || tool === "roof" || tool === "room" || tool === "extrude" || tool === "void") && this.pts.length > 1 ? [first] : [])];
             for (let i = 0; i + 1 < all.length; i++)
                 this.line(all[i], all[i + 1]);
@@ -2766,6 +2895,7 @@ export class DrawingView {
             case "grid":
             case "stair":
             case "wall":
+            case "curtainwall":
             case "extrude":
             case "void":
             case "sweep": {
@@ -2858,6 +2988,7 @@ export class DrawingView {
             door: "Click on a wall to place a door. Change its size in Properties.",
             window: "Click on a wall to place a window. Change its size and sill in Properties.",
             grid: n ? "Pick the other end of the grid line." : "Pick the first end of the grid line. Grids show on every floor plan.",
+            curtainwall: n ? "Pick the other end of the curtain wall. A dialog then sets its spacing, frame and panels." : "Pick the start of the curtain wall. It snaps to the ends and middles of walls.",
             stair: n ? "Pick the end of the run. The stair climbs from this level to the next one up." : "Pick where the stair starts. It runs from this level to the next one up.",
             family: this.store.family ? `Click to place “${this.store.family.name}”. Esc stops placing.` : "Choose a family first (Insert, then Family).",
             tag: this.tagOf ? "Click where the tag goes." : "Click the element to tag. The tag shows its data and follows it when the model changes.",

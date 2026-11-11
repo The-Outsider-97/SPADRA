@@ -104,6 +104,8 @@ export interface PlanWall {
   corner_joins?: Array<{ endpoint: "start" | "end"; other: string; point: Pt; mode: "through_selected" | "through_other" | "stepped_open" | "miter" }>;
   /** A foundation's kind (poer, strook, plaat...). */
   kind?: string;
+  /** A curtain wall: every member, panel and leaf cut at the plan's cut plane, each loop with its material, kind and hatch, and the symbol of each door field. */
+  cut_materials?: string[]; cut_kinds?: string[]; cut_hatches?: Array<HatchSpec | null>; symbols?: PlanSymbol[];
 }
 /** One element as a section or elevation shows it: surfaces facing the viewer (flat triangles), their drawn lines, and the cut. Units are the drawing's. */
 /** `cut_material` (a foundation only): the material of each loop of `cut`, so a build-up is hatched layer by layer. */
@@ -119,6 +121,8 @@ export interface ProjItem {
   /** A wall, floor or roof built in layers: which layer each loop of `cut` is, and (unless hatching is hidden) how each is hatched. */
   cut_layers?: Array<{ layer: string; material: string; name: string }>;
   cut_hatches?: Array<HatchSpec | null>;
+  /** A curtain wall: the material of each loop of `cut` (its hatch is in `cut_hatches`). */
+  cut_materials?: string[];
   /** Explicit material/element colors; absence keeps architectural monochrome drafting. */
   appearance_color?: string;
   cut_colors?: Array<string | null>;

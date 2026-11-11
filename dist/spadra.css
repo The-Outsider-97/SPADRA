@@ -326,6 +326,11 @@ table.schedule tfoot td { font-weight: 700; border-top: 2px solid var(--ink); bo
 .statusbar .snap-toggle[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-ink); }
 .statusbar .snap-toggle[aria-pressed="false"] { color: var(--muted); text-decoration: line-through; }
 
+/* The grid size beside it ("Grid = 10.0 mm"); clicking it sets the spacing. The world axes are red (X) and green (Y), as in 3ds Max. */
+:root { --axis-x: #d9483b; --axis-y: #3aa655; }
+.statusbar .grid-size { color: var(--accent); background: none; border: 0; font: inherit; font-variant-numeric: tabular-nums; cursor: pointer; padding: .1rem .35rem; border-radius: 4px; }
+.statusbar .grid-size:hover { background: var(--accent-soft); }
+
 /* NL-SfB code rows in Properties: the field with the name of the code under it. */
 .prop-row .sfb-field { display: grid; gap: .15rem; min-width: 0; }
 .prop-row .sfb-name { color: var(--muted); font-size: .85em; overflow-wrap: anywhere; min-height: 1.1em; }
@@ -393,3 +398,24 @@ table.schedule tfoot td { font-weight: 700; border-top: 2px solid var(--ink); bo
 /* Modifier groups share the existing ribbon; only the group labels are new. */
 .ribbon .group:has(.ribbon-group-title) { flex-wrap: wrap; align-content: flex-start; max-width: 340px; }
 .ribbon .ribbon-group-title { flex-basis: 100%; font-size: .68rem; letter-spacing: .015em; color: var(--muted); padding: 0 .35rem .2rem; white-space: nowrap; }
+
+/* Keyboard shortcuts: the editable keymap */
+.keymap { display: flex; flex-direction: column; gap: .6rem; min-width: 0; }
+.keymap-bar { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.keymap-bar input[type=search] { flex: 1 1 14rem; min-width: 10rem; }
+.keymap-preset { margin: 0; font-size: .9em; }
+.keymap-note { min-height: 1.3em; font-size: .9em; }
+.keymap-resolve { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; padding: .4rem .6rem; border: 1px solid var(--line, #ccd); border-radius: 6px; background: var(--panel, transparent); }
+.keymap-conflicts { color: var(--danger, #b3261e); font-size: .9em; }
+.keymap-list { max-height: 46vh; overflow: auto; border: 1px solid var(--line, #ccd); border-radius: 6px; padding: 0 .6rem .4rem; }
+.keymap-group h3 { position: sticky; top: 0; margin: 0; padding: .45rem 0 .25rem; font-size: .8em; letter-spacing: .06em; text-transform: uppercase; background: var(--paper, #fff); }
+.keymap-row { display: grid; grid-template-columns: minmax(10rem, 1.3fr) minmax(8rem, 2fr) auto auto auto; align-items: center; gap: .5rem; padding: .2rem 0; border-top: 1px solid var(--line-soft, rgba(128,128,128,.18)); }
+.keymap-row.recording { outline: 2px solid var(--select, #1a5fd1); outline-offset: 1px; border-radius: 4px; }
+.keymap-keys { display: flex; flex-wrap: wrap; gap: .3rem; }
+.keymap-bind { display: inline-flex; align-items: center; }
+.keycap-btn { background: none; border: 0; padding: 0; cursor: pointer; }
+.keycap { display: inline-block; padding: .08rem .4rem; border: 1px solid var(--line, #ccd); border-bottom-width: 2px; border-radius: 4px; font: 600 .85em ui-monospace, Consolas, monospace; background: var(--panel, rgba(128,128,128,.08)); }
+.keycap-btn:focus-visible .keycap { outline: 2px solid var(--select, #1a5fd1); }
+.keymap-clash { color: var(--danger, #b3261e); font-size: .8em; font-weight: 600; }
+.keymap-builtin summary { cursor: pointer; }
+.keymap-bar label { display: inline-flex; align-items: center; gap: .4rem; }
