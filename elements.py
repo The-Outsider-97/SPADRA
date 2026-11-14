@@ -18,7 +18,7 @@ from typing import Any, Mapping, NamedTuple
 
 from ..tools.errors import BadRequest, NotFound
 from ..tools.validation import number, text
-from src.utils.spatial_formats.common.errors import SpatialFormatError
+from src.utils.spatial_formats.common.errors import SpatialFormatError # type: ignore
 
 from . import geometry as G
 from . import sfb as SF
@@ -88,7 +88,7 @@ def appearance_color(project: Any, meta: Mapping[str, Any], oid: str | None = No
         from . import foundations as FD
         material = FD.display_material(meta)
     base = m(meta, "color") or project.manifest.get("material_colors", {}).get(material) or MATERIAL_COLORS.get(material)
-    from . import parametric_properties as PP
+    from . import parametric_properties as PP # type: ignore
     rule = PP.appearance_rule(project, meta, oid)
     return rule["top"] if rule and rule["mode"] == "solid" else base
 
@@ -909,7 +909,8 @@ def _section_prism(section: list[list[float]], begin: float, end: float, side: s
                    opening: Mapping[str, Any]) -> G.Mesh:
     """Extrude an SDRW cross-section along one jamb/head/sill, mapping to wall-local XYZ."""
     x0, x1, z0, z1 = opening_span(opening)
-    verts, faces = G.prism([tuple(q) for q in section], begin, end)
+    profile: list[tuple[float, float]] = [(float(x), float(y)) for x, y in section]
+    verts, faces = G.prism(profile, begin, end)
     if side == "left":
         mapped = [[x0 + s, y, t] for s, y, t in verts]
     elif side == "right":
@@ -1319,7 +1320,7 @@ def _rectangle(boundary: list[list[float]]) -> tuple[tuple[float, float], tuple[
     """(centre, long-axis unit vector, short-axis unit vector, long length, short length) of a rectangular outline, else an error."""
     if len(boundary) != 4:
         raise BadRequest("A pitched roof needs a four-corner rectangular outline")
-    p = [tuple(q) for q in boundary]
+    p: list[tuple[float, float]] = [(float(q[0]), float(q[1])) for q in boundary]
     e = [G.sub(p[(i + 1) % 4], p[i]) for i in range(4)]
     if any(abs(G.dot(e[i], e[(i + 1) % 4])) > 1e-6 * G.norm(e[i]) * G.norm(e[(i + 1) % 4]) for i in range(4)) or abs(G.norm(e[0]) - G.norm(e[2])) > 1e-6 * G.norm(e[0]):
         raise BadRequest("A pitched roof needs a rectangular outline (right-angled corners)")
@@ -1537,6 +1538,10 @@ def normalise_roof_end(p: Mapping[str, Any], current: Mapping[str, Any] | None =
         cfg["anchor"] = _choice(p["anchor"], tuple(ROOF_ANCHORS), "cut anchor")
     if "bearing" in p:
         cfg["bearing"] = _choice(p["bearing"], ("top", "face"), "bearing condition")
+    elif "face" in p:
+        # Older roof-end callers use "face" for the bearing condition.
+        # The canonical "bearing" key always takes precedence if both exist.
+        cfg["bearing"] = _choice(p["face"], ("top", "face"), "bearing condition")
     if "layers" in p:
         cfg["layers"] = _choice(p["layers"], ROOF_END_LAYERS, "layer behaviour")
     if "heel" in p:
@@ -1850,7 +1855,9 @@ def roof_window_holes(project: Any, roof_id: str, roof: Mapping[str, Any], cuts:
     holes = [roof_window_frame(project, roof, meta_of(project, wid), cuts) | {"id": wid} for wid in roof_windows(project, roof_id)]
     for i, p in enumerate(holes):
         for q in holes[i + 1:]:
-            if p["s0"] < q["s1"] + ROOF_WINDOW_MARGIN and q["s0"] < p["s1"] + ROOF_WINDOW_MARGIN and p["t0"] < q["t1"] + ROOF_WINDOW_MARGIN and q["t0"] < p["t1"] + ROOF_WINDOW_MARGIN:
+            p_s0, p_s1, p_t0, p_t1 = (float(p[key]) for key in ("s0", "s1", "t0", "t1"))
+            q_s0, q_s1, q_t0, q_t1 = (float(q[key]) for key in ("s0", "s1", "t0", "t1"))
+            if p_s0 < q_s1 + ROOF_WINDOW_MARGIN and q_s0 < p_s1 + ROOF_WINDOW_MARGIN and p_t0 < q_t1 + ROOF_WINDOW_MARGIN and q_t0 < p_t1 + ROOF_WINDOW_MARGIN:
                 raise BadRequest(f"Two roof windows ({project.model.get(p['id'])['name']} and {project.model.get(q['id'])['name']}) would overlap or touch")
     return holes
 
@@ -2668,7 +2675,7 @@ def set_property(project: Any, oid: str, key: str, value: Any, *, from_formula: 
     cat = m(meta, "category")
     values: dict[str, Any] = {}
     if not from_formula and isinstance(value, str):
-        from . import parametric_properties as PP
+        from . import parametric_properties as PP # type: ignore
         # Choice/text edits must not build a full Properties view merely to
         # discover that they are not formulas. Transitional assembly geometry
         # (e.g. a door being moved under a roof) may be invalid until the next
@@ -2679,14 +2686,14 @@ def set_property(project: Any, oid: str, key: str, value: Any, *, from_formula: 
                 PP.set_formula(project, oid, key, value)
                 return
     if not from_formula:
-        from . import parametric_properties as PP
+        from . import parametric_properties as PP # type: ignore
         PP.remove_formula(project, oid, key)
     if key.startswith("material_rule:"):
-        from . import parametric_properties as PP
+        from . import parametric_properties as PP # type: ignore
         PP.set_material_rule(project, oid, key.split(":", 1)[1], value)
         return
     if key.startswith(("material_layer:", "material_def:")):
-        from . import parametric_properties as PP
+        from . import parametric_properties as PP # type: ignore
         PP.set_scoped_material_rule(project, oid, key, value)
         return
     if key.startswith("corner_join:"):
@@ -3319,6 +3326,7 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
     out: list[dict[str, Any]] = []
     walls: dict[str, dict[str, Any]] = {}
     corner_table: dict[str, _WallRow] | None = None
+    cut_polygons: list[list[list[float]]] = []
     cut_z = level_elevation(project, level_id) + CUT_HEIGHT if cut_elevation is None else float(cut_elevation)
     level_z = level_elevation(project, level_id)
     top_z = cut_z + 1.5 if top_elevation is None else float(top_elevation)
@@ -3818,7 +3826,7 @@ def properties(project: Any, oid: str, relations: bool = False) -> dict[str, Any
             {"key": "material_color", "label": f"Shared {material} color", "type": "color", "value": shared},
         ]})
     if out.get("kind") == "model" and (material or m(meta, "category") == "curtainwall"):
-        from . import parametric_properties as PP
+        from . import parametric_properties as PP # type: ignore
         out["groups"].append(PP.material_rule_group(project, meta))
         out["groups"].extend(PP.scoped_material_groups(project, oid))
     group = LY.rows(project, oid) if out.get("kind") == "model" else None
@@ -3901,7 +3909,7 @@ def solid_status(project: Any, oid: str) -> Solid:
         kind = geometry.get("kind")
         try:
             if kind == "mesh":
-                from src.utils.spatial_formats.sgeo.analysis import analyze_mesh
+                from src.utils.spatial_formats.sgeo.analysis import analyze_mesh # type: ignore
                 if not analyze_mesh(geometry).is_closed_oriented_surface:
                     raise _OpenSurface()
             result = Solid("solid", float(project.model.volume(oid, unit="m")), "")
@@ -4336,6 +4344,7 @@ def check(project: Any) -> list[dict[str, str]]:
     for key, mode in (project.manifest.get("wall_corners") or {}).items():
         if mode != "stepped_open":
             continue
+        oid = None
         try:
             a, b = key.split("|", 1)
             oid, endpoint = a.rsplit(":", 1)
@@ -4344,6 +4353,96 @@ def check(project: Any) -> list[dict[str, str]]:
                                                 for c in wall_corner_controls(project, oid))
         except (ValueError, BadRequest):
             active = False
-        if active:
+        if active and oid is not None:
             issues.append(issue("warning", oid, "The stepped/open wall corner intentionally meets at a single point, not a continuous joint; choose a through or miter connection for a watertight corner", "geometry"))
     return issues
+
+
+def _issues_for(project: Any, ids: set[str]) -> list[dict[str, str]]:
+    """Project-wide consistency rules, restricted to the requested elements.
+
+    Reuse the authoritative check so scoped diagnostics cannot drift from it.
+    """
+    return [finding for finding in check(project) if finding["ref"] in ids]
+
+
+def check_level(project: Any, level_id: str) -> list[dict[str, str]]:
+    """Model findings for elements assigned to this level, including deleted levels."""
+    ids = {oid for oid in element_ids(project) if m(meta_of(project, oid), "level") == level_id}
+    return _issues_for(project, ids)
+
+
+def check_roof(project: Any, roof_id: str) -> list[dict[str, str]]:
+    """Model findings for a roof and any windows hosted by it."""
+    ids = {roof_id}
+    ids.update(oid for oid in element_ids(project) if
+               m(meta_of(project, oid), "category") == "roof_window" and m(meta_of(project, oid), "host") == roof_id)
+    return _issues_for(project, ids)
+
+
+def check_wall(project: Any, wall_id: str) -> list[dict[str, str]]:
+    """Model findings for a wall and its hosted doors and windows."""
+    ids = {wall_id}
+    ids.update(oid for oid in element_ids(project) if
+               m(meta_of(project, oid), "category") in OPENINGS and m(meta_of(project, oid), "host") == wall_id)
+    return _issues_for(project, ids)
+
+
+def check_opening(project: Any, opening_id: str) -> list[dict[str, str]]:
+    """Model findings for one door or window."""
+    meta_of(project, opening_id)
+    return _issues_for(project, {opening_id})
+
+
+def check_opening_profile(project: Any, profile_id: str) -> list[dict[str, str]]:
+    """Model findings for one door or window opening profile."""
+    meta_of(project, profile_id)
+    return _issues_for(project, {profile_id})
+
+
+def check_room(project: Any, room_id: str) -> list[dict[str, str]]:
+    """Model findings for one room."""
+    meta_of(project, room_id)
+    return _issues_for(project, {room_id})
+
+
+def check_structural(project: Any, structural_id: str) -> list[dict[str, str]]:
+    """Model findings for one beam or column."""
+    meta_of(project, structural_id)
+    return _issues_for(project, {structural_id})
+
+
+def check_gutter(project: Any, gutter_id: str) -> list[dict[str, str]]:
+    """Model findings for one gutter."""
+    meta_of(project, gutter_id)
+    return _issues_for(project, {gutter_id})
+
+
+def check_drain(project: Any, drain_id: str) -> list[dict[str, str]]:
+    """Model findings for one drain."""
+    meta_of(project, drain_id)
+    return _issues_for(project, {drain_id}) 
+
+
+def check_foundation(project: Any, foundation_id: str) -> list[dict[str, str]]:
+    """Model findings for one foundation."""
+    meta_of(project, foundation_id)
+    return _issues_for(project, {foundation_id})
+
+
+def check_curtainwall(project: Any, curtainwall_id: str) -> list[dict[str, str]]:
+    """Model findings for one curtain wall."""
+    meta_of(project, curtainwall_id)
+    return _issues_for(project, {curtainwall_id})
+
+
+def check_stair(project: Any, stair_id: str) -> list[dict[str, str]]:
+    """Model findings for one stair."""
+    meta_of(project, stair_id)
+    return _issues_for(project, {stair_id})
+
+
+def check_generic(project: Any, generic_id: str) -> list[dict[str, str]]:
+    """Model findings for one generic element."""
+    meta_of(project, generic_id)
+    return _issues_for(project, {generic_id})
