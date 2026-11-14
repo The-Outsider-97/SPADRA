@@ -497,15 +497,15 @@ class PlanAndTree(ElementCase):
         w = self.wall()
         d = self.run_("model.add_door", wall=w, offset=3.0)["id"]
         s = next(i for i in self.p.plan_overlay(self.plan) if i["id"] == d)["symbol"]
-        self.assertEqual([round(v, 6) for v in s["hinge"]], [2550.0, 125.0])
-        self.assertEqual([round(v, 6) for v in s["leaf_end"]], [2550.0, 1025.0])
+        self.assertEqual([round(v, 6) for v in s["hinge"]], [2550.0, 25.0])             # the hinge pin: on the leaf's swing-side face (leaf 50 mm on the centre line), not the wall face
+        self.assertEqual([round(v, 6) for v in s["leaf_end"]], [2550.0, 925.0])
         self.assertAlmostEqual(s["radius"], 900.0)
         self.assertAlmostEqual(s["end_angle"] - s["start_angle"], math.pi / 2, places=9)
         self.run_("model.set_property", id=d, key="swing", value="right")
         self.run_("model.set_property", id=d, key="hinge", value="end")
         s = next(i for i in self.p.plan_overlay(self.plan) if i["id"] == d)["symbol"]
-        self.assertEqual([round(v, 6) for v in s["hinge"]], [3450.0, -125.0])
-        self.assertEqual([round(v, 6) for v in s["leaf_end"]], [3450.0, -1025.0])
+        self.assertEqual([round(v, 6) for v in s["hinge"]], [3450.0, -25.0])
+        self.assertEqual([round(v, 6) for v in s["leaf_end"]], [3450.0, -925.0])
 
     def test_floors_and_beams_appear_on_their_own_level_only(self):
         self.run_("model.add_floor", points=Floors.L, level=self.l1)
@@ -521,7 +521,7 @@ class PlanAndTree(ElementCase):
         self.run_("model.add_roof", points=Roofs.RECT, level=self.roof_level, roof="gable")
         self.run_("model.add_beam", start=[0, 0], end=[1000, 0], level=self.l1)
         cats = {c["label"]: len(c["children"]) for c in next(s for s in self.p.tree()["sections"] if s["id"] == "categories")["children"]}
-        self.assertEqual(cats, {"Walls": 1, "Doors": 1, "Windows": 1, "Roof windows": 0, "Floors": 1, "Roofs": 1, "Gutters": 0, "Downpipes": 0, "Stairs": 0, "Structural": 1, "Rooms": 0, "Grids": 0, "Generic Models": 0, "Extrusions": 0, "Voids": 0, "Sweeps": 0, "Foundations": 0, "Arrays": 0})
+        self.assertEqual(cats, {"Walls": 1, "Doors": 1, "Windows": 1, "Roof windows": 0, "Floors": 1, "Roofs": 1, "Gutters": 0, "Downpipes": 0, "Drains": 0, "Flashings": 0, "Stairs": 0, "Structural": 1, "Rooms": 0, "Grids": 0, "Generic Models": 0, "Extrusions": 0, "Voids": 0, "Sweeps": 0, "Foundations": 0, "Curtain walls": 0, "Arrays": 0})
 
     def test_scene_draws_every_element(self):
         w = self.wall()

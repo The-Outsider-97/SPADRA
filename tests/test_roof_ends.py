@@ -161,6 +161,50 @@ class RoofEnds(Case):
         after = self.p.model.bounds(edge)
         self.assertAlmostEqual(after[0][1] - before[0][1], 0.3, places=6)               # it hangs where the roof now ends
 
+    def test_the_roof_edge_stays_parallel_to_its_roof_end_in_plan_and_in_3d_whatever_the_orientation(self):
+        """The edge member's plan line is the roof end itself (not the outline it was cut back from) and its solid lies along that line, for any roof turn and any cut."""
+        from applications.SPADRA.stairs import _world_triangles
+
+        def check(label, oid, roof):
+            eb = E.effective_boundary(self.p, self.meta(roof))
+            edge = int(E.m(self.meta(oid), "edge"))
+            a, b = eb[edge], eb[(edge + 1) % len(eb)]
+            start, end = E.m(self.meta(oid), "start"), E.m(self.meta(oid), "end")
+            ex, ey = b[0] - a[0], b[1] - a[1]
+            length = math.hypot(ex, ey)
+            self.assertAlmostEqual(abs((end[0] - start[0]) * ey - (end[1] - start[1]) * ex) / length, 0.0, places=7, msg=f"{label}: plan line parallel to the roof end")
+            self.assertAlmostEqual(((start[0] - a[0]) * ey - (start[1] - a[1]) * ex) / length, 0.0, places=7, msg=f"{label}: plan line lies on the roof end")
+            vs = [v for t in _world_triangles(self.p, oid) for v in t]
+            mx, my = sum(v[0] for v in vs) / len(vs), sum(v[1] for v in vs) / len(vs)
+            sxx, syy = sum((v[0] - mx) ** 2 for v in vs), sum((v[1] - my) ** 2 for v in vs)
+            sxy = sum((v[0] - mx) * (v[1] - my) for v in vs)
+            principal = 0.5 * math.atan2(2 * sxy, sxx - syy)
+            turn = abs(((principal - math.atan2(ey, ex) + math.pi / 2) % math.pi) - math.pi / 2)
+            self.assertLess(math.degrees(turn), 1e-3, f"{label}: the solid runs along the roof end")
+
+        previous = self.roof
+        for degrees in (0, 30, 135, 250):
+            with self.subTest(turn=degrees):
+                self.p.execute("model.delete", {"id": previous})
+                a = math.radians(degrees)
+                pts = [[3000 + math.cos(a) * (x - 3000) - math.sin(a) * (y - 2000), 2000 + math.sin(a) * (x - 3000) + math.cos(a) * (y - 2000)] for x, y in RECT]
+                roof = self.run_("model.add_roof", points=pts, level=self.roof_level, roof="gable", pitch=PITCH, thickness=T * 1000)["id"]
+                previous = roof
+                ids = self.run_("model.add_roof_accessory", roof=roof, kind="roof_edge", edge="all")["ids"]
+                for oid in ids:
+                    check(f"{degrees} plain", oid, roof)
+                for kind in ("A1", "B2", "C3", "D1"):
+                    for edge in (0, 2):
+                        self.run_("model.set_roof_end", id=roof, edge=edge, type=kind, offset=120)
+                    for oid in ids:
+                        check(f"{degrees} {kind}", oid, roof)
+                self.run_("model.rotate", ids=[roof], centre=[3000, 2000], angle=25)
+                for oid in ids:
+                    check(f"{degrees} then turned", oid, roof)
+                self.run_("model.clear_roof_end", id=roof, edge=0)
+                for oid in ids:
+                    check(f"{degrees} end cleared", oid, roof)
+
     def test_layers_are_cut_by_the_same_plane_or_each_by_its_own(self):
         self.run_("model.add_layer", id=self.roof, material="Mineral wool", thickness=100)
         self.end(type="A1", layers="through")

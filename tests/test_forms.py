@@ -362,8 +362,10 @@ class Hinges(Base):
                 cx = g["center"][0]
                 self.assertAlmostEqual(ox + cx, (x0 + x1) / 2, places=6)             # the leaf itself did not move
                 self.assertAlmostEqual(abs(cx), (x1 - x0) / 2, places=6)             # it lies to one side of the hinge, the full width away
-        self.assertAlmostEqual(self.hinge_and_leaf(win)[0][1], 0.0, places=6)         # a window pivots on the wall's centre line
-        self.assertAlmostEqual(abs(self.hinge_and_leaf(d)[0][1]), 0.1, places=6)      # a door on the wall face (200 mm wall)
+        for oid in (d, win):                                                           # the hinge pin is on the face of the leaf, and the leaf (depth offset 0) is centred in the wall: the origin is half the leaf's thickness off the wall's line
+            (ox, oy), g = self.hinge_and_leaf(oid)
+            self.assertAlmostEqual(abs(oy), g["size"][1] / 2, places=6)
+            self.assertAlmostEqual(oy + g["center"][1], 0.0, places=6)
 
     def test_turning_the_door_leaves_the_hinge_edge_in_place(self):
         w = self.wall((0, 0), (4000, 0))
@@ -382,7 +384,7 @@ class Hinges(Base):
         self.run_("model.move", id=w, dx=0.0, dy=1.0)
         (ox, oy), g = self.hinge_and_leaf(d)
         self.assertAlmostEqual(ox, 2.45, places=6)
-        self.assertAlmostEqual(oy, 1.0 + 0.1, places=6)
+        self.assertAlmostEqual(oy, 1.0 + g["size"][1] / 2, places=6)                 # the wall moved 1 m across: the hinge is still half a leaf thickness off its line
 
 
 class Arrays(Base):
@@ -399,7 +401,7 @@ class Arrays(Base):
         for i in doors:
             self.assertIn(E.m(E.meta_of(self.p, i), "host"), walls)
         copy_door = next(i for i in doors if i != d and E.m(E.meta_of(self.p, i), "host") == r["ids"][0])
-        self.assertAlmostEqual(self.p.model.world_transform(copy_door)[7], 3.0 + 0.1, places=6)        # a door's origin is its hinge, on the wall face
+        self.assertAlmostEqual(self.p.model.world_transform(copy_door)[7], 3.0 + self.p.model.world_transform(d)[7], places=6)        # a door's origin is its hinge: the copy keeps the same place on its wall
         self.p.undo()
         self.assertEqual(len([i for i in E.element_ids(self.p) if E.category(self.p, i) == "wall"]), 1)
 

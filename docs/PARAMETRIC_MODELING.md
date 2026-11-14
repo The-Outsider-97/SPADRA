@@ -3,6 +3,8 @@
 What was added, where its data lives, what survives export, and what is not done. Every statement here was checked by running the code on a Linux VM
 (Python 3.10, no scipy/trimesh, no Windows); where something could not be checked, it says so.
 
+Design specifications, the operation graph, 2D-to-BIM reconstruction and modifier impact previews are described in [SPEC_RECONSTRUCTION_IMPACT.md](SPEC_RECONSTRUCTION_IMPACT.md).
+
 ## Features and how to reach them
 
 | Area | Commands (all undoable, transactional) | Read-only / preview routes |

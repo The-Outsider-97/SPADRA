@@ -23,7 +23,7 @@ class Hub(unittest.TestCase):
             self.assertTrue(spec.purpose or spec.why_not)
             if not spec.integrated:
                 self.assertTrue(spec.why_not, f"{spec.key} is not integrated and says nothing about why")
-        self.assertEqual({k for k, v in BY_KEY.items() if v.integrated}, {"stem", "simulation", "spatial", "optimization", "animation"})
+        self.assertEqual({k for k, v in BY_KEY.items() if v.integrated}, {"stem", "simulation", "spatial", "optimization", "animation", "observability"})
         rows = HUB.status()
         self.assertEqual(len(rows), len(SPECS))
         for row in rows:

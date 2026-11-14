@@ -204,16 +204,28 @@ class Downpipes(Case):
         return self.run_("model.add_downpipe", gutter=self.g, **extra)["id"]
 
     def test_a_downpipe_is_a_tube_from_under_the_gutter_to_its_discharge(self):
+        """Centred on the gutter's section, its top following the gutter's underside exactly, down to the discharge height."""
         d = self.pipe(offset=9.9, diameter=80)
-        n = GU.CIRCLE
-        ring = 0.5 * n * math.sin(2 * math.pi / n)
-        h = (6.4 - GU.RIM_DROP - 0.003 * 9.9 - 0.0625) - 0.3
-        self.assertAlmostEqual(self.vol(d), ring * (0.04 ** 2 - 0.038 ** 2) * h, places=9)
+        pf = GU.pipe_frame(self.p, d)
+        g = pf["g"]
+        top = 6.4 - GU.RIM_DROP - 0.003 * 9.9 - 0.0625                                        # the bottom of the half-round on its centre line
+        self.assertAlmostEqual(pf["top"], top, places=9)
         (x0, y0, z0), (x1, y1, z1) = self.bounds(d)
         self.assertAlmostEqual(z0, 0.3, places=9)
-        self.assertAlmostEqual(z1, 6.4 - GU.RIM_DROP - 0.003 * 9.9 - 0.0625, places=9)
-        self.assertAlmostEqual(y0, -0.08, places=2)                                                  # against the wall line, under the channel
-        self.assertGreaterEqual(y0, -0.125 - 1e-9)
+        self.assertAlmostEqual((y0 + y1) / 2, -(g["gap"] + g["width"] / 2), places=9)          # centred across the gutter, not against the wall line
+        self.assertAlmostEqual((x0 + x1) / 2, g["a"][0] + g["u"][0] * 9.9, places=9)
+        # the top ring lies on the curved underside of the half-round: higher than its centre by the curve at the pipe's radius
+        scene = {o["id"]: o for o in self.p.scene_data()["objects"]}
+        ring = [v for v in scene[d]["vertices"] if v[2] > top - 1e-6]
+        self.assertTrue(ring)
+        for x, y, z in ring:
+            self.assertAlmostEqual(z, GU.underside(g, x, y), places=7)
+        self.assertAlmostEqual(z1, max(z for _, _, z in ring), places=9)
+        self.assertGreater(z1, top + 0.01)                                                       # the half-round curves up round the pipe's rim
+        n = GU.CIRCLE
+        ring_area = 0.5 * n * math.sin(2 * math.pi / n) * (0.04 ** 2 - 0.038 ** 2)
+        self.assertGreater(self.vol(d), ring_area * (top - 0.3))                                # a little more than the straight tube to the centre
+        self.assertLess(self.vol(d), ring_area * (z1 - 0.3))
 
     def test_moving_a_downpipe_slides_it_along_its_gutter_only(self):
         d = self.pipe(offset=5.0)
@@ -238,9 +250,10 @@ class Downpipes(Case):
 
     def test_a_downpipe_follows_its_gutter_when_the_gutter_is_edited(self):
         d = self.pipe(offset=5.0)
-        top = self.bounds(d)[1][2]
+        top = GU.pipe_frame(self.p, d)["top"]
         self.run_("model.set_property", id=self.g, key="depth", value=100)
-        self.assertAlmostEqual(self.bounds(d)[1][2], top - (0.1 - 0.0625), places=9)
+        self.assertAlmostEqual(GU.pipe_frame(self.p, d)["top"], top - (0.1 - 0.0625), places=9)
+        self.assertAlmostEqual(self.bounds(d)[0][2], 0.3, places=9)
 
     def test_a_gutter_too_narrow_for_its_downpipe_is_refused(self):
         self.pipe(offset=5.0, diameter=80)
@@ -366,10 +379,11 @@ class RequestedDrainageRegressions(Case):
         roof = self.roof()
         gutter = self.gutters(roof, edges=[0], downpipe=False)["gutters"][0]
         pipe = self.run_("model.add_downpipe", gutter=gutter, offset=5)["id"]
-        before_top = self.bounds(pipe)[1][2]
+        before_top = GU.pipe_frame(self.p, pipe)["top"]
+        before_high = self.bounds(pipe)[1][2]
         self.run_("model.set_property", id=pipe, key="length", value=2.5)
         low, high = self.bounds(pipe)
-        self.assertAlmostEqual(high[2], before_top, places=6)
+        self.assertAlmostEqual(high[2], before_high, places=6)                                  # the gutter connection does not move
         self.assertAlmostEqual(low[2], before_top - 2.5, places=6)
         props = E.properties(self.p, pipe)
         fields = {row.get("key"): row for g in props["groups"] for row in g["rows"]}

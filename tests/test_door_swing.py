@@ -78,19 +78,17 @@ class Planning(unittest.TestCase):
         with self.assertRaises(BadRequest):
             D.plan(self.p, window, 90)
 
-    def test_cladding_hard_against_the_jamb_is_reported_with_its_depth_and_the_tolerance_is_explicit(self):
-        """The door hinges on the wall face but its leaf sits on the wall centre line, so its corner passes a jamb by a few millimetres: facade panels hard against
-        the jamb on the swing side are entered by up to about 9 mm around 8 degrees. That is refused at the default 5 mm, shown, and accepted when asked."""
+    def test_cladding_hard_against_the_jamb_is_cleared_by_a_leaf_that_turns_on_its_real_hinge(self):
+        """The hinge pin is on the leaf's own swing-side face at the hinge edge, so the leaf turns away from the jamb. Facade panels hard against the jamb on the swing
+        side are touched by well under a millimetre (the free edge's back corner), not entered by the 25 mm that a pin in the middle of the leaf's thickness would give."""
         self.p.execute("procedural.facade", {"wall": self.wall, "panel_width": 1000, "panel_height": 1000})
         r = D.plan(self.p, self.door, 90)
-        self.assertTrue(r["obstructions"])
-        deepest = max(r["contacts_mm"].values())
-        self.assertTrue(5 < deepest < 12, r["contacts_mm"])
-        again = D.plan(self.p, self.door, 90, tolerance_mm=12)
-        self.assertEqual((again["obstructions"], again["tolerance_mm"]), ([], 12.0))
-        self.assertEqual(again["contacts_mm"], r["contacts_mm"])                          # the same contacts are still listed, only tolerated
-        with self.assertRaises(Conflict):
-            self.p.execute("anim.swing_door", {"id": self.door, "degrees": 90})
+        self.assertEqual(r["obstructions"], [])
+        deepest = max(r["contacts_mm"].values(), default=0.0)
+        self.assertLess(deepest, 1.0, r["contacts_mm"])
+        strict = D.plan(self.p, self.door, 90, tolerance_mm=0)
+        self.assertEqual(strict["tolerance_mm"], 0.0)
+        self.assertEqual(strict["contacts_mm"], r["contacts_mm"])                         # what is touched is listed whatever the tolerance
         for bad in (-1, 51, True, float("nan")):
             with self.assertRaises(BadRequest, msg=bad):
                 D.plan(self.p, self.door, 90, tolerance_mm=bad)
