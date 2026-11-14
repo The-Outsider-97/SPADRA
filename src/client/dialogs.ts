@@ -3,6 +3,7 @@ import { h, s, labelled } from "../../../tools/web/src/dom.js";
 import { appearanceControls, applyAppearance, DEFAULT_APPEARANCE, normaliseAppearance, type Appearance } from "../../../tools/web/src/theme.js";
 import { openDialog, promptDialog, toast } from "../../../tools/web/src/ui.js";
 import { flatten, type Store } from "./store.js";
+import { analysisOfError, renderImpact, type Analysis } from "./impact_panel.js";
 
 const KEY = "spadra.appearance";
 
@@ -336,11 +337,13 @@ export function modifierDialog(store: Store, operation: "boolean" | "chamfer" | 
   type Mesh = { vertices: number[][]; faces: number[][] };
   type DrawingShape = { kind: string; geometry: Record<string, unknown> };
   type Preview = { revision: number; before: Mesh | DrawingShape; after: Mesh | DrawingShape;
-    result: { diagnostics?: Record<string, unknown> } };
+    result: { diagnostics?: Record<string, unknown> }; analysis?: Analysis };
+  type Predicted = { predicted?: { available?: boolean; method?: string; reason?: string; exact?: { volume?: number }; bounds?: { volume?: [number, number] } } };
   const visual = s("svg", { attrs: { viewBox: "0 0 300 200", role: "img", "aria-label": "Computed modifier geometry preview" },
     css: { width: "100%", height: "200px", border: "1px solid var(--hairline)", background: "var(--surface)", borderRadius: "10px" } });
   const status = h("p", { class: "muted", text: "Computing the modifier geometry from a scratch project…" });
-  box.append(visual, status);
+  const impact = h("div", { attrs: { "aria-live": "polite", "aria-label": "Geometric impact" }, css: { display: "grid", gap: ".4rem" } });
+  box.append(visual, status, impact);
   let serial = 0, timeout: ReturnType<typeof setTimeout> | undefined;
 
   const showPreview = (before: Mesh | DrawingShape, after: Mesh | DrawingShape): void => {
@@ -422,6 +425,16 @@ export function modifierDialog(store: Store, operation: "boolean" | "chamfer" | 
     const params = payload();
     if (!params) { status.textContent = "Enter valid finite numbers before applying the modifier."; visual.replaceChildren(); return false; }
     status.textContent = "Evaluating native geometry (read-only)…";
+    if (is3d) {                                                    // the cheap deterministic expectation, shown while the kernel runs
+      void store.api.post<Predicted>("/modifier/predict", { kind: "model", ...params }).then((r) => {
+        if (ticket !== serial) return;
+        const p = r.predicted;
+        const text = p?.available === false ? `No prediction for this operation: ${p.reason ?? ""}`
+          : p?.exact?.volume !== undefined ? `Expected before evaluating: volume ${Number(p.exact.volume.toFixed(4))} m³ (${p.method ?? "deterministic"}).`
+          : p?.bounds?.volume ? `Expected before evaluating: volume between ${Number(p.bounds.volume[0].toFixed(4))} and ${Number(p.bounds.volume[1].toFixed(4))} m³ (${p.method ?? "bounds"}).` : "";
+        if (text) impact.replaceChildren(h("p", { class: "muted", text }));
+      }).catch(() => { /* the preview below reports any real problem */ });
+    }
     try {
       const result = await store.api.post<Preview>("/modifier/preview", { kind: is3d ? "model" : "drawing", ...params });
       if (ticket !== serial) return false;
@@ -429,10 +442,15 @@ export function modifierDialog(store: Store, operation: "boolean" | "chamfer" | 
         status.textContent = "Project revision changed; recompute before applying."; return false;
       }
       showPreview(result.before, result.after);
+      renderImpact(impact, result.analysis ?? null);
       status.textContent = `Verified scratch geometry: dashed = before, blue = after. ${JSON.stringify(result.result.diagnostics ?? {})}`;
-      return true;
+      return result.analysis?.valid !== false;
     } catch (error) {
-      if (ticket === serial) { visual.replaceChildren(); status.textContent = `Geometry refused: ${error instanceof Error ? error.message : String(error)}`; }
+      if (ticket === serial) {
+        visual.replaceChildren();
+        status.textContent = `Geometry refused: ${error instanceof Error ? error.message : String(error)}`;
+        renderImpact(impact, analysisOfError(error), { refused: "The kernel refused this modifier; no analysis is available." });
+      }
       return false;
     }
   };
@@ -456,6 +474,7 @@ export function modifierDialog(store: Store, operation: "boolean" | "chamfer" | 
       if (!done) return undefined;
       const result = done.result as { id?: string; mode?: string; diagnostics?: Record<string, unknown> };
       store.setStatus(`${operation} applied (${result.mode ?? "native"}). ${JSON.stringify(result.diagnostics ?? {})}`);
+      toast(`${operation[0]?.toUpperCase()}${operation.slice(1)} applied.`, { kind: "ok", action: { label: "Undo", run: () => { void store.undo(); } } });
       if (result.id) {
         if (is3d) await store.select({ kind: "model", ids: [result.id] });
         else await store.select({ kind: "drawing", view: drawingId as string, ids: [result.id] });

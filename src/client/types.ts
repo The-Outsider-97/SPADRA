@@ -102,6 +102,8 @@ export interface PlanWall {
   ridge?: [Pt, Pt]; ridge_offset?: number; ridge_across?: Pt;
   /** Two-wall corner relationships, exposed as on-canvas controls rather than hidden Properties rows. */
   corner_joins?: Array<{ endpoint: "start" | "end"; other: string; point: Pt; mode: "through_selected" | "through_other" | "stepped_open" | "miter" }>;
+  /** A curtain wall's joined ends: where it meets another curtain wall, the corner there (L, quad, trapezoid, V, inline, none) and the angle inside it. */
+  cw_corners?: Array<{ endpoint: "start" | "end"; other: string; point: Pt; type: string; angle: number }>;
   /** A foundation's kind (poer, strook, plaat...). */
   kind?: string;
   /** A curtain wall: every member, panel and leaf cut at the plan's cut plane, each loop with its material, kind and hatch, and the symbol of each door field. */
@@ -145,7 +147,15 @@ export interface ScheduleData {
   totals: Record<string, number>; count: number; note: string;
 }
 
-export interface SceneObject { id: string; name: string; category: string; material: string | null; color?: string | null; layer_colors?: Array<{ count: number; color: string | null }>; ridge_handle?: { point: Pt3; across: Pt; offset_mm: number } | null; vertices: Pt3[]; faces: number[][]; layer_points?: Array<{ side: string; point: Pt3 }> }
+export interface SceneObject { id: string; name: string; category: string; material: string | null; color?: string | null; layer_colors?: Array<{ count: number; color: string | null }>; ridge_handle?: { point: Pt3; across: Pt; offset_mm: number } | null; vertices: Pt3[]; faces: number[][]; layer_points?: Array<{ side: string; point: Pt3 }>;
+  /** Which component every face belongs to, as runs in face order (downpipe fittings, curtain-wall panels and members): ``part`` is the Properties key. */
+  components?: SceneComponentRun[];
+  /** Drag handles of swinging door leaves: the leaf's free edge turns about ``hinge``; ``key`` names the curtain-wall field (null for a door in a wall). */
+  door_handles?: DoorHandle[] }
+export interface SceneComponentRun { id: string; count: number; part?: string }
+export interface DoorHandle { part: string | null; key: string | null; hinge: Pt3; free: Pt3; closed: Pt3; sign: number; angle: number; open: boolean }
+/** A part of a curtain wall picked from a plan (``/curtainwall/pick``). */
+export interface PickedPart { id: string; part: string; label: string; kind: string }
 export interface Scene { unit: "m"; revision: number; objects: SceneObject[]; bounds: [Pt3, Pt3] | null; time?: number }
 
 /** The model's animation as the SLAI Animation Agent holds it in the SGEO scene. Times are seconds. ``lanes`` is the same tracks in the units
@@ -172,7 +182,7 @@ export interface PoseData {
 
 export interface Choice { value: string; label: string }
 /** Where a ``link`` row leads: select an element (or a drawing entity), open a view or sheet, or open a dialog. */
-export interface LinkTarget { select?: { model?: string; drawing?: string; entity?: string }; open?: OpenRef; dialog?: string }
+export interface LinkTarget { select?: { model?: string; part?: string; drawing?: string; entity?: string }; open?: OpenRef; dialog?: string }
 export interface PropRow {
   key?: string; label: string; type: "text" | "multiline" | "number" | "choice" | "readonly" | "link" | "sfb" | "catalog" | "color"; value: string | number; unit?: string; choices?: Choice[];
   /** A custom property or a note can be taken away. */
@@ -195,6 +205,10 @@ export interface PropGroup {
 }
 export interface Properties {
   ref: Record<string, string>; title: string; category: string; kind: "model" | "entity" | "sheet" | "view" | "level";
+  /** For a roof accessory: ridge_beam, ridge_strap, roof_edge or drip_edge. */
+  accessory?: string;
+  /** For a downpipe: its components in order (pipe sections, bends, shoe, Y-branch, hopper head). */
+  assembly?: Array<{ id: string; kind: string; label: string }>;
   top: PropRow[]; groups: PropGroup[];
 }
 

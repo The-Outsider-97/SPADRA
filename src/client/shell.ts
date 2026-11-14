@@ -6,6 +6,7 @@ import { openMenu, type MenuEntry } from "./menus.js";
 import { Browser, iconFor } from "./browser.js";
 import { beamAnalysisDialog } from "./engineering.js";
 import { AssistantPanel } from "./assistant.js";
+import { connectionsDialog } from "./connections.js";
 import { agentsDialog, calculatorDialog, optimizationDialog, simulationDialog } from "./agents_ui.js";
 import { quantitiesDialog } from "./quantities.js";
 import { actionById, ChordReader, keymap, recordingKey, shortcutsDialog, tokenOf } from "./shortcuts.js";
@@ -13,9 +14,10 @@ import { diagnosticsDialog, jobChip, jobsDialog } from "./jobs_ui.js";
 import { exportDialog, importDialog } from "./interchange.js";
 import { familiesDialog, issueDialog, levelsDialog, newReportDialog, reportDialog } from "./project_ui.js";
 import { optimizeDialog, scriptsDialog, stairDesignDialog } from "./parametric_ui.js";
+import { reconstructDialog } from "./reconstruct_ui.js";
 import { propertiesDialog, recoverDialog } from "./project_dialogs.js";
 import { appearanceDialog, arrayDialog, releaseArray, modifierDialog, ensureClean, newProjectDialog, numberPrompt, openProjectDialog, reviewDialog } from "./dialogs.js";
-import { downpipeDialog, drainageDialog, gutterDialog, roofEndDialog } from "./gutters.js";
+import { downpipeDialog, drainageDialog, drainDialog, gutterDialog, roofEndDialog } from "./gutters.js";
 import { curtainWallDialog } from "./curtainwall.js";
 import { foundationDialog, foundationReportDialog, reinforceDialog } from "./foundations.js";
 import { renderProperties } from "./properties.js";
@@ -98,6 +100,7 @@ export class Shell {
     this.resizePanel(workspace, right, "right");
     this.el.append(this.title, this.menubar, this.ribbon, workspace, this.status, this.toastEl, this.assistant.el);
     store.openDialog = (name, ref) => this.openNamed(name, ref);
+    store.openAssistant = () => { if (!this.assistant.isOpen) void this.assistant.open(); else void this.assistant.load(); };
     store.changed.on(() => this.render());
     store.jobsChanged.on(() => this.renderStatus());
     store.frame.on(() => this.model.setScene(store.scene));                                       // the playhead moved: redraw the picture only
@@ -377,10 +380,12 @@ export class Shell {
       case "Insert": return [[T("wall", "Wall", "wall", on3dOrPlan, { tool: "wall" }), T("sheet", "New sheet", "page", !!store.project, { run: () => this.newSheet() }),
         T("door", "Door", "door", on3dOrPlan, { tool: "door" }), T("window", "Window", "window", on3dOrPlan, { tool: "window" }),
         T("curtainwall", "Curtain wall", "curtainwall", on3dOrPlan, onPlan ? { tool: "curtainwall" } : { run: () => void curtainWallDialog(store), note: "Parametric mullion/transom framing with panels and doors" }),
+        T("curtainwallrun", "Connected curtain walls", "curtainwall", onPlan, { tool: "curtainwallrun", note: "Click corner after corner; Enter finishes the run. Each segment is its own curtain wall, joined by an L, Quad, Trapezoid or V corner" }),
         T("floor", "Floor", "floor", on3dOrPlan, { tool: "floor" }), T("roof", "Roof", "roof", on3dOrPlan, { tool: "roof" }),
           T("gutter", "Gutter", "gutter", !!store.project, { run: () => gutterDialog(store), note: "Select a roof, then hang gutters (and downpipes) on its eaves" }),
           T("downpipe", "Downpipe", "downpipe", !!store.project, { run: () => downpipeDialog(store), note: "Select a gutter, then add a downpipe under it" }),
           T("drainage", "Drainage", "report", !!store.project, { run: () => drainageDialog(store), note: "The rain each roof sends to its gutters and downpipes" }),
+          T("drain", "Ground drain", "report", !!store.project, { run: () => { const level = store.drawing?.view.level_id ?? undefined; void drainDialog(store, level ? { level } : {}); }, note: "A point drain, channel drain or downpipe ground inlet set into the floor, which is cut to take it" }),
           T("foundation", "Foundation", "foundation", !!store.project, { run: () => { void foundationDialog(store); }, note: "Pads, strips, foundation beams, rafts and ground-bearing slabs; select walls or columns to stand them on" }),
           T("reinforce", "Reinforce foundation", "foundation", !!store.project, { run: () => { void reinforceDialog(store); }, note: "Declare bars, concrete class and cover on the selected foundation, now or later; its shading follows" }),
           T("foundationqty", "Foundation quantities", "report", !!store.project, { run: () => { void foundationReportDialog(store); }, note: "Concrete, build-up, thermal resistance and indicative bars of the selected foundation" }),
@@ -400,7 +405,8 @@ export class Shell {
           T("families", "Families", "family", !!store.project, { run: () => { void familiesDialog(store); }, note: "Define parametric families, their types, formulas and where they are used" }),
           T("scripts", "Scripts", "table", !!store.project, { run: () => { void scriptsDialog(store); }, note: "Python computations on a copy of the model: versioned, isolated, applied only through a reviewed proposal" }),
           T("optimize", "Optimize", "table", !!store.project, { run: () => { void optimizeDialog(store); }, note: "Search a family's parameters against formula objectives and constraints" }),
-          T("stairdesign", "Stair design", "stair", !!store.project, { run: () => stairDesignDialog(store), note: "Preview a stair's risers, treads and flights from the rise and the rules" })]];
+          T("stairdesign", "Stair design", "stair", !!store.project, { run: () => stairDesignDialog(store), note: "Preview a stair's risers, treads and flights from the rise and the rules" }),
+          T("reconstruct", "Reconstruct", "plan", !!store.project, { run: () => { void reconstructDialog(store); }, note: "Read a dimensioned plan (image, PDF or drawing) into walls, openings and rooms, check it over the source, then generate" })]];
       case "Annotate": return [[
         T("line", "Line", "line", kind === "drawing", { tool: "line" }),
         T("polyline", "Polyline", "polyline", kind === "drawing", { tool: "polyline" }),
@@ -448,6 +454,7 @@ export class Shell {
         const simulation = !!store.boot?.capabilities.simulation, optimization = !!store.boot?.capabilities.optimization, calculator = !!store.boot?.capabilities.calculator;
         const picked = store.selection?.kind === "model" ? store.selection.ids : [];
         return [[T("check", "Check model", "check-circle", !!store.project, { run: async () => { await store.loadCheck(); reviewDialog(store); } }),
+          T("connections", "Connections", "check-circle", !!store.project, { run: () => { void connectionsDialog(store); }, note: "Rainwater, roof edges and curtain-wall corners: findings from the model's geometry, corrections proposed for review" }),
           T("report", "Report", "report", !!store.project, { run: () => newReportDialog(store), note: "A snapshot of the project as an SLDC document" }),
           T("rebuild", "Rebuild", "refresh", !!store.project, { run: async () => { const job = await store.runJob("rebuild", {}, { refresh: true }); if (job?.status === "done") store.setStatus("Model rebuilt"); }, note: "Regenerate every element from its parameters" }),
           T("quantities", "Quantities", "table", !!store.project, { run: () => quantitiesDialog(store, picked.length ? picked : null, picked.length ? `${picked.length} selected` : "Whole model"),
@@ -473,6 +480,7 @@ export class Shell {
         T("gutter", "Gutter", "gutter", true, { run: () => gutterDialog(store), note: "Select a roof, then hang gutters (and downpipes) on its eaves" }),
         T("downpipe", "Downpipe", "downpipe", true, { run: () => downpipeDialog(store), note: "Select a gutter, then add a downpipe under it" }),
         T("drainage", "Drainage", "report", true, { run: () => drainageDialog(store), note: "The rain each roof sends to its gutters and downpipes" }),
+        T("drain", "Ground drain", "report", true, { run: () => { void drainDialog(store); }, note: "A point drain, channel drain or downpipe ground inlet set into the floor, which is cut to take it" }),
         T("foundation", "Foundation", "foundation", true, { run: () => { void foundationDialog(store); }, note: "Pads, strips, foundation beams, rafts and ground-bearing slabs; select walls or columns to stand them on" })], [T("beam", "Beam", "beam", true, { tool: "beam" }), T("column", "Column", "column", true, { tool: "column" })], [nope("dim3", "Dimension", "dimension")],
       [T("snapshot", "Snapshot", "cube", true, { run: () => this.snapshotMenu(this.ribbon), note: "Put a picture of this 3D view on a sheet" })],
       [T("section", "Section", "section", true, { tool: "section" }), T("elevation", "Elevation", "elevation", true, { run: () => this.elevationMenu(this.ribbon) }), T("schedule", "Schedule", "table", true, { run: () => this.scheduleMenu(this.ribbon) })]];
@@ -499,6 +507,7 @@ export class Shell {
        T("door", "Door", "door", onPlan, { tool: "door" }),
        T("window", "Window", "window", onPlan, { tool: "window" }),
        T("curtainwall", "Curtain wall", "curtainwall", onPlan, { tool: "curtainwall" }),
+       T("curtainwallrun", "Connected curtain walls", "curtainwall", onPlan, { tool: "curtainwallrun", note: "Click corner after corner; Enter finishes the run" }),
        T("floor", "Floor", "floor", onPlan, { tool: "floor" }),
        T("roof", "Roof", "roof", onPlan, { tool: "roof" })],
       [T("section", "Section", "section", onPlan, { tool: "section" }),

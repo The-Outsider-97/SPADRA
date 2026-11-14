@@ -25,6 +25,9 @@ export const FRAME_MATERIALS = ["Aluminium", "Steel", "Timber"];
 export const PANEL_TYPES = ["Window", "Opaque panel"];
 export const PANEL_MATERIALS = ["Glass", "Aluminium", "Steel", "Timber"];
 export const DOOR_TYPES = ["Single Flush Door", "Double Door", "Sliding Door"];
+/** The corners two curtain walls can meet in (the server's ``CORNER_TYPES``) and the angles, inside the corner, each can be built for. */
+export const CORNER_LABELS: Record<string, string> = { L: "L-Corner", quad: "Quad Corner", trapezoid: "Trapezoid Corner", V: "V-Corner" };
+export const CORNER_RANGES: Record<string, [number, number]> = { L: [45, 135], quad: [30, 150], trapezoid: [60, 175], V: [15, 165] };
 
 let library: CurtainProfiles | null = null;
 async function profiles(store: Store): Promise<CurtainProfiles | null> {
@@ -45,7 +48,7 @@ export function elevationSvg(pv: CurtainPreview | null): SVGSVGElement {
 }
 
 /** The dialog. `start` and `end` (drawing units) come from the plan tool; without them the person types the line. `level` is the plan's level. */
-export async function curtainWallDialog(store: Store, from: { start?: Pt; end?: Pt; level?: string } = {}): Promise<void> {
+export async function curtainWallDialog(store: Store, from: { start?: Pt; end?: Pt; level?: string; points?: Pt[]; closed?: boolean } = {}): Promise<void> {
   if (!store.project) return;
   const lib = await profiles(store);
   if (!lib) return;
@@ -54,7 +57,10 @@ export async function curtainWallDialog(store: Store, from: { start?: Pt; end?: 
   const sel = (items: Array<[string, string]>, value?: string): HTMLSelectElement => h("select", {}, ...items.map(([v, l]) => h("option", { value: v, text: l, ...(v === value ? { selected: true } : {}) })));
   const strs = (items: string[], value?: string): HTMLSelectElement => sel(items.map((v) => [v, v] as [string, string]), value);
   const level = sel(store.levels.map((l) => [l.id, l.name] as [string, string]), from.level ?? store.levels[0]?.id);
-  const start = from.start ?? [0, 0], end = from.end ?? [6000 / perUnit, 0];
+  const chain = from.points && from.points.length >= 2 ? from.points : null;          // a run of connected curtain walls drawn in the plan
+  const start = chain?.[0] ?? from.start ?? [0, 0], end = chain?.[1] ?? from.end ?? [6000 / perUnit, 0];
+  const segments = chain ? chain.length - 1 + (from.closed ? 1 : 0) : 1;
+  const corner = sel([["auto", "Automatic (the corner that suits each angle)"], ...Object.entries(CORNER_LABELS)], "auto");
   const sx = num(String(start[0])), sy = num(String(start[1])), ex = num(String(end[0])), ey = num(String(end[1]));
   const height = num("3000", "50", "100"), baseOffset = num("0", "10");
   const name = h("input", { type: "text", value: "Curtain Wall", attrs: { autocomplete: "off", maxlength: "80" } });
@@ -103,7 +109,7 @@ export async function curtainWallDialog(store: Store, from: { start?: Pt; end?: 
     const p = lib.profiles.find((x) => x.id === profile.value);
     const mmValue = (mode: string, v: string): number => (mode === "count" ? Number(v) : Number(v));
     const out: Record<string, unknown> = {
-      start: [Number(sx.value), Number(sy.value)], end: [Number(ex.value), Number(ey.value)], level: level.value, height: Number(height.value), base_offset: Number(baseOffset.value), name: name.value.trim() || "Curtain Wall",
+      ...(chain ? { points: chain, closed: !!from.closed, corner: corner.value } : { start: [Number(sx.value), Number(sy.value)], end: [Number(ex.value), Number(ey.value)] }), level: level.value, height: Number(height.value), base_offset: Number(baseOffset.value), name: name.value.trim() || "Curtain Wall",
       v_mode: vMode.value, v_value: mmValue(vMode.value, vValue.value), v_align: vAlign.value, h_mode: hMode.value, h_value: mmValue(hMode.value, hValue.value), h_align: hAlign.value,
       frame_material: material.value, corner_radius: Number(radius.value), join: join.value,
       panel_type: ptype.value, panel_material: pmat.value, panel_thickness: Number(pthick.value), panel_offset: Number(poffset.value),
@@ -140,7 +146,10 @@ export async function curtainWallDialog(store: Store, from: { start?: Pt; end?: 
     body: h("div", { css: { display: "grid", gridTemplateColumns: "minmax(18rem, 1fr) minmax(16rem, 1fr)", gap: "1.25rem", alignItems: "start" } },
       h("div", { css: { display: "grid", gap: "0.9rem" } },
         labelled("Name", name), labelled("Level", level),
-        group(`Where (${unit})`, two(labelled("Start x", sx), labelled("Start y", sy)), two(labelled("End x", ex), labelled("End y", ey)), two(labelled("Height (mm)", height), labelled("Base offset (mm)", baseOffset))),
+        chain ? group("Where", h("p", { text: `${segments} connected curtain walls along the ${chain.length} points picked in the plan${from.closed ? " (closed)" : ""}. Each stays its own element; the preview shows the first.` }),
+            labelled("Corners where they meet", corner, { hint: "Each corner can be changed afterwards: right-click a curtain wall, or select it and use Properties." }),
+            two(labelled("Height (mm)", height), labelled("Base offset (mm)", baseOffset)))
+          : group(`Where (${unit})`, two(labelled("Start x", sx), labelled("Start y", sy)), two(labelled("End x", ex), labelled("End y", ey)), two(labelled("Height (mm)", height), labelled("Base offset (mm)", baseOffset))),
         group("Vertical members (mullions)", labelled("Spacing rule", vMode, { hint: "Centre to centre is the distance between member axes; the other rules divide the span in equal bays." }),
           two(labelled("Distance (mm) or number", vValue), labelled("Remainder", vAlign))),
         group("Horizontal members (transoms)", labelled("Spacing rule", hMode), two(labelled("Distance (mm) or number", hValue), labelled("Remainder", hAlign))),
@@ -150,14 +159,16 @@ export async function curtainWallDialog(store: Store, from: { start?: Pt; end?: 
           h("details", {}, h("summary", { text: "A field changed into a door starts as" }), two(labelled("Door type", dtype), labelled("Hinge", dhinge)), labelled("Swing", dswing)))),
       h("div", { css: { display: "grid", gap: "0.5rem", position: "sticky", top: "0" } }, picture, status,
         h("p", { class: "muted", text: "Remove or add a member, or turn a field into a door, afterwards in Properties. Profile sizes are as the Stabalux catalogues print them; they are not approvals of a complete system." }))),
-    actions: [{ label: "Add curtain wall", kind: "primary", run: async () => {
+    actions: [{ label: segments > 1 ? `Add ${segments} curtain walls` : "Add curtain wall", kind: "primary", run: async () => {
       window.clearTimeout(timer);
       await refresh();
       if (!latest) { toast(status.textContent || "This curtain wall cannot be made.", { kind: "error" }); return undefined; }
       const out = await store.run("model.add_curtainwall", request());
       if (!out) return undefined;
-      const id = (out.result as { id?: string } | undefined)?.id;
-      if (id) await store.select({ kind: "model", ids: [id] });
+      const made = out.result as { id?: string; ids?: string[] } | undefined;
+      const ids = made?.ids?.length ? made.ids : made?.id ? [made.id] : [];
+      if (ids.length) await store.select({ kind: "model", ids });
+      if (ids.length > 1) toast(`${ids.length} curtain walls made and joined. Click one to edit it; right-click it to change a corner.`, { kind: "ok" });
       return true;
     } }],
   });
@@ -165,4 +176,36 @@ export async function curtainWallDialog(store: Store, from: { start?: Pt; end?: 
   void refresh();
   await handle.result;
   window.clearTimeout(timer);
+}
+
+/** Change the corner at one end of a curtain wall where it meets another: L, Quad, Trapezoid or V (or automatic), with its sizes. The server checks the
+ *  corner against the angle the walls meet at and refuses one that cannot be built there, naming the range. */
+export async function cornerDialog(store: Store, id: string, end: "start" | "end" = "end"): Promise<void> {
+  const num = (placeholder: string): HTMLInputElement => h("input", { type: "number", step: "1", min: "10", attrs: { autocomplete: "off", placeholder } });
+  const which = h("select", {}, h("option", { value: "start", text: "Start", ...(end === "start" ? { selected: true } : {}) }), h("option", { value: "end", text: "End", ...(end === "end" ? { selected: true } : {}) }));
+  const type = h("select", {}, h("option", { value: "auto", text: "Automatic" }), ...Object.entries(CORNER_LABELS).map(([v, l]) => h("option", { value: v, text: `${l} (${CORNER_RANGES[v]?.[0]}–${CORNER_RANGES[v]?.[1]}°)` })));
+  const depthA = num("auto"), depthB = num("auto"), leg = num("auto"), legA = num("auto"), legB = num("auto"), thick = num("auto");
+  const rows: Record<string, HTMLElement> = {
+    quad: h("div", { css: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" } }, labelled("Depth along this wall (mm)", depthA), labelled("Depth along the other (mm)", depthB)),
+    trapezoid: labelled("Leg (mm)", leg),
+    L: h("div", { css: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "0.75rem" } }, labelled("Leg on this wall (mm)", legA), labelled("Leg on the other (mm)", legB), labelled("Thickness (mm)", thick)),
+  };
+  const sizes = h("div", {});
+  const sync = (): void => { clear(sizes); const r = rows[type.value === "V" ? "L" : type.value]; if (r) sizes.append(r); };
+  type.addEventListener("change", sync);
+  sync();
+  const handle = openDialog<true>({
+    title: "Curtain wall corner", size: "narrow", focus: () => type,
+    body: h("div", { css: { display: "grid", gap: "0.9rem" } }, labelled("At the wall's", which), labelled("Corner", type), sizes,
+      h("p", { class: "muted", text: "Leave a size empty to keep it as it is (or as the corner type sizes it). The other wall's end follows." })),
+    actions: [{ label: "Apply", kind: "primary", run: async () => {
+      const params: Record<string, unknown> = { id, end: which.value, type: type.value };
+      const put = (key: string, el: HTMLInputElement): void => { if (el.value) params[key] = Number(el.value); };
+      if (type.value === "quad") { put("depth_a", depthA); put("depth_b", depthB); }
+      if (type.value === "trapezoid") put("leg", leg);
+      if (type.value === "L" || type.value === "V") { put("leg_a", legA); put("leg_b", legB); put("thickness", thick); }
+      return (await store.run("model.set_curtainwall_corner", params)) ? true : undefined;
+    } }],
+  });
+  await handle.result;
 }

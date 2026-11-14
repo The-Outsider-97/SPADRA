@@ -12,7 +12,9 @@ import { cssColor, rgba, withAlpha } from "./palette.js";
 import { niceStep, snapToGrid, wallCentreShift } from "./geom2d.js";
 import { addLayerDialog } from "./dialogs.js";
 import type { Store } from "./store.js";
-import type { Pt3, Scene } from "./types.js";
+import type { DoorHandle, Pt3, Scene, SceneComponentRun } from "./types.js";
+import { downpipeComponentsDialog } from "./gutters.js";
+import { dragAngle, leafPoint, partOfFace } from "./assembly.js";
 
 const MM_PER = { mm: 1, cm: 10, m: 1000 } as const;
 const MATERIAL_COLOR: Record<string, [number, number, number]> = {
@@ -28,6 +30,8 @@ interface Drawable {
   ridgeHandle: { point: Pt3; across: [number, number]; offset_mm: number } | null;
   tri: WebGLBuffer; triCount: number; edge: WebGLBuffer; edgeCount: number;
   verts: Pt3[]; faces: number[][]; layerPoints: Array<{ side: string; point: Pt3 }>;
+  /** Which component each face is (runs in face order), for double-click part selection; and the drag handles of swinging door leaves. */
+  components: SceneComponentRun[]; doorHandles: DoorHandle[];
 }
 
 interface ElementDrag { id: string; start: Pt3; base: number[]; delta: number[]; y0: number }
@@ -204,7 +208,7 @@ export class ModelView {
         if (!tri || !edge) continue;
         gl.bindBuffer(gl.ARRAY_BUFFER, tri); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(pos), gl.STATIC_DRAW);
         gl.bindBuffer(gl.ARRAY_BUFFER, edge); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(edges), gl.STATIC_DRAW);
-        this.drawables.push({ id: o.id, name: o.name, material: o.material, color: o.color ?? null, layerColors: o.layer_colors ?? [], ridgeHandle: o.ridge_handle ?? null, category: o.category, tri, triCount: pos.length / 6, edge, edgeCount: edges.length / 3, verts: o.vertices, faces: o.faces, layerPoints: o.layer_points ?? [] });
+        this.drawables.push({ id: o.id, name: o.name, material: o.material, color: o.color ?? null, layerColors: o.layer_colors ?? [], ridgeHandle: o.ridge_handle ?? null, category: o.category, tri, triCount: pos.length / 6, edge, edgeCount: edges.length / 3, verts: o.vertices, faces: o.faces, layerPoints: o.layer_points ?? [], components: o.components ?? [], doorHandles: o.door_handles ?? [] });
       }
     }
     this.buildGrid();
@@ -320,7 +324,10 @@ export class ModelView {
     c.addEventListener("pointermove", (e) => this.move(e));
     c.addEventListener("pointerup", (e) => { void this.up(e); });
     c.addEventListener("pointerleave", () => { this.hover = null; this.ground = null; this.openingAt = null; this.draw(); });
-    c.addEventListener("dblclick", () => { if (this.store.tool === "floor" || this.store.tool === "roof") void this.commitOutline(); });
+    c.addEventListener("dblclick", (e) => {
+      if (this.store.tool === "floor" || this.store.tool === "roof") { void this.commitOutline(); return; }
+      if (this.store.tool === "select") { const [x, y] = this.pointer(e); void this.editPartAt(x, y); }
+    });
     c.addEventListener("keydown", (e) => { void this.key(e); });
     this.canvas.addEventListener("keydown", (e) => { void this.key(e); });
   }
@@ -568,6 +575,32 @@ export class ModelView {
     return hits.sort((a, b) => a.distance - b.distance || a.id.localeCompare(b.id));
   }
 
+  /** The component of an assembly under the pointer: the nearest face the ray meets, looked up in the element's face runs. */
+  private partAt(x: number, y: number): { id: string; part: string; category: string } | null {
+    const ray = this.rayAt(x, y);
+    const hit = this.hitAt(x, y);
+    const d = hit ? this.drawables.find((o) => o.id === hit.id) : undefined;
+    if (!ray || !d || !d.components.length) return null;
+    let best = Infinity, face = -1;
+    d.faces.forEach((f, i) => {
+      const a = d.verts[f[0] ?? -1], b = d.verts[f[1] ?? -1], c = d.verts[f[2] ?? -1];
+      if (!a || !b || !c) return;
+      const t = rayTriangle(ray, a, b, c);
+      if (t !== null && t < best) { best = t; face = i; }
+    });
+    const part = partOfFace(d.components, face);
+    return part ? { id: d.id, part, category: d.category } : null;
+  }
+
+  /** Double-click: select the panel, member or fitting under the pointer, so Properties edits that one part of the curtain wall or downpipe. */
+  private async editPartAt(x: number, y: number): Promise<void> {
+    const hit = this.partAt(x, y);
+    if (!hit) return;
+    await this.store.select({ kind: "model", ids: [hit.id], part: hit.part });
+    this.store.setStatus(`${this.store.properties?.title ?? "Part"} selected: edit it in Properties.${hit.category === "downpipe" ? " Right-click the downpipe to add or remove components." : ""}`);
+    if (hit.category === "downpipe" && !this.store.properties) await downpipeComponentsDialog(this.store, hit.id);
+  }
+
   /** The nearest thing under the pointer (optionally only of one category) and the exact point of the ray on it. */
   private hitAt(x: number, y: number, only?: string): { id: string; point: Pt3 } | null {
     return this.hitCandidates(x, y, only)[0] ?? null;
@@ -757,6 +790,8 @@ export class ModelView {
     const selection = this.store.selection;
     if (this.clean || this.store.tool !== "select" || selection?.kind !== "model" || selection.ids.length !== 1) return;
     const id = selection.ids[0] as string;
+    const leaves = this.drawables.find((d) => d.id === id && d.doorHandles.length > 0);
+    if (leaves) this.syncDoorGrips(leaves);
     const pipe = this.drawables.find((d) => d.id === id && d.category === "downpipe");
     if (pipe) { this.syncDownpipeGrip(pipe); return; }
     const opening = this.drawables.find((d) => d.id === id && (d.category === "door" || d.category === "window"));
@@ -835,6 +870,50 @@ export class ModelView {
       else { grip.style.left = `${base[0]}px`; grip.style.top = `${base[1]}px`; }
     });
     grip.addEventListener("pointercancel", () => { origin = null; grip.style.left = `${base[0]}px`; grip.style.top = `${base[1]}px`; });
+  }
+
+  /** Door leaves in a wall or a curtain wall: a grip on each swinging leaf's free edge. Dragging it turns the leaf about its hinge in the 3D view and,
+   *  on release, stores that opening angle and shows the leaf open (one undoable edit; the server keeps it within 5–170°). Shift snaps to 15°. */
+  private syncDoorGrips(item: Drawable): void {
+    for (const hd of item.doorHandles) {
+      if (Math.hypot(hd.closed[0] - hd.hinge[0], hd.closed[1] - hd.hinge[1]) < 1e-6) continue;
+      const at = (deg: number): Pt3 => leafPoint(hd, deg);
+      const start = this.project(hd.open ? at(hd.angle) : hd.closed);
+      const hinge = this.project(hd.hinge);
+      if (!start || !hinge || start[0] < 8 || start[1] < 8 || start[0] > this.width - 8 || start[1] > this.height - 8) continue;
+      const grip = h("button", { class: "ridge-grip", type: "button", text: "◐",
+        attrs: { "aria-label": "Open or close this door leaf", title: `Drag to open the leaf (now ${hd.open ? `${hd.angle.toFixed(0)}° open` : "shown closed"}); Shift snaps to 15°` } });
+      grip.style.left = `${start[0]}px`; grip.style.top = `${start[1]}px`;
+      const guide = h("div", { attrs: { "aria-hidden": "true" } });
+      guide.style.cssText = "display:none;position:absolute;pointer-events:none;border-top:2px dashed #FFD400;transform-origin:left center";
+      this.layerControls.append(guide, grip);
+      let dragging = false, angle = hd.angle;
+      const place = (deg: number): void => {
+        const q = this.project(at(deg));
+        if (!q) return;
+        grip.style.left = `${q[0]}px`; grip.style.top = `${q[1]}px`;
+        const dx = q[0] - hinge[0], dy = q[1] - hinge[1];
+        guide.style.display = ""; guide.style.left = `${hinge[0]}px`; guide.style.top = `${hinge[1]}px`;
+        guide.style.width = `${Math.hypot(dx, dy)}px`; guide.style.transform = `rotate(${Math.atan2(dy, dx)}rad)`;
+      };
+      grip.addEventListener("pointerdown", (e) => { if (e.button !== 0) return; e.preventDefault(); e.stopPropagation(); grip.setPointerCapture(e.pointerId); dragging = true; });
+      grip.addEventListener("pointermove", (e) => {
+        if (!dragging) return;
+        const [x, y] = this.pointer(e);
+        const ray = this.rayAt(x, y);
+        const p = ray ? rayPlaneZ(ray, hd.hinge[2]) : null;
+        if (!p) return;
+        angle = dragAngle(hd, [p[0], p[1]], e.shiftKey);
+        place(angle);
+        grip.title = `${angle}° open — release to apply`;
+      });
+      grip.addEventListener("pointerup", (e) => {
+        if (!dragging) return;
+        dragging = false; grip.releasePointerCapture(e.pointerId);
+        if (Math.abs(angle - hd.angle) > 0.5 || !hd.open) void this.store.run("model.set_property", { id: item.id, key: hd.key ? `${hd.key}:open_to` : "open_to", value: angle });
+      });
+      grip.addEventListener("pointercancel", () => { dragging = false; guide.style.display = "none"; grip.style.left = `${start[0]}px`; grip.style.top = `${start[1]}px`; });
+    }
   }
 
   private syncDownpipeGrip(item: Drawable): void {

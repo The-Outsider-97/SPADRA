@@ -29,3 +29,12 @@ export function presentUnexpected(error: unknown, what: string): Presented {
   const cause = error instanceof Error && error.message ? error.message : String(error);
   return { code: "client", category: "Unexpected", message: `${what} failed unexpectedly (${cause}).`, recovery: "Nothing was changed. Try again; if it keeps happening, see the diagnostics log." };
 }
+
+export interface Fix { label: string; steps: Array<{ op: string; params: Record<string, unknown> }> }
+export interface FixDetails { element?: string; part?: string; cell?: string; positions_mm?: number[]; gap_mm?: number; needed_mm?: number; fixes?: Fix[] }
+
+/** The corrections a server error offers (``details.fixes``), each a label and the commands that make it; none when the error has no such details. */
+export function fixesOf(error: { details: unknown }): Fix[] {
+  const d = error.details as FixDetails | null | undefined;
+  return Array.isArray(d?.fixes) ? d.fixes.filter((f) => f && typeof f.label === "string" && Array.isArray(f.steps) && f.steps.length > 0) : [];
+}
