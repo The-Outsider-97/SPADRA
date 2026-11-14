@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import math
+
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -37,8 +38,8 @@ from . import geometry as G
 
 PROFILES = Path(__file__).with_name("data") / "stabalux_profiles.json"
 FRAME_MATERIALS = ("Aluminium", "Steel", "Timber")
-PANEL_TYPES = ("Window", "Opaque panel", "Door")        # what one field can be
-WALL_PANEL_TYPES = ("Window", "Opaque panel")            # what the wall's own panel setting can be: a door only ever stands in a field of the bottom row
+PANEL_TYPES = ("Window", "Opaque panel", "Door", "Louvre")        # what one field can be
+WALL_PANEL_TYPES = ("Window", "Opaque panel", "Louvre")            # what the wall's own panel setting can be: a door only ever stands in a field of the bottom row
 PANEL_MATERIALS = ("Glass", "Aluminium", "Steel", "Timber")
 MODES = ("centre", "max", "min", "count")
 ALIGNS = ("start", "centre", "end")
@@ -58,8 +59,9 @@ GAP = 0.005                           # m: the clearance round a door leaf in it
 MIN_FIELD = 0.05                      # m: a field narrower than this is not a field
 MIN_DOOR_FIELD = (0.4, 0.8)           # m: the least width and height of a field that takes a door (a modelling limit, not a code requirement)
 OVERLAP = 0.05                        # m: the two leaves of a sliding door overlap by this much when closed
-KINDS = {"frame": "Frame", "glass": "Glazing", "panel": "Opaque panel", "door": "Door leaf"}
-PART_ORDER = ("frame", "glass", "panel", "door")
+KINDS = {"frame": "Frame", "glass": "Glazing", "panel": "Opaque panel", "louvre": "Louvre", "door": "Door leaf"}
+PART_ORDER = ("frame", "glass", "panel", "louvre", "door")
+NON_GRID_ROLES = ("fin", "shelf")
 
 
 # ------------------------------------------------------------------------------------------------------------------- profile library
@@ -108,27 +110,50 @@ def frame_of(meta: Mapping[str, Any]) -> dict[str, Any]:
     s, e = E.m(meta, "start"), E.m(meta, "end")
     length = math.dist(s, e)
     angle = math.atan2(e[1] - s[1], e[0] - s[0])
-    return {"start": (float(s[0]), float(s[1])), "end": (float(e[0]), float(e[1])), "length": length, "angle": angle, "height": _num(meta, "height", 3.0), "base_offset": _num(meta, "base_offset", 0.0)}
+    return {"start": (float(s[0]), float(s[1])),
+            "end": (float(e[0]), float(e[1])),
+            "length": length, "angle": angle,
+            "height": _num(meta, "height", 3.0),
+            "base_offset": _num(meta, "base_offset", 0.0),
+            "lean": _num(meta, "lean", 0.0)}
 
 
 def base_z(project: Any, meta: Mapping[str, Any]) -> float:
     return E.level_elevation(project, E.m(meta, "level")) + _num(meta, "base_offset", 0.0)
 
 
-def _to_world(fr: Mapping[str, Any], z0: float):
+def _to_world(fr, z0):
     c, s = math.cos(fr["angle"]), math.sin(fr["angle"])
     sx, sy = fr["start"]
-
-    def at(u: float, d: float, z: float) -> list[float]:
-        return [sx + u * c - d * s, sy + u * s + d * c, z0 + z]
+    tan_lean = math.tan(math.radians(fr.get("lean", 0.0)))
+    def at(u, d, z):
+        d_eff = d + z * tan_lean
+        return [sx + u * c - d_eff * s, sy + u * s + d_eff * c, z0 + z]
     return at
+
+
+_BAND_KEYS       = ("type", "material", "thickness", "offset", "door_type", "hinge", "swing", "slide", "opening_angle", "show_open")
+
+
+def _bands(meta, key):
+    raw = E.m(meta, key) or ()
+    out = []
+    for b in raw:
+        band = {k: b[k] for k in _BAND_KEYS if k in b}
+        band["from"] = float(b["from"]) / 1000.0   # stored in mm, kept in metres
+        band["to"]   = float(b["to"])   / 1000.0
+        out.append(band)
+    return out
 
 
 def spec(meta: Mapping[str, Any]) -> dict[str, Any]:
     """Every parameter, with its defaults, validated enough to build from (``check`` reports what cannot be built)."""
     fr = frame_of(meta)
     return {**fr, "frame_material": str(E.m(meta, "frame_material", "Aluminium")), "frame_profile": E.m(meta, "frame_profile"),
-            "frame_width": _num(meta, "frame_width", DEFAULTS_MM["frame_width"] / 1000), "frame_depth": _num(meta, "frame_depth", DEFAULTS_MM["frame_depth"] / 1000),
+            "frame_width": _num(meta, "frame_width", DEFAULTS_MM["frame_width"] / 1000),
+            "frame_depth": _num(meta, "frame_depth", DEFAULTS_MM["frame_depth"] / 1000),
+            "mullion_depth": _num(meta, "mullion_depth", _num(meta, "frame_depth", DEFAULTS_MM["frame_depth"] / 1000)),
+            "transom_depth": _num(meta, "transom_depth", _num(meta, "frame_depth", DEFAULTS_MM["frame_depth"] / 1000)),
             "corner_radius": _num(meta, "corner_radius", 0.0), "join": str(E.m(meta, "join", "mullions")),
             "v": {"mode": str(E.m(meta, "v_mode", "centre")), "value": _num(meta, "v_value", 1.2), "align": str(E.m(meta, "v_align", "start"))},
             "h": {"mode": str(E.m(meta, "h_mode", "centre")), "value": _num(meta, "h_value", H_DEFAULT), "align": str(E.m(meta, "h_align", "start"))},
@@ -140,6 +165,19 @@ def spec(meta: Mapping[str, Any]) -> dict[str, Any]:
             "door_type": str(E.m(meta, "door_type", "Single Flush Door")), "door_hinge": str(E.m(meta, "door_hinge", "start")), "door_swing": int(E.m(meta, "door_swing", 1)),
             "opening_angle": _num(meta, "opening_angle", E.DEFAULT_OPENING_ANGLE),
             "top_profile": [tuple(map(float, q)) for q in (E.m(meta, "top_profile") or ())] or None,     # a top that follows a roof (attachments)
+            "bands": {"rows": _bands(meta, "band_rows"), "cols": _bands(meta, "band_cols")},
+            "fin":   {"depth": _num(meta, "fin_depth",   0.0),
+                      "width": _num(meta, "fin_width",   0.05),
+                      "offset": _num(meta, "fin_offset", 0.0),
+                      "side":  str(E.m(meta, "fin_side",  "left"))},
+            "shelf": {"depth": _num(meta, "shelf_depth", 0.0),
+                      "width": _num(meta, "shelf_width", 0.05),
+                      "offset": _num(meta, "shelf_offset", 0.0),
+                      "side":  str(E.m(meta, "shelf_side", "up"))},
+            "louvre": {"pitch": _num(meta, "louvre_pitch", 0.15),
+                       "tilt": _num(meta, "louvre_tilt", 30.0),
+                       "depth": _num(meta, "louvre_depth", 0.10),
+                       "thickness": _num(meta, "louvre_thickness", 0.002)},
             "end_cond": dict(E.m(meta, "end_cond") or {}), "corner_posts": list(E.m(meta, "corner_posts") or [])}         # what its ends meet (resolve_ends)
 
 
@@ -238,16 +276,39 @@ def cells(sp: Mapping[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
-def cell_spec(sp: Mapping[str, Any], cell: Mapping[str, Any]) -> dict[str, Any]:
-    """What one field is: the wall's own panel parameters overridden by whatever was set for this field."""
-    over = sp["panels"].get(cell["key"]) or {}
-    kind = str(over.get("type", sp["panel_type"]))
-    base = {"Window": sp["panel_material"] if sp["panel_type"] == "Window" else "Glass", "Opaque panel": sp["panel_material"] if sp["panel_type"] == "Opaque panel" else "Aluminium",
-            "Door": sp["frame_material"]}
-    material = str(over.get("material") or base.get(kind, "Glass"))
-    return {"type": kind, "material": material, "thickness": float(over.get("thickness", sp["panel_thickness"])), "offset": float(over.get("offset", sp["panel_offset"])),
-            "door_type": str(over.get("door_type", sp["door_type"])), "hinge": str(over.get("hinge", sp["door_hinge"])), "swing": int(over.get("swing", sp["door_swing"])),
-            "slide": str(over.get("slide", "end")), "opening_angle": float(over.get("opening_angle", sp["opening_angle"])), "show_open": bool(over.get("show_open", False))}
+def _material_for(sp, kind):
+    if kind == "Door":     return sp["frame_material"]
+    if kind == "Louvre":   return "Aluminium"
+    if sp["panel_type"] == kind:
+        return sp["panel_material"]        # the wall's own material, when the type matches
+    return {"Window": "Glass", "Opaque panel": "Aluminium"}.get(kind, "Glass")
+
+
+def cell_spec(sp, cell):
+    wall = {"type": sp["panel_type"], "material": None,
+            "thickness": sp["panel_thickness"], "offset": sp["panel_offset"],
+            "door_type": sp["door_type"], "hinge": sp["door_hinge"],
+            "swing": sp["door_swing"], "slide": "end",
+            "opening_angle": sp["opening_angle"], "show_open": False}
+    layers = [wall]
+    for bands, (lo, hi) in ((sp["bands"]["cols"], (cell["u0"], cell["u1"])),
+                            (sp["bands"]["rows"], (cell["z0"], cell["z1"]))):
+        for b in bands:
+            if b["from"] < hi and b["to"] > lo:      # overlap, not containment
+                layers.append(b); break
+    layers.append(sp["panels"].get(cell["key"]) or {})
+
+    out = dict(wall)
+    for l in layers[1:]:
+        for k, v in l.items():
+            if v is not None and k in out:
+                out[k] = v
+    if out["material"] is None:
+        out["material"] = _material_for(sp, out["type"])
+    # if the type was changed by a band but no material was, follow the new type's default
+    if out["type"] != sp["panel_type"] and not any("material" in l for l in layers[1:]):
+        out["material"] = _material_for(sp, out["type"])
+    return out
 
 
 def _remap_panels(project: Any, oid: str, old: Sequence[Mapping[str, Any]], old_panels: Mapping[str, Any], new: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -428,6 +489,38 @@ def door_conflicts(sp: Mapping[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _slats(u0, u1, z0, z1, yd, lo):
+    """Stack of tilted slats filling the field; each is a thin box rotated in the (d, z) plane about its centre."""
+    p  = max(lo["pitch"], 0.005)
+    th = lo["tilt"] * math.pi / 180.0
+    c, s = math.cos(th), math.sin(th)
+    slats = []
+    z = z0 + p / 2
+    while z < z1 - 1e-6:
+        # unrotated box: u0..u1 × [yd - depth/2, yd + depth/2] × [z - t/2, z + t/2]
+        verts = [
+            [u0, yd - lo["depth"]/2, z - lo["thickness"]/2],
+            [u1, yd - lo["depth"]/2, z - lo["thickness"]/2],
+            [u1, yd + lo["depth"]/2, z - lo["thickness"]/2],
+            [u0, yd + lo["depth"]/2, z - lo["thickness"]/2],
+            [u0, yd - lo["depth"]/2, z + lo["thickness"]/2],
+            [u1, yd - lo["depth"]/2, z + lo["thickness"]/2],
+            [u1, yd + lo["depth"]/2, z + lo["thickness"]/2],
+            [u0, yd + lo["depth"]/2, z + lo["thickness"]/2],
+        ]
+        # rotate each vertex about the slat's centre line (d = yd, z = z)
+        rot = [[v[0],
+                yd + (v[1] - yd) * c - (v[2] - z) * s,
+                z  + (v[1] - yd) * s + (v[2] - z) * c] for v in verts]
+        slats.append(_positive(rot, [
+            [0,1,2],[0,2,3], [4,6,5],[4,7,6],
+            [0,4,5],[0,5,1], [1,5,6],[1,6,2],
+            [2,6,7],[2,7,3], [3,7,4],[3,4,0],
+        ]))
+        z += p
+    return slats
+
+
 def members(project: Any, meta: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Every solid of the curtain wall in the wall's own frame (u along, d across, z up from the base), in drawing order: the frame, then each field's
     glazing, panel or door leaves. Each carries its ``kind``, ``material``, ``mesh``, what it is (``role``, ``cell``, ``length``) and its component
@@ -442,9 +535,10 @@ def members(project: Any, meta: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 def _members(project: Any, sp: Mapping[str, Any], doors: bool = True) -> list[dict[str, Any]]:
     """``members`` for a given spec (so a correction can be tried on a changed copy of it); ``doors=False`` leaves the check that a door is whole to the caller."""
-    L, H, w, D = sp["length"], sp["height"], sp["frame_width"], sp["frame_depth"]
-    sec = ring(w, D, sp["corner_radius"])
-    area = _area(sec)
+    L, H, w = sp["length"], sp["height"], sp["frame_width"]
+    Dv, Dh = sp["mullion_depth"], sp["transom_depth"]
+    sec_v = ring(w, Dv, sp["corner_radius"]);  area_v = _area(sec_v)
+    sec_h = ring(w, Dh, sp["corner_radius"]);  area_h = _area(sec_h)
     V, Hh = axes(sp, "v"), axes(sp, "h")
     v_ids = ["v:start"] + [f"v:{i}" for i, q in enumerate(lines(sp, "v")) if not q["removed"]] + ["v:end"]
     h_ids = ["h:bottom"] + [f"h:{i}" for i, q in enumerate(lines(sp, "h")) if not q["removed"]] + ["h:top"]
@@ -455,11 +549,13 @@ def _members(project: Any, sp: Mapping[str, Any], doors: bool = True) -> list[di
     low = lines_top[1] if lines_top else None
     out: list[dict[str, Any]] = []
 
-    def frame(cid: str, role: str, horizontal: bool, axis: float, a0: float, a1: float, k0: float = 0.0, k1: float = 0.0) -> None:
+    def frame(cid, role, horizontal, axis, a0, a1, k0=0.0, k1=0.0):
         if a1 - a0 < 1e-6:
             return
-        out.append({"kind": "frame", "material": sp["frame_material"], "role": role, "cell": None, "id": cid, "length": a1 - a0, "area": area,
-                    "mesh": _member(sec, horizontal, axis, a0, a1, k0, k1)})
+        s_, ar_ = (sec_h, area_h) if horizontal else (sec_v, area_v)
+        out.append({"kind": "frame", "material": sp["frame_material"], "role": role, "cell": None,
+                    "id": cid, "length": a1 - a0, "area": ar_,
+                    "mesh": _member(s_, horizontal, axis, a0, a1, k0, k1)})
 
     def vertical(cid: str, role: str, u: float, z_lo: float, z_hi: float, k0: float = 0.0) -> None:
         """A vertical member from z_lo up to z_hi, or, under a sloped top, up to the top member's underside (cut along it)."""
@@ -563,8 +659,9 @@ def _members(project: Any, sp: Mapping[str, Any], doors: bool = True) -> list[di
         under = [(a0, _line_at(lowl, a0))] + [q for q in lowl if a0 + 1e-9 < q[0] < a1 - 1e-9] + [(a1, _line_at(lowl, a1))]
         outline = poly + under[::-1]
         length = sum(math.dist(p, q) for p, q in zip(poly, poly[1:]))
-        out.append({"kind": "frame", "material": sp["frame_material"], "role": "perimeter", "cell": None, "id": "top", "length": length, "area": w * D,
-                    "mesh": _prism_uz(outline, -D / 2, D / 2)})
+        out.append({"kind": "frame", "material": sp["frame_material"], "role": "perimeter",
+                    "cell": None, "id": "top", "length": length, "area": w * sp["transom_depth"],
+                    "mesh": _prism_uz(outline, -sp["transom_depth"] / 2, sp["transom_depth"] / 2)})
     for post in sp["corner_posts"]:                                                      # a corner post this wall carries for its junction
         poly = [(float(u), float(d)) for u, d in post["poly"]]
         zt = H if low is None else _line_at(lines_top[0], 0.0 if post["end"] == "start" else L)
@@ -574,7 +671,7 @@ def _members(project: Any, sp: Mapping[str, Any], doors: bool = True) -> list[di
     # fields
     for cell in cells(sp):
         cs = cell_spec(sp, cell)
-        kind = {"Window": "glass", "Opaque panel": "panel", "Door": "door"}[cs["type"]]
+        kind = {"Window": "glass", "Opaque panel": "panel", "Door": "door", "Louvre": "louvre"}[cs["type"]]
         u0, u1, z0, z1 = _field_box(sp, cell, low)
         yd, t = cs["offset"], cs["thickness"]
         regions = _clip_below(u0, u1, z0, z1, [(u, zz) for u, zz in low] if low is not None else None)
@@ -582,6 +679,23 @@ def _members(project: Any, sp: Mapping[str, Any], doors: bool = True) -> list[di
             for poly in regions:
                 out.append({"kind": kind, "material": cs["material"], "role": "panel", "cell": cell["key"], "id": f"cell:{cell['key']}", "area": abs(G.signed_area(poly)),
                             "thickness": t, "mesh": _prism_uz(poly, yd - t / 2, yd + t / 2)})
+            continue
+        if kind in ("glass", "panel"):
+            for poly in regions:
+                out.append({"kind": kind, "material": cs["material"], "role": "panel", "cell": cell["key"],
+                            "id": f"cell:{cell['key']}", "area": abs(G.signed_area(poly)),
+                            "thickness": t, "mesh": _prism_uz(poly, yd - t / 2, yd + t / 2)})
+            continue
+        if kind == "louvre":
+            for poly in regions:
+                u0m, u1m = poly[0][0], poly[1][0]
+                z0m, z1m = poly[0][1], poly[2][1]
+                lo = sp["louvre"]
+                for slat in _slats(u0m, u1m, z0m, z1m, yd, lo):
+                    out.append({"kind": "louvre", "material": cs["material"], "role": "slat",
+                                "cell": cell["key"], "id": f"cell:{cell['key']}", "length": u1m - u0m,
+                                "area": lo["thickness"] * lo["depth"], "thickness": lo["thickness"],
+                                "mesh": slat})
             continue
         if low is not None:
             zt = _door_top(low, u0, u1, z1, cell["row"] == len(Hh) - 2)
@@ -594,6 +708,33 @@ def _members(project: Any, sp: Mapping[str, Any], doors: bool = True) -> list[di
                 mesh = _open_leaf(mesh, cs, n, a, b, y)
             out.append({"kind": "door", "material": cs["material"], "role": "leaf", "cell": cell["key"], "id": f"cell:{cell['key']}", "leaf": n,
                         "area": (b - a) * (z1 - z0 - 2 * GAP), "thickness": E.DOOR_LEAF, "mesh": mesh})
+
+    fin, shelf = sp["fin"], sp["shelf"]
+    if fin["depth"] > 1e-6:
+        for u in axes(sp, "v"):
+            sides = (1,) if fin["side"] == "left" else (-1,) if fin["side"] == "right" else (1, -1)
+            for s in sides:
+                d0 = s * (Dv / 2 + fin["offset"]) if s > 0 else -(-s * (Dv / 2 + fin["offset"]))
+                # simpler and clearer:
+                base_d = s * (Dv / 2 + fin["offset"])
+                d_in  = base_d
+                d_out = base_d + s * fin["depth"]
+                dmin, dmax = sorted((d_in, d_out))
+                out.append({"kind": "frame", "material": sp["frame_material"], "role": "fin",
+                            "cell": None, "id": f"fin:{u:.4f}:{s}",
+                            "length": H, "area": fin["width"] * fin["depth"],
+                            "mesh": _box(u - fin["width"] / 2, u + fin["width"] / 2, dmin, dmax, 0.0, H)})
+    if shelf["depth"] > 1e-6:
+        for z in axes(sp, "h"):
+            sides = (1,) if shelf["side"] == "up" else (-1,) if shelf["side"] == "down" else (1, -1)
+            for s in sides:
+                base_d = s * (Dh / 2 + shelf["offset"])
+                d_in, d_out = base_d, base_d + s * shelf["depth"]
+                dmin, dmax = sorted((d_in, d_out))
+                out.append({"kind": "frame", "material": sp["frame_material"], "role": "shelf",
+                            "cell": None, "id": f"shelf:{z:.4f}:{s}",
+                            "length": L, "area": shelf["width"] * shelf["depth"],
+                            "mesh": _box(0.0, L, dmin, dmax, z - shelf["width"] / 2, z + shelf["width"] / 2)})
     out.sort(key=lambda q: PART_ORDER.index(q["kind"]))                                   # stable: the frame first, then glazing, panels and leaves, so faces group by part
     return out
 
@@ -893,6 +1034,12 @@ def check_spec(project: Any, meta: Mapping[str, Any], oid: str | None = None) ->
         raise BadRequest(f"The frame material must be one of {', '.join(FRAME_MATERIALS)}")
     if sp["join"] not in JOINS:
         raise BadRequest(f"The join must be one of {', '.join(JOINS)}")
+    if sp["fin"]["side"] not in ("left", "right", "both"):
+        raise BadRequest("fin_side must be left, right or both")
+    if sp["shelf"]["side"] not in ("up", "down", "both"):
+        raise BadRequest("shelf_side must be up, down or both")
+    if not -60.0 <= sp["lean"] <= 60.0:
+        raise BadRequest("lean must be between -60° and 60°")
     if sp["panel_type"] not in WALL_PANEL_TYPES:
         raise BadRequest(f"The panel type must be one of {', '.join(WALL_PANEL_TYPES)}")
     if sp["panel_material"] not in PANEL_MATERIALS:
@@ -957,14 +1104,18 @@ def _setup(p: Mapping[str, Any], to_m: float) -> dict[str, Any]:
         values["frame_profile"] = prof["id"]
         values["frame_width"] = prof["width_mm"] / 1000.0
         values["frame_depth"] = (number(p["frame_depth"], "frame_depth", 10, 1000) if p.get("frame_depth") is not None else (prof["depth_mm"] or DEFAULTS_MM["frame_depth"])) / 1000.0
+        values["mullion_depth"] = values["frame_depth"] if p.get("mullion_depth") is None else number(p["mullion_depth"], "mullion_depth", 10, 1000) / 1000.0
+        values["transom_depth"] = values["frame_depth"] if p.get("transom_depth") is None else number(p["transom_depth"], "transom_depth", 10, 1000) / 1000.0
         if p.get("frame_width") is not None and abs(float(p["frame_width"]) - prof["width_mm"]) > 1e-6:
             raise BadRequest(f"{prof['name']} is {prof['width_mm']} mm wide: leave the width out, or choose no catalogue profile to give your own")
         if prof["depth_mm"] and p.get("frame_depth") is not None and abs(float(p["frame_depth"]) - prof["depth_mm"]) > 1e-6:
             raise BadRequest(f"{prof['name']} is {prof['depth_mm']} mm deep: leave the depth out, or choose no catalogue profile to give your own")
     else:
-        values["frame_profile"] = None
-        values["frame_width"] = number(p.get("frame_width", DEFAULTS_MM["frame_width"]), "frame_width", 10, 1000) / 1000.0
-        values["frame_depth"] = number(p.get("frame_depth", DEFAULTS_MM["frame_depth"]), "frame_depth", 10, 1000) / 1000.0
+        values["frame_profile"]  = None
+        values["frame_width"]    = number(p.get("frame_width",    DEFAULTS_MM["frame_width"]),  "frame_width",  10, 1000) / 1000.0
+        values["frame_depth"]    = number(p.get("frame_depth",    DEFAULTS_MM["frame_depth"]),  "frame_depth",  10, 1000) / 1000.0
+        values["mullion_depth"]  = values["frame_depth"] if p.get("mullion_depth") is None else number(p["mullion_depth"], "mullion_depth", 10, 1000) / 1000.0
+        values["transom_depth"]  = values["frame_depth"] if p.get("transom_depth") is None else number(p["transom_depth"], "transom_depth", 10, 1000) / 1000.0
     values["corner_radius"] = number(p.get("corner_radius", 0.0), "corner_radius", 0, 500) / 1000.0
     values["join"] = E._choice(p.get("join", "mullions"), JOINS, "join")
     for d, label in (("v", "vertical"), ("h", "horizontal")):
@@ -980,6 +1131,9 @@ def _setup(p: Mapping[str, Any], to_m: float) -> dict[str, Any]:
     values["door_type"] = E._choice(p.get("door_type", "Single Flush Door"), DOOR_TYPES, "door_type")
     values["door_hinge"] = E._choice(p.get("door_hinge", "start"), ("start", "end"), "door_hinge")
     values["door_swing"] = 1 if E._choice(p.get("door_swing", "left"), ("left", "right"), "door_swing") == "left" else -1
+    values["lean"] = number(p.get("lean", 0.0), "lean", -60, 60) if p.get("lean") is not None else 0.0
+    values["band_rows"] = _validate_bands(p.get("band_rows") or [], "band_rows") if p.get("band_rows") else []
+    values["band_cols"] = _validate_bands(p.get("band_cols") or [], "band_cols") if p.get("band_cols") else []
     return values
 
 
@@ -1152,6 +1306,20 @@ def line_edit(project: Any, oid: str, direction: str, action: str, *, index: int
 _LAYOUT_KEYS = {"v_mode", "v_value", "v_align", "h_mode", "h_value", "h_align"}
 
 
+def _validate_bands(value, label):
+    if not isinstance(value, (list, tuple)):
+        raise BadRequest(f"{label} must be a list of bands")
+    out = []
+    for i, b in enumerate(value):
+        if not isinstance(b, Mapping): raise BadRequest(f"{label}[{i}] is not a band")
+        f, t = number(b.get("from"), f"{label}[{i}].from", -1e6, 1e6), number(b.get("to"), f"{label}[{i}].to", -1e6, 1e6)
+        if t <= f: raise BadRequest(f"{label}[{i}]: to must be greater than from")
+        if "type" in b and b["type"] not in PANEL_TYPES:
+            raise BadRequest(f"{label}[{i}]: type must be one of {', '.join(PANEL_TYPES)}")
+        out.append({"from": f, "to": t, **{k: b[k] for k in _BAND_KEYS if k in b}})
+    return out
+
+
 def set_property(project: Any, oid: str, meta: Mapping[str, Any], key: str, value: Any) -> dict[str, Any]:
     """The stored values a change of ``key`` sets (the caller attaches them and rebuilds). Line and panel keys edit the element themselves and return nothing to store."""
     if key.startswith("corner:"):
@@ -1204,6 +1372,16 @@ def set_property(project: Any, oid: str, meta: Mapping[str, Any], key: str, valu
             out["frame_profile"] = None                                                  # a typed size is no longer the catalogue's
         _clear_if_width(project, oid, meta, key)
         return out
+    if key in ("mullion_depth", "transom_depth"):
+        return {key: number(value, key.replace("_", " "), 10, 1000) / 1000.0,
+                **({"frame_profile": None} if E.m(meta, "frame_profile") else {})}
+    if key == "lean":
+        v = number(value, "lean", -60, 60)
+        return {"lean": v}
+    if key == "band_rows":
+        return {"band_rows": _validate_bands(value, "band_rows")}
+    if key == "band_cols":
+        return {"band_cols": _validate_bands(value, "band_cols")}
     if key == "corner_radius":
         return {"corner_radius": number(value, "corner radius", 0, 500) / 1000.0}
     if key == "join":
@@ -1222,6 +1400,10 @@ def set_property(project: Any, oid: str, meta: Mapping[str, Any], key: str, valu
         return {"door_hinge": E._choice(value, ("start", "end"), "hinge")}
     if key == "door_swing":
         return {"door_swing": 1 if E._choice(value, ("left", "right"), "swing") == "left" else -1}
+    if key in ("louvre_pitch", "louvre_depth", "louvre_thickness"):
+        return {key: number(value, key.replace("_", " "), 2, 1000) / 1000.0}
+    if key == "louvre_tilt":
+        return {key: number(value, "louvre tilt", -80, 80)}
     if key == "opening_angle":
         return {"opening_angle": number(value, "opening angle", E.MIN_OPENING_ANGLE, E.MAX_OPENING_ANGLE)}
     if key == "height":
@@ -1267,7 +1449,8 @@ def move(project: Any, oid: str, meta: Mapping[str, Any], dx: float, dy: float, 
 
 def rotate(project: Any, oid: str, meta: Mapping[str, Any], angle: float, centre: Sequence[float]) -> None:
     s, e = E.m(meta, "start"), E.m(meta, "end")
-    E._attach(project, oid, {"start": E._turn(s, angle, centre), "end": E._turn(e, angle, centre), "end_hosts": {}})
+    centre_t = (float(centre[0]), float(centre[1]))
+    E._attach(project, oid, {"start": E._turn(s, angle, centre_t), "end": E._turn(e, angle, centre_t), "end_hosts": {}})
     follow_links(project, oid, {"start": s, "end": e})
 
 
@@ -1283,11 +1466,16 @@ def _door_cells(sp: Mapping[str, Any]) -> list[tuple[dict[str, Any], dict[str, A
 def plan_symbols(project: Any, oid: str, f: float, cut_z: float, show_opening: bool = True) -> list[dict[str, Any]]:
     """The plan notation of every door field the cut plane passes through: its leaves, and for a swing leaf the arc and open leaf, drawn by the code that draws a
     door in a wall (so the swing is the same in plan, elevation and 3D). A sliding door shows both leaves, the open position dashed, a track and an arrow."""
+    def at(u, d):
+        z_local = cut_z - base_z(project, meta)
+        d_eff = d + z_local * math.tan(math.radians(sp.get("lean", 0.0)))
+        return [(sp["start"][0] + math.cos(sp["angle"]) * u - math.sin(sp["angle"]) * d_eff) * f,
+                (sp["start"][1] + math.sin(sp["angle"]) * u + math.cos(sp["angle"]) * d_eff) * f]
+
     meta = E.meta_of(project, oid)
     sp = spec(meta)
     z0 = base_z(project, meta)
     fr = {"start": sp["start"], "angle": sp["angle"], "thickness": sp["frame_depth"], "base": z0}
-    at = lambda x, y: [(sp["start"][0] + math.cos(sp["angle"]) * x - math.sin(sp["angle"]) * y) * f, (sp["start"][1] + math.sin(sp["angle"]) * x + math.cos(sp["angle"]) * y) * f]   # noqa: E731
     out = []
     for c, cs in _door_cells(sp):
         if not z0 + c["z0"] <= cut_z < z0 + c["z1"]:
@@ -1316,6 +1504,7 @@ def plan_symbols(project: Any, oid: str, f: float, cut_z: float, show_opening: b
                 sym["more"] = swings[1:]
         out.append(sym)
     return out
+
 
 
 def plan_item(project: Any, oid: str, f: float, cut_z: float, show_hatching: bool = True, show_opening: bool = True) -> dict[str, Any] | None:
@@ -1391,9 +1580,11 @@ def quantities(project: Any, oid: str) -> dict[str, Any]:
     pid = sp["frame_profile"]
     prof = profile(str(pid)) if pid else None
     ms = members(project, meta)
-    frame = [q for q in ms if q["kind"] == "frame"]
+    frame = [q for q in ms if q["kind"] == "frame" and q["role"] not in NON_GRID_ROLES]
     by_role: dict[str, dict[str, float]] = {}
-    for q in frame:
+    for q in ms:                                          # was: for q in frame
+        if q["kind"] != "frame":
+            continue
         r = by_role.setdefault(q["role"], {"count": 0, "length": 0.0})
         r["count"] += 1
         r["length"] += q["length"]
@@ -1401,10 +1592,14 @@ def quantities(project: Any, oid: str) -> dict[str, Any]:
     panel = {k: sum(q["area"] for q in ms if q["kind"] == k) for k in ("glass", "panel", "door")}
     doors = [c for c, cs in _door_cells(sp)]
     leaves = sum(1 for q in ms if q["kind"] == "door")
+    fins = by_role.get("fin",   {"count": 0, "length": 0.0})
+    shelves = by_role.get("shelf", {"count": 0, "length": 0.0})
     return {"mullion_lines": len(axes(sp, "v")), "transom_lines": len(axes(sp, "h")), "frame_length": total, "frame_members": len(frame), "by_role": by_role, "frame_volume": sum(q["area"] * q["length"] for q in frame),
             "glazing_area": panel["glass"], "panel_area": panel["panel"], "door_leaf_area": panel["door"], "panel_count": len(cells(sp)), "door_count": len(doors), "door_leaves": leaves,
             "gross_area": sp["length"] * sp["height"], "mass_per_m": prof["mass_kg_per_m"] if prof and prof.get("mass_kg_per_m") else None,
             "frame_mass": total * prof["mass_kg_per_m"] if prof and prof.get("mass_kg_per_m") else None, "profile": provenance(pid),
+            "fin_count": fins["count"],   "fin_length": fins["length"],   "fin_depth": sp["fin"]["depth"],
+            "shelf_count": shelves["count"], "shelf_length": shelves["length"], "shelf_depth": sp["shelf"]["depth"],
             "volumes": {k: sum(q["area"] * q["thickness"] for q in ms if q["kind"] == k) for k in ("glass", "panel", "door")}}
 
 
@@ -1445,7 +1640,14 @@ def properties(project: Any, oid: str, out: dict[str, Any], volume: dict[str, An
                   {"key": "panel_offset", "label": "Panel offset (from the frame's centre)", "type": "number", "unit": "mm", "value": mm(sp["panel_offset"])},
                   {"key": "door_type", "label": "Door type (new door fields)", "type": "choice", "value": sp["door_type"], "choices": E._choices(DOOR_TYPES)},
                   {"key": "door_hinge", "label": "Door hinge (new door fields)", "type": "choice", "value": sp["door_hinge"], "choices": [{"value": "start", "label": "Start side"}, {"value": "end", "label": "End side"}]},
-                  {"key": "door_swing", "label": "Door swing (new door fields)", "type": "choice", "value": "left" if sp["door_swing"] > 0 else "right", "choices": E._choices(("left", "right"))}]
+                  {"key": "door_swing", "label": "Door swing (new door fields)", "type": "choice", "value": "left" if sp["door_swing"] > 0 else "right", "choices": E._choices(("left", "right"))},
+                  {"key": "louvre_pitch",     "label": "Louvre pitch",         "type": "number", "unit": "mm", "value": mm(sp["louvre"]["pitch"])},
+                  {"key": "louvre_tilt",      "label": "Louvre tilt",          "type": "number", "unit": "°",  "value": sp["louvre"]["tilt"]},
+                  {"key": "louvre_depth",     "label": "Louvre slat depth",    "type": "number", "unit": "mm", "value": mm(sp["louvre"]["depth"])},
+                  {"key": "louvre_thickness", "label": "Louvre slat thickness","type": "number", "unit": "mm", "value": mm(sp["louvre"]["thickness"])}]
+    if sp["bands"]["rows"] or sp["bands"]["cols"]:
+        panel_rows.append({"label": "Bands", "type": "readonly", "value": " · ".join(f"{b.get('type', '…')} {b['from']*1000:,.0f}–{b['to']*1000:,.0f} mm" for b in (sp["bands"]["rows"] or sp["bands"]["cols"]))})
+
     line_rows: list[dict[str, Any]] = []
     for d, noun in (("v", "Mullion"), ("h", "Transom")):
         for i, q in enumerate(lines(sp, d)):
@@ -1473,9 +1675,11 @@ def properties(project: Any, oid: str, out: dict[str, Any], volume: dict[str, An
                      {"title": "Members (remove or add)", "rows": line_rows}, {"title": "Fields", "rows": cell_rows},
                      {"title": "Quantities", "rows": [{"label": "Frame members", "type": "readonly", "value": f"{q['frame_members']} ({q['frame_length']:.2f} m)"},
                                                       {"label": "Frame mass", "type": "readonly", "value": mass},
+                                                      {"label": "Fins", "type": "readonly", "value": f"{q['fin_count']} ({q['fin_depth']:.2f} m depth)"},
                                                       {"label": "Glazing area", "type": "readonly", "value": f"{q['glazing_area']:.2f} m²"},
                                                       {"label": "Opaque panel area", "type": "readonly", "value": f"{q['panel_area']:.2f} m²"},
                                                       {"label": "Doors", "type": "readonly", "value": f"{q['door_count']} ({q['door_leaves']} leaves)"}, volume]},
+                                                      {"label": "Shelves", "type": "readonly", "value": f"{q['shelf_count']} ({q['shelf_depth']:.2f} m depth)"},
                      {"title": "Identity", "rows": [{"key": "name", "label": "Name", "type": "text", "value": project.model.get(oid)["name"]}]}]
     out["groups"].insert(1, {"title": "Ends and attachment", "rows": _connection_rows(project, oid, meta)})
     return out
@@ -1528,6 +1732,9 @@ def issues(project: Any, oid: str, label: str, issue: Any) -> list[dict[str, str
     half = sp["frame_depth"] / 2
     for c in cells(sp):
         cs = cell_spec(sp, c)
+        if cs["type"] == "Louvre" and (c["z1"] - c["z0"]) < 2 * sp["louvre"]["pitch"]:
+            out.append(issue("warning", oid,
+                f"{label}: louvre field {c['col']+1}.{c['row']+1} is shorter than two slat pitches; it will read as empty", "geometry"))
         reach = abs(cs["offset"]) + (E.DOOR_LEAF if cs["type"] == "Door" else cs["thickness"]) / 2
         if reach > half + 1e-9 and cs["type"] != "Door":
             out.append(issue("warning", oid, f"{label}: panel {c['col'] + 1}.{c['row'] + 1} sticks out of the frame's depth ({reach * 1000:.0f} mm from the centre, the frame reaches {half * 1000:.0f} mm)", "geometry"))
@@ -1545,8 +1752,16 @@ def preview(project: Any, p: Mapping[str, Any], to_m: float) -> dict[str, Any]:
     sp = spec(meta)
     cs = cells(sp)
     q = {"length": sp["length"], "height": sp["height"]}
-    return {"mullions": [round(x * 1000, 3) for x in axes(sp, "v")], "transoms": [round(x * 1000, 3) for x in axes(sp, "h")], "panels": len(cs),
-            "frame_width_mm": round(sp["frame_width"] * 1000, 3), "frame_depth_mm": round(sp["frame_depth"] * 1000, 3), "profile": provenance(setup["frame_profile"]),
+    return {"mullions": [round(x * 1000, 3) for x in axes(sp, "v")],
+            "transoms": [round(x * 1000, 3) for x in axes(sp, "h")], "panels": len(cs),
+            "lean_deg": setup.get("lean", 0.0),
+            "fin_extents_mm":  [round(f * 1000, 3) for f in (sp["fin"]["depth"], sp["fin"]["width"])],
+            "shelf_extents_mm":[round(f * 1000, 3) for f in (sp["shelf"]["depth"], sp["shelf"]["width"])],
+            "bands_active":    bool(sp["bands"]["rows"] or sp["bands"]["cols"]),
+            "louvre_count":    sum(1 for c in cells(sp) if cell_spec(sp, c)["type"] == "Louvre"),
+            "frame_width_mm": round(sp["frame_width"] * 1000, 3),
+            "frame_depth_mm": round(sp["frame_depth"] * 1000, 3),
+            "profile": provenance(setup["frame_profile"]),
             "bays_v_mm": [round(b * 1000, 3) for b in bays(sp["length"] - sp["frame_width"], sp["v"]["mode"], sp["v"]["value"], sp["v"]["align"], sp["frame_width"] + MIN_FIELD)],
             "bays_h_mm": [round(b * 1000, 3) for b in bays(sp["height"] - sp["frame_width"], sp["h"]["mode"], sp["h"]["value"], sp["h"]["align"], sp["frame_width"] + MIN_FIELD)], **{k: round(v * 1000, 3) for k, v in q.items()}}
 
@@ -1743,7 +1958,7 @@ def _junction(project: Any, oid: str, end: str) -> dict[str, Any] | None:
     owner_end = end if owner == oid else oend
     cfg = dict((E.m(E.meta_of(project, owner), "corners") or {}).get(owner_end) or {})
     return {"me": oid, "end": end, "other": other, "other_end": oend, "P": P, "dA": dA, "dB": dB, "angle": angle, "owner": owner, "owner_end": owner_end,
-            "cfg": cfg, "depth": spec(meta)["frame_depth"], "other_depth": spec(om)["frame_depth"], "width": spec(meta)["frame_width"]}
+            "cfg": cfg, "depth": spec(meta)["mullion_depth"], "other_depth": spec(om)["mullion_depth"], "width": spec(meta)["frame_width"]}
 
 
 def corner_type(j: Mapping[str, Any]) -> str:
@@ -1858,6 +2073,8 @@ def resolve_ends(project: Any, oid: str) -> dict[str, Any]:
                 ends[end] = {"suppress": True, "setback": 0.0, "with": j["other"], "type": "inline"}
             continue
         poly = corner_post(j)
+        if poly is None:
+            continue
         P, dA = j["P"], j["dA"]
         setback = max(0.0, max((q[0] - P[0]) * dA[0] + (q[1] - P[1]) * dA[1] for q in poly))
         if setback > L / 2:
@@ -1892,11 +2109,11 @@ def set_corner(project: Any, oid: str, end: str, values: Mapping[str, Any]) -> d
             raise BadRequest(f"'{key}' is not a corner setting")
     corners[j["owner_end"]] = cfg
     E._attach(project, j["owner"], {"corners": corners})
-    corner_post(_junction(project, oid, end))                                            # refuse a corner that cannot be built at this angle
+    corner_post(j)                                                                       # refuse a corner that cannot be built at this angle
     for x in (oid, j["other"]):
         resolve_ends(project, x)
         build(project, x)
-    return {"type": corner_type(_junction(project, oid, end)), "owner": j["owner"]}
+    return {"type": corner_type(j), "owner": j["owner"]}
 
 
 def reconcile(project: Any) -> list[str]:
@@ -1926,8 +2143,17 @@ def reconcile(project: Any) -> list[str]:
     return rebuilt
 
 
-def _signature(meta: Mapping[str, Any]) -> list[Any]:
-    return [E.m(meta, "start"), E.m(meta, "end"), E.m(meta, "height"), E.m(meta, "base_offset"), E.m(meta, "top_profile"), E.m(meta, "frame_depth"), E.m(meta, "frame_width")]
+def _signature(meta):
+    return [E.m(meta, "start"), E.m(meta, "end"), E.m(meta, "height"),
+            E.m(meta, "base_offset"), E.m(meta, "top_profile"),
+            E.m(meta, "frame_depth"), E.m(meta, "frame_width"),
+            E.m(meta, "mullion_depth"), E.m(meta, "transom_depth"),
+            E.m(meta, "lean"),
+            E.m(meta, "fin_depth"), E.m(meta, "fin_width"), E.m(meta, "fin_offset"), E.m(meta, "fin_side"),
+            E.m(meta, "shelf_depth"), E.m(meta, "shelf_width"), E.m(meta, "shelf_offset"), E.m(meta, "shelf_side"),
+            E.m(meta, "band_rows"), E.m(meta, "band_cols"),
+            E.m(meta, "louvre_pitch"), E.m(meta, "louvre_tilt"),
+            E.m(meta, "louvre_depth"), E.m(meta, "louvre_thickness")]
 
 
 def follow_links(project: Any, oid: str, before: Mapping[str, Sequence[float]]) -> None:
@@ -2085,6 +2311,40 @@ def door_handles(project: Any, oid: str) -> list[dict[str, Any]]:
         if cs["door_type"] == "Sliding Door":
             continue
         for n, (a, b, y) in enumerate(door_leaves(cs, c["u0"], c["u1"], cs["offset"])):
+            hu, hd, sign = leaf_hinges(cs, a, b, y, n)
+            free = b if abs(hu - a) < 1e-9 else a
+            ang = math.radians(cs["opening_angle"] if cs["show_open"] else 0.0) * sign
+            fu, fd = hu + (free - hu) * math.cos(ang), hd + (free - hu) * math.sin(ang)
+            zmid = (c["z0"] + c["z1"]) / 2
+            out.append({"part": f"cell:{c['key']}", "key": f"panel:{c['col']}:{c['row']}", "hinge": at(hu, hd, zmid), "free": at(fu, fd, zmid),
+                        "closed": at(free, hd, zmid), "sign": sign, "angle": cs["opening_angle"], "open": cs["show_open"]})
+    return out
+
+
+def window_leaves(cs: Mapping[str, Any], u0: float, u1: float, offset: float) -> list[tuple[float, float, float]]:
+    """The u0, u1 and y of each operable leaf of a window field, in order from the start of the wall. The leaves are the same size and evenly spaced, with
+    the first leaf's free edge at the start of the field."""
+    if cs["type"] != "Window":
+        raise BadRequest("Not a window")
+    n = cs["leaves"]
+    if n < 1:
+        raise BadRequest("A window must have at least one leaf")
+    width = (u1 - u0) / n
+    return [(u0 + i * width, u0 + (i + 1) * width, offset) for i in range(n)]
+
+
+def window_handles(project: Any, oid: str) -> list[dict[str, Any]]:
+    """For the 3D view: one handle per operable window leaf of the curtain wall, at its free edge, with the hinge axis it turns about and the field it
+    belongs to, so the opening angle can be dragged."""
+    meta = E.meta_of(project, oid)
+    sp = spec(meta)
+    at = _to_world(frame_of(meta), base_z(project, meta))
+    out = []
+    for c in cells(sp):
+        cs = cell_spec(sp, c)
+        if cs["type"] != "Window":
+            continue
+        for n, (a, b, y) in enumerate(window_leaves(cs, c["u0"], c["u1"], cs["offset"])):
             hu, hd, sign = leaf_hinges(cs, a, b, y, n)
             free = b if abs(hu - a) < 1e-9 else a
             ang = math.radians(cs["opening_angle"] if cs["show_open"] else 0.0) * sign
