@@ -208,9 +208,9 @@ class Context:
     def psets(self) -> dict[str, dict[str, Any]]:
         if self._psets is None:
             sets: dict[str, dict[str, Any]] = {s: {p: v["value"] for p, v in props.items()} for s, props in BD.effective(self.project, self.id).items()}
-            for k, v in self.meta.items():
-                if k.startswith("custom:"):
-                    sets.setdefault(custom_set_name(self.project), {})[k[len("custom:"):]] = v
+            from .relations import effective_custom
+            for name, detail in effective_custom(self.project, self.id).items():
+                sets.setdefault(custom_set_name(self.project), {})[name] = detail["value"]
             self._psets = sets
         return self._psets
 

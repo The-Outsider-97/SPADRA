@@ -773,10 +773,23 @@ export class DrawingView {
     const unit = this.store.unit;
     const current = Math.round(dist(box.a, box.b) * 1000) / 1000;
     const grid = this.data?.model.find((w) => w.id === box.id)?.category === "grid";
-    const length = await numberPrompt({ title: grid ? "Grid length" : "Wall length", label: "Length", unit, value: current, confirmLabel: "Set length" });
-    if (length === null || Math.abs(length - current) < 1e-9) return;
-    if (grid) await this.store.run("model.set_grid", { id: box.id, length });                            // from its start; the angle and the label are in Properties
-    else await this.store.run("model.set_wall_ends", { id: box.id, end: alongFrom(box.a, box.b, length) });
+    if (grid) {
+      const length = await numberPrompt({ title: "Grid length", label: "Length", unit, value: current, confirmLabel: "Set length" });
+      if (length !== null && Math.abs(length - current) >= 1e-9)
+        await this.store.run("model.set_grid", { id: box.id, length });
+      return;
+    }
+    const raw = await promptDialog({ title: "Wall length", label: `Length (${unit}) or formula (=expression)`,
+      value: String(current), confirmLabel: "Set length" });
+    if (raw === null || !raw.trim()) return;
+    const length = Number(raw.trim().replace(",", "."));
+    if (Number.isFinite(length)) {
+      if (Math.abs(length - current) >= 1e-9)
+        await this.store.run("model.set_wall_ends", { id: box.id, end: alongFrom(box.a, box.b, length) });
+    } else {
+      // The server's SGEO expression evaluator owns the formula and dimension checks.
+      await this.store.run("model.set_property", { id: box.id, key: "length", value: raw.trim() });
+    }
   }
 
   /** The wall under a plan point, ignoring doors, windows, floors and beams. */

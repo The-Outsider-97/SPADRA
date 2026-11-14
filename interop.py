@@ -493,6 +493,19 @@ def _merge_native(project: Any, source: SGEODocument, label: str) -> tuple[dict[
         for mat, shade in colors.items():
             if shade and mat not in palette:
                 palette[mat] = shade
+        material_rules = origin.get("material_rules") or {}
+        if not isinstance(material_rules, Mapping):
+            raise BadRequest("Native SGEO shared material rules must be a map")
+        shared = project.manifest.setdefault("material_rules", {})
+        for material, rule in material_rules.items():
+            if isinstance(material, str) and isinstance(rule, dict):
+                if material not in shared:
+                    shared[material] = copy.deepcopy(rule)
+                elif shared[material] != rule:
+                    warnings.append(f"Shared material rule for '{material}' differs; the destination project kept its rule")
+        definitions = origin.get("custom_definitions") or []
+        if not isinstance(definitions, list):
+            raise BadRequest("Native SGEO shared custom properties must be a list")
         locally_preserved = 0
         taken = set(_page_ids(model))
         mapped_ids = {oid: (oid if oid not in taken else new_id()) for oid in ids}
@@ -535,6 +548,17 @@ def _merge_native(project: Any, source: SGEODocument, label: str) -> tuple[dict[
                 name = f"{fam['name']} {n}"
             families[fam["id"]] = model.define_family(name, fam["parameters"], fam["generator"]["kind"], types=fam.get("types"),
                                                          family_id=fam["id"] if fam["id"] not in have else None)
+        existing_defs = project.manifest.setdefault("bim", {}).setdefault("custom_definitions", [])
+        for definition in definitions:
+            if not isinstance(definition, dict) or not {"id", "name", "scope", "owner", "type", "value"} <= definition.keys():
+                raise BadRequest("Malformed native SGEO custom property definition")
+            item = copy.deepcopy(definition)
+            if item["scope"] == "family":
+                item["owner"] = families.get(item["owner"], item["owner"])
+            if any(d["id"] == item["id"] and d != item for d in existing_defs):
+                item["id"] = new_id()
+            if not any(d["id"] == item["id"] for d in existing_defs):
+                existing_defs.append(item)
         missing_level = 0
         for oid in _hierarchy_order(source, ids):
             obj = source.get(oid)
@@ -666,6 +690,8 @@ def export_model(project: Any, fmt: str, object_ids: list[str] | None = None) ->
             scene = model.snapshot()
             scene.metadata[SCENE_KEY] = {"name": project.name, "unit": project.manifest["unit"], "levels": [dict(l) for l in project.manifest["levels"]],
                                          "material_colors": dict(project.manifest.get("material_colors", {})),
+                                         "material_rules": copy.deepcopy(project.manifest.get("material_rules", {})),
+                                         "custom_definitions": copy.deepcopy((project.manifest.get("bim") or {}).get("custom_definitions", [])),
                                          "wall_corners": dict(project.manifest.get("wall_corners", {}))}
             doc = SGEODocument.from_scene(scene, copy=False)
             data = doc.dumps()
@@ -697,6 +723,9 @@ def export_model(project: Any, fmt: str, object_ids: list[str] | None = None) ->
         if (project.manifest.get("material_colors") or any(E.m(model.get(i)["metadata"], "color") or
                 any(row.get("color") for row in E.m(model.get(i)["metadata"], "layers", []) or []) for i in ids)):
             unsupported.append(f"SPADRA shared and local material appearance overrides are not mapped to {fmt.upper()} surfaces")
+        if project.manifest.get("material_rules") or any(E.m(model.get(i)["metadata"], "material_rule") or
+                E.m(model.get(i)["metadata"], "layer_material_rules") for i in ids):
+            unsupported.append(f"Conditional material gradients are not baked into {fmt.upper()} vertex colors by the native adapter; export SGEO to preserve the editable rules")
     lost = list(adapter.get("dropped") or []) + (_animation_lost(model, fmt) if fmt != "sgeo" else [])
     return data, conversion_report(direction="export", fmt=fmt, name=project.name, size=len(data), sha256=hashlib.sha256(data).hexdigest(), target="file", adapter=adapter,
                                    converted=counts, unsupported=unsupported, lost=lost)

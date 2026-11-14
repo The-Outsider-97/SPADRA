@@ -9,6 +9,7 @@ metadata under the ``custom:`` namespace, so they travel with the element throug
 from __future__ import annotations
 
 import re
+from uuid import uuid4
 from typing import Any, Mapping
 
 from ..tools.errors import BadRequest, NotFound
@@ -19,6 +20,8 @@ from . import classifications as CL
 
 CUSTOM_NS = "custom"
 _CUSTOM_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,39}$")
+CUSTOM_TYPES = ("text", "integer", "number", "boolean", "length", "area", "volume", "angle", "color")
+CUSTOM_UNITS = {"length": "mm", "area": "m²", "volume": "m³", "angle": "°"}
 MAX_CUSTOM = 40
 MAX_PROJECTION_WORK = 600                # elements × section/elevation views above which "appears in" is not evaluated for sections
 
@@ -29,18 +32,117 @@ def custom_of(meta: Mapping[str, Any]) -> dict[str, Any]:
     return {k[len(prefix):]: v for k, v in meta.items() if k.startswith(prefix)}
 
 
-def set_custom(project: Any, oid: str, name: Any, value: Any) -> None:
-    """Set a custom property, or remove it when ``value`` is None."""
-    name = text(name, "name", 40)
-    if not _CUSTOM_NAME.match(name):
-        raise BadRequest(f"'{name}' is not a usable property name", hint="Start with a letter; letters, digits and _ only (up to 40)")
+def _scope_owner(project: Any, oid: str, scope: str) -> str:
     meta = E.meta_of(project, oid)
-    current = custom_of(meta)
-    if value is None:
-        if name not in current:
-            raise BadRequest(f"There is no custom property '{name}' to remove")
-        project.model.attach_semantics(oid, {k: v for k, v in meta.items() if k != f"{CUSTOM_NS}:{name}"}, replace=True)
-        return
+    if scope == "project":
+        return "*"
+    if scope == "type":
+        from .bimdata import type_key
+        return type_key(meta)
+    if scope == "family":
+        obj = project.model.get(oid)
+        return str(obj.get("family_id") or f"category:{E.m(meta, 'category', 'generic')}")
+    raise BadRequest("Custom property scope must be instance, type, family or project")
+
+
+def _definitions(project: Any, create: bool = False) -> list[dict[str, Any]]:
+    if create:
+        return project.manifest.setdefault("bim", {}).setdefault("custom_definitions", [])
+    return (project.manifest.get("bim") or {}).get("custom_definitions") or []
+
+
+def effective_custom(project: Any, oid: str) -> dict[str, dict[str, Any]]:
+    """One deterministic, non-duplicating custom property lookup: instance > type > family > project."""
+    meta = E.meta_of(project, oid)
+    types = E.m(meta, "custom_types") or {}
+    inherited: dict[str, dict[str, Any]] = {}
+    for scope in ("project", "family", "type"):
+        owner = _scope_owner(project, oid, scope)
+        for d in _definitions(project):
+            if d.get("scope") == scope and d.get("owner") == owner:
+                inherited[d["name"]] = {"value": d["value"], "type": d["type"], "scope": scope, "id": d["id"]}
+    for name, value in custom_of(meta).items():
+        inherited[name] = {"value": value, "type": types.get(name) or "text", "scope": "instance", "id": None}
+    return inherited
+
+
+def custom_group(project: Any, oid: str) -> dict[str, Any]:
+    """One shared presentation contract for element and selected assembly-part editors."""
+    meta = E.meta_of(project, oid)
+    custom = custom_of(meta)
+    types = E.m(meta, "custom_types") or {}
+    rows = [
+        {"key": f"custom:{n}", "label": n, "type": "color" if types.get(n) == "color" else "choice" if isinstance(v, bool) else "number" if isinstance(v, (int, float)) else "text",
+         "value": ("true" if v else "false") if isinstance(v, bool) else v, "removable": True,
+         **({"unit": CUSTOM_UNITS[types[n]]} if types.get(n) in CUSTOM_UNITS else {}),
+         **({"choices": [{"value": "true", "label": "Yes"}, {"value": "false", "label": "No"}]} if isinstance(v, bool) else {})} for n, v in sorted(custom.items())]
+    for name, d in sorted(effective_custom(project, oid).items()):
+        if d["scope"] == "instance":
+            continue
+        v, kind = d["value"], d["type"]
+        rows.append({"key": f"customdef:{d['id']}", "label": f"{name} ({d['scope']})",
+                     "type": "color" if kind == "color" else "choice" if isinstance(v, bool) else "number" if isinstance(v, (int, float)) else "text",
+                     "value": "true" if v is True else "false" if v is False else v, "removable": True,
+                     **({"unit": CUSTOM_UNITS[kind]} if kind in CUSTOM_UNITS else {}),
+                     **({"choices": [{"value": "true", "label": "Yes"}, {"value": "false", "label": "No"}]} if isinstance(v, bool) else {})})
+    return {"title": "Custom properties (not buildingSMART)", "rows": rows, "add": "custom"}
+
+
+def set_shared_custom(project: Any, oid: str, name: str, value: Any, kind: str, scope: str) -> None:
+    if scope not in ("type", "family", "project"):
+        raise BadRequest("Shared property scope must be type, family or project")
+    name = text(name, "name", 40)
+    if not _CUSTOM_NAME.fullmatch(name):
+        raise BadRequest("Property names start with a letter, followed by letters, digits or _")
+    if kind not in CUSTOM_TYPES:
+        raise BadRequest(f"Unsupported custom property type '{kind}'")
+    owner = _scope_owner(project, oid, scope)
+    definitions = _definitions(project, True)
+    previous = next((d for d in definitions if d["scope"] == scope and d["owner"] == owner and d["name"] == name), None)
+    if previous is None and len(definitions) >= 200:
+        raise BadRequest("A project supports up to 200 shared property definitions")
+    cast = _coerce_custom(name, value, kind)
+    if previous is None:
+        definitions.append({"id": str(uuid4()), "name": name, "scope": scope, "owner": owner, "type": kind, "value": cast})
+    else:
+        previous.update(type=kind, value=cast)
+
+
+def update_shared_custom(project: Any, oid: str, identifier: str, payload: Any) -> None:
+    d = next((d for d in _definitions(project) if d["id"] == identifier), None)
+    if d is None or d["owner"] != _scope_owner(project, oid, d["scope"]):
+        raise BadRequest("The selected element does not own that shared property")
+    definitions = _definitions(project, True)
+    if payload is None:
+        definitions.remove(d)
+    elif isinstance(payload, Mapping) and "rename" in payload:
+        new = text(payload["rename"], "new name", 40)
+        if not _CUSTOM_NAME.fullmatch(new) or any(other is not d and other["scope"] == d["scope"] and other["owner"] == d["owner"] and other["name"] == new for other in definitions):
+            raise BadRequest("Invalid or duplicate shared property name")
+        d["name"] = new
+    else:
+        d["value"] = _coerce_custom(d["name"], payload, d["type"])
+
+
+def _coerce_custom(name: str, value: Any, kind: str | None) -> Any:
+    if kind == "text":
+        value = text(str(value), name, 200, empty=True)
+    elif kind == "boolean":
+        if isinstance(value, str) and value.lower() in ("true", "false"):
+            value = value.lower() == "true"
+        if not isinstance(value, bool):
+            raise BadRequest(f"{name} must be true or false")
+    elif kind in ("number", "integer", "length", "area", "volume", "angle"):
+        from ..tools.validation import number
+        value = number(value, name, -1e12, 1e12)
+        if kind == "integer":
+            if not float(value).is_integer():
+                raise BadRequest(f"{name} must be a whole number")
+            value = int(value)
+    elif kind == "color":
+        value = E.color(value)
+        if value is None:
+            raise BadRequest(f"{name} requires a six-digit HEX color")
     if isinstance(value, bool) or isinstance(value, (int, float)):
         if isinstance(value, float) and (value != value or abs(value) == float("inf")):
             raise BadRequest("A numeric property must be a finite number")
@@ -48,9 +150,66 @@ def set_custom(project: Any, oid: str, name: Any, value: Any) -> None:
         value = text(value, name, 200, empty=True)
     else:
         raise BadRequest("A custom property is text, a number or yes/no")
+    return value
+
+
+def set_custom(project: Any, oid: str, name: Any, value: Any, kind: str | None = None) -> None:
+    """Set a custom property, or remove it when ``value`` is None."""
+    name = text(name, "name", 40)
+    if not _CUSTOM_NAME.match(name):
+        raise BadRequest(f"'{name}' is not a usable property name", hint="Start with a letter; letters, digits and _ only (up to 40)")
+    meta = E.meta_of(project, oid)
+    current = custom_of(meta)
+    schema = dict(E.m(meta, "custom_types") or {})
+    if value is None:
+        if name not in current:
+            raise BadRequest(f"There is no custom property '{name}' to remove")
+        schema.pop(name, None)
+        updated = {k: v for k, v in meta.items() if k != f"{CUSTOM_NS}:{name}"}
+        updated[f"{E.NS}:custom_types"] = schema
+        project.model.attach_semantics(oid, updated, replace=True)
+        return
+    if kind is not None and kind not in CUSTOM_TYPES:
+        raise BadRequest(f"Unsupported custom property type '{kind}'")
+    kind = kind or schema.get(name)
+    value = _coerce_custom(name, value, kind)
     if name not in current and len(current) >= MAX_CUSTOM:
         raise BadRequest(f"An element holds at most {MAX_CUSTOM} custom properties")
+    if kind:
+        schema[name] = kind
+        E._attach(project, oid, {"custom_types": schema})
     project.model.attach_semantics(oid, {name: value}, namespace=CUSTOM_NS)
+
+
+def rename_custom(project: Any, oid: str, old: Any, new: Any) -> None:
+    """Rename one custom property without changing its type, scope, or value."""
+    old, new = text(old, "name", 40), text(new, "new name", 40)
+    if not _CUSTOM_NAME.fullmatch(new):
+        raise BadRequest("Property names start with a letter and contain only letters, digits and _ (up to 40)")
+    meta = E.meta_of(project, oid)
+    current = custom_of(meta)
+    if old not in current:
+        raise BadRequest(f"There is no custom property '{old}'")
+    if new != old and new in current:
+        raise BadRequest(f"A custom property named '{new}' already exists")
+    if new == old:
+        return
+    schema = dict(E.m(meta, "custom_types") or {})
+    if old in schema:
+        schema[new] = schema.pop(old)
+    updated = {k: v for k, v in meta.items() if k != f"custom:{old}"}
+    updated[f"custom:{new}"] = current[old]
+    updated[f"{E.NS}:custom_types"] = schema
+    # An identifier rename is a refactor: update references on this element
+    # atomically so dimension formulas and material conditions keep working.
+    replace_name = lambda expr: re.sub(rf"\b{re.escape(old)}\b", new, expr)  # noqa: E731
+    formulas = E.m(meta, "formulas") or {}
+    if isinstance(formulas, dict):
+        updated[f"{E.NS}:formulas"] = {k: replace_name(v) if isinstance(v, str) else v for k, v in formulas.items()}
+    rule = E.m(meta, "material_rule") or {}
+    if isinstance(rule, dict) and isinstance(rule.get("condition"), str):
+        updated[f"{E.NS}:material_rule"] = {**rule, "condition": replace_name(rule["condition"])}
+    project.model.attach_semantics(oid, updated, replace=True)
 
 
 def parse_custom(raw: Any) -> Any:
@@ -218,12 +377,7 @@ def augment(project: Any, oid: str, out: dict[str, Any], relations: bool = False
     out["groups"].extend(CL.groups_for(meta, cat))
     from . import bimdata as BD
     out["groups"].extend(BD.groups_for(project, oid))
-    custom = custom_of(meta)
-    out["groups"].append({"title": "Custom properties (not buildingSMART)", "rows": [
-        {"key": f"custom:{n}", "label": n, "type": "choice" if isinstance(v, bool) else "number" if isinstance(v, (int, float)) else "text",
-         "value": ("true" if v else "false") if isinstance(v, bool) else v, "removable": True,
-         **({"choices": [{"value": "true", "label": "Yes"}, {"value": "false", "label": "No"}]} if isinstance(v, bool) else {})} for n, v in sorted(custom.items())],
-        "add": "custom"})
+    out["groups"].append(custom_group(project, oid))
     links = related(project, oid) if relations else []
     if links:
         out["groups"].append({"title": "Relationships", "rows": links})

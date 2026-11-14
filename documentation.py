@@ -620,7 +620,39 @@ def view_schedule(project: Any, view: Mapping[str, Any]) -> dict[str, Any]:
     if view.get("category") == "family":
         from . import family_schedule as FS
         return FS.data(project, view.get("family"))
-    return schedule_data(project, view["category"])
+    data = schedule_data(project, view["category"])
+    requested = view.get("custom_columns") or []
+    filters = view.get("custom_filters") or []
+    if (not requested and not filters) or SCHEDULES[view["category"]].get("summary"):
+        return data
+    from .relations import effective_custom, CUSTOM_UNITS
+    definitions = {row["id"]: effective_custom(project, row["id"]) for row in data["rows"]}
+    columns = list(data["columns"])
+    for name in requested:
+        kind = next((values[name]["type"] for values in definitions.values() if name in values), "text")
+        columns.append(_col(f"custom:{name}", name, CUSTOM_UNITS.get(kind, ""), text=kind in ("text", "color", "boolean")))
+    rows = []
+    for row in data["rows"]:
+        values = definitions[row["id"]]
+        if not all(_custom_filter(values.get(f["name"]), f) for f in filters):
+            continue
+        rows.append({**row, **{f"custom:{name}": values[name]["value"] if name in values else "-" for name in requested}})
+    return {**data, "columns": columns, "rows": rows, "count": len(rows), "totals": {c["key"]: _r(sum(float(r.get(c["key"]) or 0) if isinstance(r.get(c["key"]), (int, float)) else 0 for r in rows)) for c in columns if c["total"]}}
+
+
+def _custom_filter(found: Mapping[str, Any] | None, rule: Mapping[str, Any]) -> bool:
+    if found is None:
+        return False
+    left, right, op = found["value"], rule["value"], rule["op"]
+    if op == "contains":
+        return str(right).casefold() in str(left).casefold()
+    if op == "==":
+        return left == right
+    if op == "!=":
+        return left != right
+    if not isinstance(left, (int, float)) or isinstance(left, bool) or not isinstance(right, (int, float)) or isinstance(right, bool):
+        return False
+    return {">": left > right, ">=": left >= right, "<": left < right, "<=": left <= right}[op]
 
 
 def is_summary_view(view: Mapping[str, Any]) -> bool:

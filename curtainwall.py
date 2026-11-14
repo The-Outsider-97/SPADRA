@@ -1378,9 +1378,24 @@ def set_property(project: Any, oid: str, meta: Mapping[str, Any], key: str, valu
     if key == "lean":
         v = number(value, "lean", -60, 60)
         return {"lean": v}
+    if key in ("fin_depth", "fin_width", "fin_offset", "shelf_depth", "shelf_width", "shelf_offset"):
+        limits = (-1000, 1000) if key.endswith("_offset") else (0, 1000) if key.endswith("_depth") else (1, 1000)
+        return {key: number(value, key.replace("_", " "), *limits) / 1000.0}
+    if key in ("fin_side", "shelf_side"):
+        return {key: E._choice(value, ("left", "right", "both") if key == "fin_side" else ("up", "down", "both"), key)}
     if key == "band_rows":
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (ValueError, TypeError) as exc:
+                raise BadRequest("Row bands must be a JSON list of band objects") from exc
         return {"band_rows": _validate_bands(value, "band_rows")}
     if key == "band_cols":
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (ValueError, TypeError) as exc:
+                raise BadRequest("Column bands must be a JSON list of band objects") from exc
         return {"band_cols": _validate_bands(value, "band_cols")}
     if key == "corner_radius":
         return {"corner_radius": number(value, "corner radius", 0, 500) / 1000.0}
@@ -1631,9 +1646,21 @@ def properties(project: Any, oid: str, out: dict[str, Any], volume: dict[str, An
                   {"key": "frame_profile", "label": "Profile (catalogue)", "type": "choice", "value": pid or "custom", "choices": profile_choices},
                   {"key": "frame_width", "label": "Frame width (face)", "type": "number", "unit": "mm", "value": mm(sp["frame_width"])},
                   {"key": "frame_depth", "label": "Frame thickness (depth)", "type": "number", "unit": "mm", "value": mm(sp["frame_depth"])},
+                  {"key": "mullion_depth", "label": "Mullion depth", "type": "number", "unit": "mm", "value": mm(sp["mullion_depth"])},
+                  {"key": "transom_depth", "label": "Transom depth", "type": "number", "unit": "mm", "value": mm(sp["transom_depth"])},
                   {"key": "corner_radius", "label": "Corner radius of the section", "type": "number", "unit": "mm", "value": mm(sp["corner_radius"])},
                   {"key": "join", "label": "Join condition", "type": "choice", "value": sp["join"], "choices": opts(JOINS, JOIN_LABELS)},
                   {"label": "Profile source", "type": "readonly", "value": provenance(pid)}]
+    geometry_rows = [{"key": "lean", "label": "Wall lean", "type": "number", "unit": "°", "value": sp["lean"]}]
+    accessory_rows = []
+    for kind, label in (("fin", "Vertical fins"), ("shelf", "Horizontal shelves")):
+        settings = sp[kind]
+        accessory_rows += [{"key": f"{kind}_{field}", "label": f"{label}: {field}", "type": "number", "unit": "mm", "value": mm(settings[field])}
+                           for field in ("depth", "width", "offset")]
+        accessory_rows.append({"key": f"{kind}_side", "label": f"{label}: side", "type": "choice", "value": settings["side"],
+                               "choices": opts(("left", "right", "both") if kind == "fin" else ("up", "down", "both"))})
+    band_rows = [{"key": "band_rows", "label": "Horizontal bands (JSON; positions in mm)", "type": "multiline", "value": json.dumps(E.m(meta, "band_rows") or [])},
+                 {"key": "band_cols", "label": "Vertical bands (JSON; positions in mm)", "type": "multiline", "value": json.dumps(E.m(meta, "band_cols") or [])}]
     panel_rows = [{"key": "panel_type", "label": "Panel type", "type": "choice", "value": sp["panel_type"], "choices": E._choices(WALL_PANEL_TYPES)},
                   {"key": "panel_material", "label": "Panel material", "type": "choice", "value": sp["panel_material"], "choices": E._choices(PANEL_MATERIALS)},
                   {"key": "panel_thickness", "label": "Panel thickness", "type": "number", "unit": "mm", "value": mm(sp["panel_thickness"])},
@@ -1671,15 +1698,17 @@ def properties(project: Any, oid: str, out: dict[str, Any], volume: dict[str, An
         cell_rows.append({"label": "More panels", "type": "readonly", "value": f"{len(all_cells) - 60} more panels not listed here"})
     q = quantities(project, oid)
     mass = f"{q['frame_mass']:.1f} kg (catalogue mass per metre × length: indicative)" if q["frame_mass"] is not None else "not given by the catalogue"
-    out["groups"] = [{"title": "Division", "rows": rows}, {"title": "Frame", "rows": frame_rows}, {"title": "Panels", "rows": panel_rows},
+    out["groups"] = [{"title": "Division", "rows": rows}, {"title": "Frame", "rows": frame_rows},
+                     {"title": "Geometry", "rows": geometry_rows}, {"title": "Fins and shelves", "rows": accessory_rows},
+                     {"title": "Panel bands", "rows": band_rows, "collapsed": True}, {"title": "Panels", "rows": panel_rows},
                      {"title": "Members (remove or add)", "rows": line_rows}, {"title": "Fields", "rows": cell_rows},
                      {"title": "Quantities", "rows": [{"label": "Frame members", "type": "readonly", "value": f"{q['frame_members']} ({q['frame_length']:.2f} m)"},
                                                       {"label": "Frame mass", "type": "readonly", "value": mass},
                                                       {"label": "Fins", "type": "readonly", "value": f"{q['fin_count']} ({q['fin_depth']:.2f} m depth)"},
+                                                      {"label": "Shelves", "type": "readonly", "value": f"{q['shelf_count']} ({q['shelf_depth']:.2f} m depth)"},
                                                       {"label": "Glazing area", "type": "readonly", "value": f"{q['glazing_area']:.2f} m²"},
                                                       {"label": "Opaque panel area", "type": "readonly", "value": f"{q['panel_area']:.2f} m²"},
                                                       {"label": "Doors", "type": "readonly", "value": f"{q['door_count']} ({q['door_leaves']} leaves)"}, volume]},
-                                                      {"label": "Shelves", "type": "readonly", "value": f"{q['shelf_count']} ({q['shelf_depth']:.2f} m depth)"},
                      {"title": "Identity", "rows": [{"key": "name", "label": "Name", "type": "text", "value": project.model.get(oid)["name"]}]}]
     out["groups"].insert(1, {"title": "Ends and attachment", "rows": _connection_rows(project, oid, meta)})
     return out

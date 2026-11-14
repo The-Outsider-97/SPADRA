@@ -88,7 +88,7 @@ let cw;                                                                       //
 
 before(async () => {
   url = await startServer();
-  browser = await chromium.launch({ args: ["--use-gl=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"] });
+  browser = await chromium.launch({ ...(process.env.SPADRA_CHROMIUM ? { executablePath: process.env.SPADRA_CHROMIUM } : {}), args: ["--no-sandbox", "--use-gl=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"] });
   page = await browser.newPage({ viewport: { width: 1672, height: 941 } });
   page.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
   page.on("console", (m) => { if (m.type() === "error") problems.push(`console: ${m.text()} ${m.location().url}`); });

@@ -8,7 +8,7 @@ export const MODES = [["centre", "Centre to centre (hart-op-hart)"], ["max", "Ma
 export const ALIGNS = [["start", "Remainder at the end"], ["centre", "Remainder split at both ends"], ["end", "Remainder at the start"]];
 export const JOINS = [["mullions", "Mullions continuous"], ["transoms", "Transoms continuous"], ["mitre", "Mitred at the corners"]];
 export const FRAME_MATERIALS = ["Aluminium", "Steel", "Timber"];
-export const PANEL_TYPES = ["Window", "Opaque panel"];
+export const PANEL_TYPES = ["Window", "Opaque panel", "Louvre"];
 export const PANEL_MATERIALS = ["Glass", "Aluminium", "Steel", "Timber"];
 export const DOOR_TYPES = ["Single Flush Door", "Double Door", "Sliding Door"];
 /** The corners two curtain walls can meet in (the server's ``CORNER_TYPES``) and the angles, inside the corner, each can be built for. */

@@ -62,7 +62,14 @@ def list_specs(project: Any) -> list[dict[str, Any]]:
 
 def capabilities(project: Any | None = None) -> dict[str, Any]:
     """What this installation can run, probed rather than assumed."""
-    out: dict[str, Any] = {"constraints": CE.capabilities(), "operations": OG.contract_table()}
+    # Older SLAI checkouts expose KINDS and solve() but not the optional
+    # capabilities() convenience function. Report only what that solver declares.
+    constraint_probe = getattr(CE, "capabilities", None)
+    constraints = constraint_probe() if callable(constraint_probe) else {
+        "supported": [{"kind": kind} for kind in getattr(CE, "KINDS", ())],
+        "unsupported": [{"kind": "curvature_continuous", "reason": "Not supported by this SLAI constraint solver"}],
+    }
+    out: dict[str, Any] = {"constraints": constraints, "operations": OG.contract_table()}
     caps: dict[str, Any] = {}
     try:
         import numpy  # noqa: F401

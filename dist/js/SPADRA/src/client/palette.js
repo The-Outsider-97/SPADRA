@@ -20,6 +20,12 @@ export function rgba(color) {
     const alpha = m[4] === undefined ? 1 : m[4].endsWith("%") ? Number.parseFloat(m[4]) / 100 : Number(m[4]);
     return [Number(m[1]) / 255, Number(m[2]) / 255, Number(m[3]) / 255, alpha];
 }
+/** Six-digit material HEX colors as normalized WebGL channels. */
+export function hexRgb01(hex) {
+    if (!/^#[0-9a-f]{6}$/i.test(hex))
+        throw new Error("Expected a #RRGGBB color");
+    return [1, 3, 5].map(i => Number.parseInt(hex.slice(i, i + 2), 16) / 255);
+}
 export function withAlpha(color, alpha) {
     const [r, g, b] = rgba(color);
     return `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}, ${alpha})`;
