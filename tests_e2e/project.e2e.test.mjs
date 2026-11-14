@@ -149,7 +149,7 @@ describe("project properties, backups and recovery", () => {
     const dlg = page.getByRole("dialog", { name: "Keyboard shortcuts" });
     await dlg.waitFor();
     assert.match(await dlg.innerText(), /Ctrl\+Shift\+S/);
-    assert.match(await dlg.innerText(), /Play or pause the animation/);
+    assert.match(await dlg.textContent() ?? "", /Play or pause the animation/);                 // the keys the views keep for themselves are listed, folded away
     await dlg.locator(".btn", { hasText: "Close" }).click(); await settle();
     await menu("Project properties…");
     await page.locator("#project-description").focus();

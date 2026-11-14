@@ -355,3 +355,113 @@ export async function roofEndDialog(store) {
     await handle.result;
     window.clearTimeout(timer);
 }
+/** The downpipe component kinds the server builds (the same table as ``gutters.COMPONENT_KINDS``). The hopper head goes on top and the shoe at the
+ *  bottom, wherever they are added; the server checks every change against the assembly as a whole and refuses one that cannot be built. */
+export const COMPONENT_KINDS = [
+    ["pipe", "Downpipe section"], ["offset_bend", "Offset bend"], ["elbow", "Elbow"], ["shoe", "Shoe"], ["y_branch", "Y-branch"], ["hopper", "Hopper head"],
+];
+/** Read a downpipe's components in order (from its Properties, which the server builds from the stored assembly). */
+async function assemblyOf(store, id) {
+    try {
+        const p = await store.api.post("/properties", { model: id });
+        return { name: p.title, items: p.assembly ?? [] };
+    }
+    catch (e) {
+        toast(e instanceof Error ? e.message : "Could not read the downpipe.", { kind: "error" });
+        return null;
+    }
+}
+/** Edit a downpipe's assembly: add, replace, reorder, split or remove its components, or open one in Properties. Every button is one undoable
+ *  ``model.edit_downpipe`` command; connectors between sections are made by the server and are not listed as separate steps. */
+export async function downpipeComponentsDialog(store, id) {
+    const first = await assemblyOf(store, id);
+    if (!first)
+        return;
+    const list = h("ol", { css: { display: "grid", gap: "0.35rem", margin: "0", paddingLeft: "1.5rem" } });
+    const status = h("p", { class: "muted", attrs: { role: "status", "aria-live": "polite" } });
+    const kindSelect = (value = "pipe") => h("select", { attrs: { "aria-label": "Component kind" } }, ...COMPONENT_KINDS.map(([v, l]) => h("option", { value: v, text: l, ...(v === value ? { selected: true } : {}) })));
+    const addKind = kindSelect("offset_bend");
+    const edit = async (params) => {
+        const out = await store.run("model.edit_downpipe", { id, ...params });
+        if (out)
+            await paint();
+    };
+    let handle = null;
+    const paint = async () => {
+        const now = await assemblyOf(store, id);
+        if (!now)
+            return;
+        clear(list);
+        now.items.forEach((c, i) => {
+            const btn = (text, title, run, disabled = false) => h("button", { class: "tool-inline", type: "button", text, disabled, attrs: { title, "aria-label": `${title}: ${c.label} ${c.id}` }, on: { click: run } });
+            const swap = kindSelect(c.kind);
+            swap.addEventListener("change", () => { void edit({ action: "replace", component: c.id, kind: swap.value }); });
+            list.append(h("li", { css: { display: "flex", gap: "0.4rem", alignItems: "center", flexWrap: "wrap" } }, h("span", { text: `${c.label} (${c.id})`, css: { minWidth: "11rem" } }), swap, btn("Edit", "Open this component in Properties", () => { handle?.close(true); void store.select({ kind: "model", ids: [id], part: `comp:${c.id}` }); }), btn("↑", "Move up", () => { void edit({ action: "move", component: c.id, index: i - 1 }); }, i === 0), btn("↓", "Move down", () => { void edit({ action: "move", component: c.id, index: i + 1 }); }, i === now.items.length - 1), btn("Split", "Split this downpipe section in two", () => { void edit({ action: "split", component: c.id }); }, c.kind !== "pipe"), btn("Remove", "Remove this component", () => { void edit({ action: "remove", component: c.id }); }, now.items.length === 1)));
+        });
+        status.textContent = `${now.items.length} component${now.items.length === 1 ? "" : "s"}, top to bottom. Connectors are added automatically wherever two downpipe sections meet.`;
+    };
+    const opened = openDialog({
+        title: `Downpipe components — ${first.name}`, size: "wide", cancelLabel: "Close",
+        body: h("div", { css: { display: "grid", gap: "0.8rem" } }, list, status, h("div", { css: { display: "flex", gap: "0.5rem", alignItems: "end" } }, labelled("Add a component", addKind), h("button", { class: "btn", type: "button", text: "Add", on: { click: () => { void edit({ action: "add", kind: addKind.value }); } } })), h("p", { class: "muted", text: "Bends take the 72°, 45° or 40° fitting angles (or any 5–90°) and their direction in Properties. A component inherits the downpipe's NL-SfB and IFC classification unless you give it its own." })),
+    });
+    handle = opened;
+    await paint();
+    await opened.result;
+}
+/** Place a ground drain: a point drain (gully), a linear channel drain or a downpipe ground inlet. It stands in the floor under it and cuts that floor's
+ *  opening (the server finds the floor, builds the body, cover and outlet, and keeps the cut in step when the drain moves or the floor changes). */
+export async function drainDialog(store, at = {}) {
+    if (!store.project)
+        return;
+    const unit = store.unit;
+    const num = (value, step = "any", min) => h("input", { type: "number", value, step, ...(min ? { min } : {}), attrs: { autocomplete: "off" } });
+    const kinds = at.downpipe ? [["inlet", "Downpipe ground inlet"]] : [["gully", "Point drain (yard gully)"], ["channel", "Linear channel drain"], ["inlet", "Downpipe ground inlet"]];
+    const kind = h("select", {}, ...kinds.map(([v, l]) => h("option", { value: v, text: l, ...(v === (at.kind ?? kinds[0]?.[0]) ? { selected: true } : {}) })));
+    const level = h("select", {}, ...store.levels.map((l) => h("option", { value: l.id, text: l.name, ...(l.id === at.level ? { selected: true } : {}) })));
+    const p = at.point ?? [0, 0];
+    const px = num(String(p[0])), py = num(String(p[1]));
+    const per = unit === "mm" ? 1 : unit === "cm" ? 0.1 : 0.001;
+    const ex = num(String(p[0] + 2000 * per)), ey = num(String(p[1]));
+    const width = num("", "5", "50"), depth = num("", "5", "50");
+    width.placeholder = "default";
+    depth.placeholder = "default";
+    const cover = h("select", {}, ...["", "grating", "solid cover", "open"].map((v) => h("option", { value: v, text: v || "Default for the kind" })));
+    const endRow = h("div", { css: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" } }, labelled(`End x (${unit})`, ex), labelled(`End y (${unit})`, ey));
+    const sync = () => { endRow.hidden = kind.value !== "channel"; };
+    kind.addEventListener("change", sync);
+    sync();
+    const where = at.downpipe ? h("p", { class: "muted", text: "It stands under the downpipe's bottom end and follows it." })
+        : h("div", { css: { display: "grid", gap: "0.6rem" } }, labelled("Level", level), h("div", { css: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" } }, labelled(`x (${unit})`, px, { hint: "The centre; for a channel, its start" }), labelled(`y (${unit})`, py)), endRow);
+    const handle = openDialog({
+        title: "Add a ground drain", size: "narrow", focus: () => kind,
+        body: h("div", { css: { display: "grid", gap: "0.9rem" } }, labelled("Type", kind), where, h("div", { css: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" } }, labelled("Width or diameter (mm)", width), labelled("Depth (mm)", depth)), labelled("Cover", cover), h("p", { class: "muted", text: "It is set into the floor under it, which gets the matching opening automatically. Sizes, cover, outlet and material can be changed in Properties." })),
+        actions: [{ label: "Add drain", kind: "primary", run: async () => {
+                    const params = { kind: kind.value };
+                    if (at.downpipe)
+                        params["downpipe"] = at.downpipe;
+                    else {
+                        params["level"] = level.value;
+                        if (kind.value === "channel") {
+                            params["start"] = [Number(px.value), Number(py.value)];
+                            params["end"] = [Number(ex.value), Number(ey.value)];
+                        }
+                        else
+                            params["point"] = [Number(px.value), Number(py.value)];
+                    }
+                    if (width.value)
+                        params[kind.value === "inlet" ? "diameter" : "width"] = Number(width.value);
+                    if (depth.value)
+                        params["depth"] = Number(depth.value);
+                    if (cover.value)
+                        params["cover"] = cover.value;
+                    const out = await store.run("model.add_drain", params);
+                    if (!out)
+                        return undefined;
+                    const id = out.result?.id;
+                    if (id)
+                        await store.select({ kind: "model", ids: [id] });
+                    return true;
+                } }],
+    });
+    await handle.result;
+}

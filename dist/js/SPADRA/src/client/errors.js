@@ -19,3 +19,8 @@ export function presentUnexpected(error, what) {
     const cause = error instanceof Error && error.message ? error.message : String(error);
     return { code: "client", category: "Unexpected", message: `${what} failed unexpectedly (${cause}).`, recovery: "Nothing was changed. Try again; if it keeps happening, see the diagnostics log." };
 }
+/** The corrections a server error offers (``details.fixes``), each a label and the commands that make it; none when the error has no such details. */
+export function fixesOf(error) {
+    const d = error.details;
+    return Array.isArray(d?.fixes) ? d.fixes.filter((f) => f && typeof f.label === "string" && Array.isArray(f.steps) && f.steps.length > 0) : [];
+}

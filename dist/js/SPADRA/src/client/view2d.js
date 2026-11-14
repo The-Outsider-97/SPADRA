@@ -6,7 +6,8 @@ import { addLayerDialog, hatchDialog, mirrorKeepDialog, numberPrompt } from "./d
 import { clamp } from "../../../tools/web/src/util.js";
 import { alongFrom, angleBetween, closedLoop, distToSegment, dist, entityDistance, entityBounds, fitBox, formatDimension, gripAt, grips, gridLines, gridSpec, hatchLoops, insideBox, mid, normaliseRect, orthoConstrain, pointInPolygon, polygonDistance, polygonsBounds, rotateAbout, roundAngle, segments, snapPoint, textBox, wallBand, wallCentreShift, } from "./geom2d.js";
 import { cssColor, withAlpha } from "./palette.js";
-import { curtainWallDialog } from "./curtainwall.js";
+import { cornerDialog, curtainWallDialog } from "./curtainwall.js";
+import { downpipeComponentsDialog } from "./gutters.js";
 import { cutStyle, cutWeight, hatchFill, patternPath, levelLabel, markArrows, markLabel, itemContains, projectionAt, snapPolygons, visibleLevels } from "./projection.js";
 const MM_PER = { mm: 1, cm: 10, m: 1000 };
 const SNAP_PX = 10;
@@ -16,7 +17,7 @@ const DRAG_PX = 4;
 const TOOL_KINDS = {
     offset: ["line", "polyline", "circle"], trim: ["line", "polyline"], extend: ["line", "polyline"], fillet: ["line"],
 };
-const PAINT_ORDER = ["foundation", "floor", "roof", "room", "extrusion", "sweep", "generic", "stair", "wall", "curtainwall", "structural", "window", "door", "opening_profile", "column", "gutter", "downpipe", "void", "grid"];
+const PAINT_ORDER = ["foundation", "floor", "roof", "room", "extrusion", "sweep", "generic", "stair", "wall", "curtainwall", "structural", "window", "door", "opening_profile", "column", "gutter", "downpipe", "drain", "flashing", "void", "grid"];
 const CURVE_TOOLS = new Set(["offset", "trim", "extend", "fillet", "hatch"]);
 const TURN_OFFSET_PX = 30;
 const PIVOTS = ["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"];
@@ -282,7 +283,7 @@ export class DrawingView {
         c.addEventListener("contextmenu", (e) => {
             e.preventDefault();
             if (this.pts.length) {
-                this.finish(false);
+                void this.finish(this.store.tool === "curtainwallrun" && this.pts.length >= 2);
                 return;
             }
             if (this.store.tool === "select")
@@ -319,6 +320,19 @@ export class DrawingView {
             if (this.store.tool === "wall") {
                 void this.finish(false);
                 return;
+            }
+            if (this.store.tool === "curtainwallrun") {
+                void this.finish(this.pts.length >= 2);
+                return;
+            }
+            if (this.store.tool === "select" && !e.shiftKey && !this.data?.projection && this.data?.view.level_id) { // double-click an assembly to edit one of its parts
+                const world = this.toWorld(...this.local(e));
+                const hit = this.modelCandidates(world).find((c) => c.category === "curtainwall" || c.category === "downpipe");
+                if (hit) {
+                    e.preventDefault();
+                    void this.editPart(hit, world);
+                    return;
+                }
             }
             if (this.store.tool === "select" && e.shiftKey && !this.data?.projection) {
                 const wall = this.wallAt(this.toWorld(...this.local(e)));
@@ -706,6 +720,22 @@ export class DrawingView {
                 await curtainWallDialog(this.store, { start: last, end: p, level });
                 break;
             }
+            case "curtainwallrun": {
+                const level = this.data?.view.level_id;
+                if (!level) {
+                    toast("Connected curtain walls are drawn on a floor plan.", { kind: "info" });
+                    break;
+                }
+                if (last && dist(last, p) < 1e-9)
+                    break;
+                const first = this.pts[0];
+                if (first && this.pts.length >= 3 && dist(first, p) < PICK_PX / this.scale) {
+                    await this.finish(true, true);
+                    break;
+                } // back on the first point: a closed run
+                this.pts = [...this.pts, p]; // a run of connected curtain walls: Enter finishes it
+                break;
+            }
             case "stair": {
                 const level = this.data?.view.level_id;
                 if (!level) {
@@ -1070,6 +1100,22 @@ export class DrawingView {
             else
                 toast("A polyline needs at least two points.", { kind: "info" });
         }
+        if (commit && this.store.tool === "curtainwallrun" && view) {
+            const level = this.data?.view.level_id;
+            const pts = this.pts.filter((p, i) => i === 0 || dist(p, this.pts[i - 1] ?? p) > 1e-9);
+            this.pts = [];
+            this.draw();
+            if (pts.length >= 2 && level) {
+                if (pts.length === 2 && !closed)
+                    await curtainWallDialog(this.store, { start: pts[0], end: pts[1], level }); // one segment: as before
+                else
+                    await curtainWallDialog(this.store, { points: pts, closed: closed && pts.length >= 3, level });
+            }
+            else
+                toast("A curtain wall needs two points on a floor plan.", { kind: "info" });
+            this.updateHint();
+            return;
+        }
         if (commit && (this.store.tool === "floor" || this.store.tool === "roof") && view) {
             const level = this.data?.view.level_id;
             const pts = this.pts.filter((p, i) => i === 0 || dist(p, this.pts[i - 1] ?? p) > 1e-9);
@@ -1211,6 +1257,11 @@ export class DrawingView {
             this.draw();
             return;
         }
+        if (e.key === "Enter" && this.store.tool === "curtainwallrun") {
+            e.preventDefault();
+            await this.finish(this.pts.length >= 2);
+            return;
+        }
         if (e.key === "Enter" && (this.store.tool === "polyline" || this.store.tool === "floor" || this.store.tool === "roof" || this.store.tool === "room" || this.store.tool === "extrude" || this.store.tool === "void" || this.store.tool === "sweep")) {
             await this.finish(true);
             return;
@@ -1313,17 +1364,36 @@ export class DrawingView {
         this.canvas.title = ids.length > 1 ? `${ids.length} overlapping elements. Click again to select the next one.` : "";
         return ids[index] ?? null;
     }
+    /** Double-click on a curtain wall selects the panel or member under the pointer (the server finds it at the plan's cut height); on a downpipe it opens
+     *  the component editor. The part is then edited in Properties like any element. */
+    async editPart(hit, world) {
+        if (hit.category === "downpipe") {
+            await downpipeComponentsDialog(this.store, hit.id);
+            return;
+        }
+        try {
+            const part = await this.store.api.post("/curtainwall/pick", { id: hit.id, point: world });
+            await this.store.select({ kind: "model", ids: [hit.id], part: part.part });
+            this.store.setStatus(`${part.label}: edit it in Properties. Double-click another part, or click elsewhere to select whole elements again.`);
+        }
+        catch {
+            await this.store.select({ kind: "model", ids: [hit.id] });
+        }
+    }
     /** Right-click actions are owned by the shared model menu, in both 2D and 3D. */
     openModelContextMenu(event) {
         const [x, y] = this.local(event);
         const candidates = this.modelCandidates(this.toWorld(x, y));
         const chosen = this.store.selection?.kind === "model" ? candidates.find((item) => this.store.selection?.kind === "model" && this.store.selection.ids.includes(item.id)) : undefined;
-        const target = [chosen, ...candidates].find((item) => item && (item.category === "roof" || item.category === "door" || item.category === "window"));
+        const MENU = ["door", "window", "downpipe", "drain", "curtainwall", "wall", "flashing", "structural", "roof", "floor"];
+        const target = [chosen, ...candidates].filter((item) => !!item && MENU.includes(item.category))
+            .sort((a, b) => (a === chosen ? -1 : b === chosen ? 1 : MENU.indexOf(a.category) - MENU.indexOf(b.category)))[0];
         if (!target)
             return;
         this.contextAnchor.style.left = `${x}px`;
         this.contextAnchor.style.top = `${y}px`;
-        this.store.openModelContextMenu(target.id, target.category, this.contextAnchor);
+        const level = this.data?.view.level_id;
+        this.store.openModelContextMenu(target.id, target.category, this.contextAnchor, { point: this.toWorld(x, y), ...(level ? { level } : {}) });
     }
     pick(world) {
         let best = null;
@@ -1568,6 +1638,55 @@ export class DrawingView {
                 }
                 menu.style.left = `${Math.max(6, Math.min(this.width - 238, x + 18))}px`;
                 menu.style.top = `${Math.max(6, Math.min(this.height - 152, y - 14))}px`;
+                this.junctionControls.appendChild(menu);
+            }
+        }
+        // Curtain walls: the same on-canvas affordance at a joined end offers the four corner types (L, Quad, Trapezoid, V) or automatic.
+        const CORNERS = [["L", "L-Corner"], ["quad", "Quad Corner"], ["trapezoid", "Trapezoid Corner"], ["V", "V-Corner"], ["auto", "Automatic"]];
+        for (const cw of this.data?.model ?? []) {
+            if (cw.category !== "curtainwall" || (cw.id !== this.hover && !chosen.includes(cw.id)))
+                continue;
+            for (const c of cw.cw_corners ?? []) {
+                const key = `cw:${[cw.id, c.other].sort().join(":")}:${c.point.map((v) => v.toFixed(3)).join(",")}`;
+                if (seen.has(key))
+                    continue;
+                seen.add(key);
+                const [x, y] = this.toScreen(c.point);
+                const active = this.openedJoin?.wall === cw.id && this.openedJoin.other === c.other && this.openedJoin.endpoint === c.endpoint;
+                const icon = h("button", { type: "button", class: "junction-button", text: "⌐", attrs: {
+                        title: `Curtain-wall corner: ${c.type} at ${c.angle.toFixed(0)}°. Choose L, Quad, Trapezoid or V.`,
+                        "aria-label": `Edit curtain wall corner at ${c.endpoint}`, "aria-expanded": active ? "true" : "false", "data-focus-key": key
+                    },
+                    on: { click: (e) => { e.stopPropagation(); this.openedJoin = active ? null : { wall: cw.id, other: c.other, endpoint: c.endpoint }; this.draw(); } } });
+                icon.style.left = `${Math.max(16, Math.min(this.width - 16, x + 21))}px`;
+                icon.style.top = `${Math.max(16, Math.min(this.height - 16, y - 21))}px`;
+                this.junctionControls.appendChild(icon);
+                if (!active)
+                    continue;
+                const menu = h("div", { class: "junction-menu", attrs: { role: "group", "aria-label": "Curtain wall corner type" } });
+                for (const [type, label] of CORNERS) {
+                    const selected = c.type === type;
+                    menu.appendChild(h("button", { type: "button", class: `junction-option${selected ? " active" : ""}`, text: label,
+                        attrs: { "aria-pressed": selected ? "true" : "false", "data-focus-key": `${key}:${type}` },
+                        on: { click: (e) => {
+                                e.stopPropagation();
+                                void (async () => {
+                                    const changed = await this.store.run("model.set_curtainwall_corner", { id: cw.id, end: c.endpoint, type });
+                                    if (changed) {
+                                        this.openedJoin = null;
+                                        this.draw();
+                                    }
+                                })();
+                            }, keydown: (e) => { if (e.key === "Escape") {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                this.openedJoin = null;
+                                this.draw();
+                            } } } }));
+                }
+                menu.appendChild(h("button", { type: "button", class: "junction-option", text: "Sizes…", on: { click: (e) => { e.stopPropagation(); this.openedJoin = null; void cornerDialog(this.store, cw.id, c.endpoint); } } }));
+                menu.style.left = `${Math.max(6, Math.min(this.width - 238, x + 18))}px`;
+                menu.style.top = `${Math.max(6, Math.min(this.height - 180, y - 14))}px`;
                 this.junctionControls.appendChild(menu);
             }
         }
@@ -2393,6 +2512,42 @@ export class DrawingView {
             ctx.setLineDash([]);
             return;
         }
+        if (w.category === "drain") { // a grating: the outline with its bars
+            trace();
+            ctx.setLineDash([]);
+            ctx.fillStyle = withAlpha(color, selected ? 0.35 : 0.15);
+            ctx.fill();
+            ctx.stroke();
+            const xs = w.polygon.map((p) => this.toScreen(p)[0]), ys = w.polygon.map((p) => this.toScreen(p)[1]);
+            const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+            ctx.save();
+            trace();
+            ctx.clip();
+            ctx.beginPath();
+            const across = x1 - x0 >= y1 - y0;
+            for (let t = 4; t < (across ? x1 - x0 : y1 - y0); t += 5) {
+                if (across) {
+                    ctx.moveTo(x0 + t, y0);
+                    ctx.lineTo(x0 + t, y1);
+                }
+                else {
+                    ctx.moveTo(x0, y0 + t);
+                    ctx.lineTo(x1, y0 + t);
+                }
+            }
+            ctx.lineWidth = 0.6;
+            ctx.stroke();
+            ctx.restore();
+            return;
+        }
+        if (w.category === "flashing") {
+            trace();
+            ctx.setLineDash([]);
+            ctx.fillStyle = withAlpha(color, selected ? 0.5 : 0.3);
+            ctx.fill();
+            ctx.stroke();
+            return;
+        }
         ctx.setLineDash([]);
         const poly = w.polygon;
         const edge = (i, j) => { const a = poly[i], b = poly[j]; if (a && b)
@@ -2788,7 +2943,7 @@ export class DrawingView {
         ctx.setLineDash([6, 4]);
         ctx.beginPath();
         const first = this.pts[0];
-        if (tool === "line" || tool === "polyline" || tool === "floor" || tool === "roof" || tool === "room" || tool === "section" || tool === "grid" || tool === "stair" || tool === "wall" || tool === "curtainwall" || tool === "extrude" || tool === "void" || tool === "sweep") {
+        if (tool === "line" || tool === "polyline" || tool === "floor" || tool === "roof" || tool === "room" || tool === "section" || tool === "grid" || tool === "stair" || tool === "wall" || tool === "curtainwall" || tool === "curtainwallrun" || tool === "extrude" || tool === "void" || tool === "sweep") {
             const all = [...this.pts, p, ...((tool === "floor" || tool === "roof" || tool === "room" || tool === "extrude" || tool === "void") && this.pts.length > 1 ? [first] : [])];
             for (let i = 0; i + 1 < all.length; i++)
                 this.line(all[i], all[i + 1]);
@@ -2896,6 +3051,7 @@ export class DrawingView {
             case "stair":
             case "wall":
             case "curtainwall":
+            case "curtainwallrun":
             case "extrude":
             case "void":
             case "sweep": {
@@ -2988,7 +3144,8 @@ export class DrawingView {
             door: "Click on a wall to place a door. Change its size in Properties.",
             window: "Click on a wall to place a window. Change its size and sill in Properties.",
             grid: n ? "Pick the other end of the grid line." : "Pick the first end of the grid line. Grids show on every floor plan.",
-            curtainwall: n ? "Pick the other end of the curtain wall. A dialog then sets its spacing, frame and panels." : "Pick the start of the curtain wall. It snaps to the ends and middles of walls.",
+            curtainwall: n ? "Pick the other end of the curtain wall. A dialog then sets its spacing, frame and panels." : "Pick the start of the curtain wall. It snaps to the ends and middles of walls. For several joined walls use Connected curtain walls.",
+            curtainwallrun: n ? `Pick the next corner (${n} picked). Enter, double-click or right-click finishes the run; click the first point to close it. A dialog then sets spacing, frame, panels and corners.` : "Pick the start of the run. Keep clicking corners; Enter, double-click or right-click finishes it.",
             stair: n ? "Pick the end of the run. The stair climbs from this level to the next one up." : "Pick where the stair starts. It runs from this level to the next one up.",
             family: this.store.family ? `Click to place “${this.store.family.name}”. Esc stops placing.` : "Choose a family first (Insert, then Family).",
             tag: this.tagOf ? "Click where the tag goes." : "Click the element to tag. The tag shows its data and follows it when the model changes.",

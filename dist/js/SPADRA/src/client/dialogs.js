@@ -3,6 +3,7 @@ import { h, s, labelled } from "../../../tools/web/src/dom.js";
 import { appearanceControls, applyAppearance, DEFAULT_APPEARANCE, normaliseAppearance } from "../../../tools/web/src/theme.js";
 import { openDialog, promptDialog, toast } from "../../../tools/web/src/ui.js";
 import { flatten } from "./store.js";
+import { analysisOfError, renderImpact } from "./impact_panel.js";
 const KEY = "spadra.appearance";
 /** Contextual '+' on a selected BIM face; Properties remains the editor for layers already placed. */
 export async function addLayerDialog(store, id, category, side) {
@@ -366,7 +367,8 @@ export function modifierDialog(store, operation) {
     const visual = s("svg", { attrs: { viewBox: "0 0 300 200", role: "img", "aria-label": "Computed modifier geometry preview" },
         css: { width: "100%", height: "200px", border: "1px solid var(--hairline)", background: "var(--surface)", borderRadius: "10px" } });
     const status = h("p", { class: "muted", text: "Computing the modifier geometry from a scratch project…" });
-    box.append(visual, status);
+    const impact = h("div", { attrs: { "aria-live": "polite", "aria-label": "Geometric impact" }, css: { display: "grid", gap: ".4rem" } });
+    box.append(visual, status, impact);
     let serial = 0, timeout;
     const showPreview = (before, after) => {
         const projected = (mesh) => mesh.vertices.map(v => [(v[0] ?? 0) * 0.8660254 - (v[1] ?? 0) * 0.8660254,
@@ -469,6 +471,18 @@ export function modifierDialog(store, operation) {
             return false;
         }
         status.textContent = "Evaluating native geometry (read-only)…";
+        if (is3d) { // the cheap deterministic expectation, shown while the kernel runs
+            void store.api.post("/modifier/predict", { kind: "model", ...params }).then((r) => {
+                if (ticket !== serial)
+                    return;
+                const p = r.predicted;
+                const text = p?.available === false ? `No prediction for this operation: ${p.reason ?? ""}`
+                    : p?.exact?.volume !== undefined ? `Expected before evaluating: volume ${Number(p.exact.volume.toFixed(4))} m³ (${p.method ?? "deterministic"}).`
+                        : p?.bounds?.volume ? `Expected before evaluating: volume between ${Number(p.bounds.volume[0].toFixed(4))} and ${Number(p.bounds.volume[1].toFixed(4))} m³ (${p.method ?? "bounds"}).` : "";
+                if (text)
+                    impact.replaceChildren(h("p", { class: "muted", text }));
+            }).catch(() => { });
+        }
         try {
             const result = await store.api.post("/modifier/preview", { kind: is3d ? "model" : "drawing", ...params });
             if (ticket !== serial)
@@ -478,13 +492,15 @@ export function modifierDialog(store, operation) {
                 return false;
             }
             showPreview(result.before, result.after);
+            renderImpact(impact, result.analysis ?? null);
             status.textContent = `Verified scratch geometry: dashed = before, blue = after. ${JSON.stringify(result.result.diagnostics ?? {})}`;
-            return true;
+            return result.analysis?.valid !== false;
         }
         catch (error) {
             if (ticket === serial) {
                 visual.replaceChildren();
                 status.textContent = `Geometry refused: ${error instanceof Error ? error.message : String(error)}`;
+                renderImpact(impact, analysisOfError(error), { refused: "The kernel refused this modifier; no analysis is available." });
             }
             return false;
         }
@@ -517,6 +533,7 @@ export function modifierDialog(store, operation) {
                         return undefined;
                     const result = done.result;
                     store.setStatus(`${operation} applied (${result.mode ?? "native"}). ${JSON.stringify(result.diagnostics ?? {})}`);
+                    toast(`${operation[0]?.toUpperCase()}${operation.slice(1)} applied.`, { kind: "ok", action: { label: "Undo", run: () => { void store.undo(); } } });
                     if (result.id) {
                         if (is3d)
                             await store.select({ kind: "model", ids: [result.id] });

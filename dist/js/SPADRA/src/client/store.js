@@ -3,9 +3,11 @@ import { createClient, ApiError } from "../../../tools/web/src/api.js";
 import { openDialog, openMenu, promptDialog, toast } from "../../../tools/web/src/ui.js";
 import { h } from "../../../tools/web/src/dom.js";
 import { Emitter } from "../../../tools/web/src/util.js";
-import { oneLine, present, presentUnexpected } from "./errors.js";
+import { fixesOf, oneLine, present, presentUnexpected } from "./errors.js";
 import { closedPolylinePoints, UNIT_MM } from "./geom2d.js";
 import { importDialog } from "./interchange.js";
+import { COMPONENT_KINDS, downpipeComponentsDialog, drainDialog } from "./gutters.js";
+import { cornerDialog } from "./curtainwall.js";
 const formatOf = (ref) => (ref.kind === "3d" ? "SGEO" : ref.kind === "schedule" ? "Schedule" : "SDRW");
 /** A true/false setting kept in this browser only (a convenience for this person; the project does not depend on it). */
 function readFlag(key, fallback) {
@@ -102,13 +104,24 @@ export class Store {
     family = null;
     /** Opens a dialog the server names (a Project Browser row or a link in Properties). Set by the shell, which owns the dialogs. */
     openDialog = null;
+    /** Opens the SLAI Assistant panel (where proposals are reviewed). Set by the shell, which owns the panel. */
+    openAssistant = null;
     /** A sketch started from a door/window context menu. The closed SDRW contour remains editable in its drawing and
      *  is associated with the opening after the user's next closed polyline command succeeds. */
     pendingOpeningSketch = null;
     /** Model-element commands are shared by the 2D and 3D viewports and Project Browser. The menu belongs to the clicked
      *  element, not whichever model item happened to be previously selected. The server owns every geometry operation. */
-    openModelContextMenu(id, category, anchor) {
+    openModelContextMenu(id, category, anchor, at = {}) {
+        if (category === "structural" || category === "flashing") {
+            void this.accessoryContextMenu(id, category, anchor);
+            return;
+        }
         const entries = [{ label: "Select element", icon: "select", run: () => { void this.select({ kind: "model", ids: [id] }); } }];
+        const edgePrompt = async (title) => {
+            const value = await promptDialog({ title, label: "Boundary edge number (1, 2, …) or all", value: "all", confirmLabel: title,
+                validate: (s) => /^(all|[1-9]\d*)$/i.test(s.trim()) ? null : "Enter an edge number or all." });
+            return value === null ? null : value.trim().toLowerCase();
+        };
         if (category === "roof") {
             entries.push("separator", { label: "Add Ridge Beam", icon: "beam", run: () => { void this.run("model.add_roof_accessory", { roof: id, kind: "ridge_beam" }); } }, { label: "Add Ridge Strap", icon: "beam", run: () => { void this.run("model.add_roof_accessory", { roof: id, kind: "ridge_strap" }); } }, { label: "Add Roof Edge", icon: "line", run: () => {
                     void (async () => {
@@ -117,12 +130,66 @@ export class Store {
                         if (value !== null)
                             await this.run("model.add_roof_accessory", { roof: id, kind: "roof_edge", edge: value.trim().toLowerCase() });
                     })();
+                } }, { label: "Add Drip Edge", icon: "line", run: () => {
+                    void (async () => {
+                        const edge = await edgePrompt("Add drip edge");
+                        if (edge !== null)
+                            await this.run("model.add_roof_accessory", { roof: id, kind: "drip_edge", edge });
+                    })();
                 } });
+        }
+        if (category === "downpipe") {
+            const add = (kind) => { void this.run("model.edit_downpipe", { id, action: "add", kind }); };
+            entries.push("separator", { label: "Edit Components…", icon: "downpipe", run: () => { void downpipeComponentsDialog(this, id); } }, ...COMPONENT_KINDS.map(([kind, label]) => ({ label: `Add ${label}`, icon: kind === "pipe" ? "downpipe" : "polyline", run: () => add(kind) })), "separator", { label: "Add Ground Inlet Below", icon: "report", run: () => { void drainDialog(this, { downpipe: id, kind: "inlet" }); } });
+        }
+        if (category === "floor") {
+            entries.push("separator", { label: "Add Point Drain Here…", icon: "report", run: () => { void drainDialog(this, { ...at, kind: "gully" }); } }, { label: "Add Channel Drain Here…", icon: "report", run: () => { void drainDialog(this, { ...at, kind: "channel" }); } });
+        }
+        if (category === "curtainwall") {
+            entries.push("separator", { label: "Corner at Start…", icon: "curtainwall", run: () => { void cornerDialog(this, id, "start"); } }, { label: "Corner at End…", icon: "curtainwall", run: () => { void cornerDialog(this, id, "end"); } });
+        }
+        if (category === "wall" || category === "curtainwall") {
+            entries.push("separator", { label: "Stand on the Floor Below", icon: "floor", run: () => { void this.run("model.attach_wall", { ids: [id], to: "floor" }); } }, { label: "Free the Base from the Floor", icon: "close", run: () => { void this.run("model.detach_wall", { ids: [id], from: "floor" }); } }, { label: "Attach Top to Roof…", icon: "roof", run: () => { void this.attachTopToRoof(id); } }, { label: "Free the Top", icon: "close", run: () => { void this.run("model.detach_wall", { ids: [id], from: "roof" }); } });
         }
         if (category === "door" || category === "window") {
             entries.push("separator", { label: "Add Opening Profile", icon: "rectangle", run: () => { void this.standardOpeningProfile(id, category); } }, { label: "Use Existing SDRW Profile…", icon: "polyline", run: () => { void this.chooseOpeningDrawingProfile(id); } }, { label: "Sketch New SDRW Profile…", icon: "polyline", run: () => { void this.startOpeningProfileSketch(id); } }, { label: "Import SDRW Profile into Drawing…", icon: "folder", run: () => { void this.importOpeningDrawingProfile(); } }, "separator", { label: "Replace Opening Profile…", icon: "rectangle", run: () => { void this.standardOpeningProfile(id, category, true); } }, { label: "Replace Opening Profile from SDRW…", icon: "polyline", run: () => { void this.chooseOpeningDrawingProfile(id, true); } }, { label: "Sketch Replacement Profile…", icon: "polyline", run: () => { void this.startOpeningProfileSketch(id, true); } }, { label: "Remove Opening Profile", icon: "close", run: () => { void this.run("model.remove_opening_profile", { opening: id }); } });
         }
         openMenu(anchor, entries, { label: `${category} actions` });
+    }
+    /** A roof edge member or drip edge: what it is decides the menu, so it is read first (one small request). */
+    async accessoryContextMenu(id, category, anchor) {
+        let accessory;
+        try {
+            accessory = (await this.api.post("/properties", { model: id })).accessory;
+        }
+        catch {
+            accessory = undefined;
+        }
+        const entries = [{ label: "Select element", icon: "select", run: () => { void this.select({ kind: "model", ids: [id] }); } }];
+        if (accessory === "roof_edge")
+            entries.push("separator", { label: "Add Drip Edge on This Edge", icon: "line", run: () => { void this.run("model.add_roof_accessory", { member: id, kind: "drip_edge" }); } });
+        if (accessory === "drip_edge")
+            entries.push("separator", { label: "Add Roof Edge Member on This Edge", icon: "line", run: () => { void this.run("model.add_roof_accessory", { member: id, kind: "roof_edge" }); } });
+        if (anchor.isConnected)
+            openMenu(anchor, entries, { label: `${category} actions` });
+    }
+    /** Attach the top of a wall or curtain wall to a roof: the one roof in the model, or the one the person picks. */
+    async attachTopToRoof(id) {
+        const roofs = (this.scene?.objects ?? []).filter((o) => o.category === "roof");
+        let roof = roofs.length === 1 ? roofs[0]?.id : undefined;
+        if (!roof) {
+            if (!roofs.length) {
+                toast("Attach to a roof from the 3D view, or select the wall and the roof together and use Attach to roof.", { kind: "info" });
+                return;
+            }
+            const select = h("select", { attrs: { "aria-label": "Roof" } }, ...roofs.map((r) => h("option", { value: r.id, text: r.name })));
+            const choice = await openDialog({ title: "Attach top to roof", size: "narrow", body: h("div", {}, h("label", { text: "Roof" }), select),
+                actions: [{ label: "Attach", kind: "primary", run: () => select.value }] }).result;
+            if (!choice)
+                return;
+            roof = choice;
+        }
+        await this.run("model.attach_wall", { ids: [id], to: "roof", roof });
     }
     async standardOpeningProfile(opening, category, replace = false) {
         const width = await promptDialog({ title: `${replace ? "Replace" : "Add"} ${category} opening profile`, label: "Profile face width (mm)", value: "50",
@@ -212,13 +279,16 @@ export class Store {
     get saved() { return !!this.project && !this.project.dirty; }
     setStatus(text) { this.status = text; this.changed.emit(); }
     /** Run a server call; any failure becomes a readable toast (what kind of problem, what happened, what to do) and a null result. */
-    async guard(work, what) {
+    async guard(work, what, original) {
         this.busy += 1;
         try {
             return await work();
         }
         catch (error) {
-            if (error instanceof ApiError) {
+            if (error instanceof ApiError && fixesOf(error).length) {
+                void this.offerFixes(error, original); // the server located the problem and has exact corrections: offer them
+            }
+            else if (error instanceof ApiError) {
                 toast(oneLine(present(error, this.boot?.errors)), { kind: "error" });
                 if (error.status === 409 && this.project)
                     await this.refresh();
@@ -231,6 +301,39 @@ export class Store {
         finally {
             this.busy -= 1;
         }
+    }
+    /** A change the model cannot build, with the place it fails and corrections the server checked: say where, and let the person pick one. A correction
+     *  that changes the very value that was asked for replaces the change; any other is applied first and the original change is then made again. */
+    async offerFixes(error, original) {
+        const d = error.details;
+        const fixes = fixesOf(error);
+        const p = present(error, this.boot?.errors);
+        const instead = (f) => !!original && original.op === "model.set_property"
+            && f.steps.some((st) => st.op === "model.set_property" && st.params["id"] === original.params["id"] && st.params["key"] === original.params["key"]);
+        const show = async () => {
+            if (!d.element)
+                return;
+            await this.select(d.part ? { kind: "model", ids: [d.element], part: d.part } : { kind: "model", ids: [d.element] });
+            if (!this.properties)
+                await this.select({ kind: "model", ids: [d.element] }); // that part only exists in the change that was refused
+        };
+        const apply = async (f) => {
+            for (const st of f.steps)
+                if (!(await this.run(st.op, st.params)))
+                    return false;
+            if (original && !instead(f))
+                return !!(await this.run(original.op, original.params));
+            return true;
+        };
+        const list = h("div", { css: { display: "grid", gap: "0.4rem" } }, ...fixes.map((f) => h("button", { class: "btn", type: "button",
+            text: instead(f) ? `Instead: ${f.label}` : `${f.label}, then make the change`,
+            on: { click: () => { handle.close(true); void apply(f).then((ok) => { if (ok)
+                    toast(`Done: ${f.label}. Undo takes it back step by step.`, { kind: "ok" }); }); } } })));
+        const handle = openDialog({
+            title: "This change cannot be built as it is", size: "normal", cancelLabel: "Leave it",
+            body: h("div", { css: { display: "grid", gap: "0.75rem" } }, h("p", { text: /[.!?]$/.test(p.message) ? p.message : `${p.message}.` }), d.positions_mm ? h("p", { class: "muted", text: `Between ${d.positions_mm.map((v) => `${v.toLocaleString(undefined, { maximumFractionDigits: 0 })} mm`).join(" and ")}: ${Math.max(0, d.gap_mm ?? 0).toFixed(0)} mm free, ${d.needed_mm ?? 0} mm needed. Nothing was changed.` }) : null, h("p", { text: "Corrections that make it buildable:" }), list, p.recovery ? h("p", { class: "muted", text: p.recovery }) : null, d.element ? h("button", { class: "tool-inline", type: "button", text: "Show the element", on: { click: () => { void show(); } } }) : null),
+        });
+        await handle.result;
     }
     // ------------------------------------------------------------------------------------------------------- project lifecycle
     async newProject(name, unit, discard = false) {
@@ -473,7 +576,7 @@ export class Store {
             ref = { view: tab.ref.id };
         }
         else if (sel.kind === "model" && sel.ids[0])
-            ref = { model: sel.ids[0] };
+            ref = sel.part ? { model: sel.ids[0], part: sel.part } : { model: sel.ids[0] };
         else if (sel.kind === "drawing" && sel.ids[0])
             ref = { drawing: sel.view, entity: sel.ids[0] };
         else if (sel.kind === "sheet")
@@ -555,7 +658,7 @@ export class Store {
         if (!this.project)
             return null;
         const rev = this.project.revision;
-        const out = await this.guard(() => this.api.post("/command", { op, params, expected_revision: rev }), "That change");
+        const out = await this.guard(() => this.api.post("/command", { op, params, expected_revision: rev }), "That change", { op, params });
         if (!out)
             return null;
         this.project = out.project;
@@ -757,7 +860,7 @@ export class Store {
                 if (model?.open)
                     await this.openTab(model.open, model.label);
             }
-            await this.select({ kind: "model", ids: [pick.model] });
+            await this.select(pick.part ? { kind: "model", ids: [pick.model], part: pick.part } : { kind: "model", ids: [pick.model] });
         }
         else if (pick?.drawing && pick.entity)
             await this.select({ kind: "drawing", view: pick.drawing, ids: [pick.entity] });

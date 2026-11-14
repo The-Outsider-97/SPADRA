@@ -23,7 +23,7 @@ export const ACTIONS = [
     { id: "ui.search", label: "Search the Project Browser", group: "Interface", words: "find" },
     { id: "ui.shortcuts", label: "Show and edit the keyboard shortcuts", group: "Interface", anywhere: true, words: "keys help keymap" },
     tool("select", "Select", "pointer pick"), tool("line", "Line"), tool("polyline", "Polyline"), tool("rectangle", "Rectangle", "rect box"), tool("circle", "Circle"),
-    tool("dimension", "Dimension", "measure"), tool("text", "Text", "note label"), tool("wall", "Wall"), tool("curtainwall", "Curtain wall", "facade glazing mullion transom vliesgevel"), tool("grid", "Grid line", "axis"), tool("hatch", "Hatch", "fill"),
+    tool("dimension", "Dimension", "measure"), tool("text", "Text", "note label"), tool("wall", "Wall"), tool("curtainwall", "Curtain wall", "facade glazing mullion transom vliesgevel"), tool("curtainwallrun", "Connected curtain walls", "facade run corner chain"), tool("grid", "Grid line", "axis"), tool("hatch", "Hatch", "fill"),
     tool("mirror", "Mirror", "flip"), tool("rotate", "Rotate", "turn"), tool("offset", "Offset", "parallel"), tool("trim", "Trim", "cut"), tool("extend", "Extend"),
     tool("fillet", "Fillet", "round corner"), tool("door", "Door"), tool("window", "Window"), tool("floor", "Floor", "slab"), tool("roof", "Roof"),
     tool("column", "Column"), tool("beam", "Beam"), tool("room", "Room", "space"), tool("section", "Section", "cut"), tool("stair", "Stair", "steps"),
