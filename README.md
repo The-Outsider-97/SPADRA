@@ -3,6 +3,120 @@ Spatial Parametric Authoring, Design & Engineering.
 
 Intelligent CAD, BIM & Engineering powered by SLAI
 
+## Install and run SPADRA on Windows
+
+**Starting from an empty computer? Follow these steps in order.** `python -m applications.SPADRA --check` only checks an installation; it does **not** clone repositories, install dependencies, or build SPADRA.
+
+SPADRA currently runs **inside an SLAI source checkout**, not as a standalone Windows installer. Its Python server imports SLAI's shared `applications.tools` modules, and its web client uses SLAI's shared UI/build files. You therefore need **both** repositories, with SPADRA at `SLAI/applications/SPADRA/`.
+
+### 1. Install prerequisites
+
+- [Git for Windows](https://git-scm.com/downloads/win) (`git --version`).
+- [Python 3.12](https://www.python.org/downloads/) or Python 3.10/3.11 (`py -3.12 --version` for the commands below). **Do not use Python 3.13** for this setup: SLAI's current `pyproject.toml` declares `>=3.10,<3.13`.
+- [Node.js](https://nodejs.org/) **20 or newer**, including npm (`node --version` and `npm.cmd --version`).
+- Internet access for cloning and installing packages.
+
+After installing these tools, open a **new** PowerShell window and verify:
+
+```powershell
+git --version
+py -3.12 --version
+node --version
+npm.cmd --version
+```
+
+If you installed Python 3.11 instead, replace `py -3.12` with `py -3.11` in the commands below.
+
+### 2. Clone SLAI and SPADRA into the correct folders
+
+Choose where you want the source code stored. This example creates `Projects` under your Windows user profile; change the location if desired. **These commands are for a fresh installation**, not for overwriting an existing checkout.
+
+```powershell
+New-Item -ItemType Directory -Force "$env:USERPROFILE\Projects" | Out-Null
+Set-Location "$env:USERPROFILE\Projects"
+
+git clone https://github.com/The-Outsider-97/SLAI.git SLAI
+Set-Location .\SLAI
+git clone https://github.com/The-Outsider-97/SPADRA.git .\applications\SPADRA
+```
+
+The resulting layout must include:
+
+```text
+SLAI/
+  pyproject.toml
+  src/
+  applications/
+    tools/          (shared SLAI backend and web build)
+    SPADRA/         (this repository)
+      README.md
+      requirements.txt
+      package.json
+```
+
+If you **already have** an SLAI checkout (for example `G:\GAIA\AI\SLAI_v2.4`), do **not** clone SLAI again. Instead, open PowerShell in that checkout and clone SPADRA only if `applications\SPADRA` is not already present:
+
+```powershell
+Set-Location 'G:\GAIA\AI\SLAI_v2.4'  # replace with your actual SLAI path
+git clone https://github.com/The-Outsider-97/SPADRA.git .\applications\SPADRA
+```
+
+If the SPADRA directory already exists, **do not run this clone command into it**; use your existing checkout and preserve your local changes.
+
+### 3. Create a Python environment and install packages
+
+Run these from the **SLAI root** (the directory containing `pyproject.toml`):
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r .\requirements.txt
+python -m pip install -r .\applications\SPADRA\requirements.txt
+```
+
+The first requirements file installs SLAI's dependencies; the second installs SPADRA's. SLAI's complete requirements set includes substantial optional AI/scientific dependencies, so installation can take time and may require platform-specific prerequisites. Optional SPADRA DXF/IFC support has its own `applications/SPADRA/requirements-interop.txt`; it is **not required to start**.
+
+If PowerShell blocks activation, you can use the environment's Python directly instead of changing your execution policy: replace subsequent `python` invocations with `.\.venv\Scripts\python.exe` while at the SLAI root.
+
+### 4. Install and build the web client
+
+```powershell
+Set-Location .\applications\SPADRA
+npm.cmd ci
+npm.cmd run build
+Set-Location ..\..
+```
+
+`npm.cmd ci` uses SPADRA's committed `package-lock.json`. The build requires the shared SLAI files in `applications/tools/`, which is why cloning SPADRA alone is insufficient.
+
+### 5. Check the installed application, then launch it
+
+With PowerShell still in the **SLAI root** and the Python environment active:
+
+```powershell
+python -m applications.SPADRA --check
+python -m applications.SPADRA --port 8771
+```
+
+The first command reports missing prerequisites and may report optional-agent warnings. It **does not fix them**. Only start the second command after resolving any blocking errors. The second command starts SPADRA on your own computer and normally opens a browser. If the browser does not open, use the **complete localhost URL printed by the server**, including its access token. Press `Ctrl+C` in PowerShell to stop the server.
+
+SPADRA is currently a locally hosted browser application: this process does **not** install an `.exe`, create a Windows desktop shortcut, or publish a public website.
+
+### Common installation problems
+
+| Symptom | What to check |
+| --- | --- |
+| `No module named applications` | Run `python -m applications.SPADRA` from the **SLAI root**, not inside `applications/SPADRA`. |
+| `git clone` says the destination exists | Use the existing checkout. Do not overwrite its files or local changes. |
+| Python version warning or incompatible packages | Check `python --version`; use Python 3.10, 3.11 or 3.12, as declared by SLAI. Recreate the virtual environment with a supported interpreter if needed. |
+| `npm.cmd` not found | Install Node.js 20+ with npm, reopen PowerShell, and check `npm.cmd --version`. |
+| Web client missing or outdated | From `applications/SPADRA`, run `npm.cmd ci` followed by `npm.cmd run build`. Make sure `applications/tools` exists. |
+| An agent is unavailable in `--check` | Check whether it is a warning for an optional capability or a blocking dependency error; use the diagnostic output to identify the missing component. |
+| Port `8771` already in use | Stop the other server or choose a different port, such as `--port 8772`. |
+
+For command options, run `python -m applications.SPADRA --help` from the SLAI root. Developers can use `python -m applications.SPADRA --dev` to rebuild the client automatically when its sources have changed.
+
 | Component | Name | Capabilities |
 | --- | --- | --- |
 | Application | SPADRA | |
@@ -30,7 +144,7 @@ Its intended differentiator is the combination of:
 
 ## Run, check, build, package
 
-Everything runs in the Python environment that is active; SPADRA never creates, activates or switches one.
+**First-time users:** complete [Install and run SPADRA on Windows](#install-and-run-spadra-on-windows) above before using these commands. Everything runs in the Python environment that is active; SPADRA never creates, activates or switches one.
 
 | Command (from the SLAI checkout) | What it does |
 | --- | --- |
