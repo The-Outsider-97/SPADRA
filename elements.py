@@ -45,19 +45,19 @@ SPECIAL = ("wall", "door", "window", "roof_window", "opening_profile", "floor", 
 FORMS = ("extrusion", "void", "sweep")                     # solids made from a profile (see forms.py)
 FLOOR_TYPES = ("Generic Floor", "Structural Slab")
 IDENTITY = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
-DEFAULT_MATERIALS = {"wall": "Concrete", "floor": "Concrete", "roof": "Concrete", "beam": "Steel", "foundation": "Concrete", "curtainwall": "Aluminium", "gutter": "Aluminium", "downpipe": "Aluminium", "flashing": "Aluminium"}
+DEFAULT_MATERIALS = {"wall": "Concrete", "floor": "Concrete", "roof": "Concrete", "beam": "Steel", "structural": "Steel", "foundation": "Concrete", "curtainwall": "Aluminium", "gutter": "Aluminium", "downpipe": "Aluminium", "flashing": "Aluminium"}
 FLOOR_CATEGORIES = ("floor", "roof", "foundation", "structural", "curtainwall", "gutter", "downpipe", "flashing")
 
 
 def default_material(project: Any, category: str) -> str:
-    """The default material for a category, or the first in the list if none is set in the project manifest."""
-    return project.manifest.get("default_materials", {}).get(category) or DEFAULT_MATERIALS.get(category) or MATERIALS[0]
+    """Project material override, then the category default, then the general fallback."""
+    return (project.manifest.get("default_materials") or {}).get(category) or DEFAULT_MATERIALS.get(category) or MATERIALS[0]
 
 
 def default_color(project: Any, category: str) -> str | None:
-    """The default color for a category, or the first in the list if none is set in the project manifest."""
+    """Color of the selected default material, honoring project-level overrides."""
     material = default_material(project, category)
-    return project.manifest.get("material_colors", {}).get(material) or MATERIAL_COLORS.get(material)
+    return (project.manifest.get("material_colors") or {}).get(material) or MATERIAL_COLORS.get(material)
 
 
 # ---------------------------------------------------------------------------------------------------------------------- access
@@ -3339,7 +3339,6 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
     out: list[dict[str, Any]] = []
     walls: dict[str, dict[str, Any]] = {}
     corner_table: dict[str, _WallRow] | None = None
-    cut_polygons: list[list[list[float]]] = []
     cut_z = level_elevation(project, level_id) + CUT_HEIGHT if cut_elevation is None else float(cut_elevation)
     level_z = level_elevation(project, level_id)
     top_z = cut_z + 1.5 if top_elevation is None else float(top_elevation)
@@ -3375,6 +3374,7 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
         obj = project.model.get(oid)
         meta = obj["metadata"]
         cat = m(meta, "category")
+        cut_polygons: list[list[list[float]]] = []
         if cat == "downpipe":
             from . import gutters as GU
             try:
@@ -4219,7 +4219,7 @@ def _properties(project: Any, oid: str) -> dict[str, Any]:
 
 
 def _choices_levels(project: Any) -> list[dict[str, str]]:
-    return [{"value": l["id"], "label": l["name"]} for l in project.manifest["levels"]]
+    return _levels(project)
 
 
 # ---------------------------------------------------------------------------------------------------------------------- checks
@@ -4434,7 +4434,7 @@ def check_gutter(project: Any, gutter_id: str) -> list[dict[str, str]]:
 def check_drain(project: Any, drain_id: str) -> list[dict[str, str]]:
     """Model findings for one drain."""
     meta_of(project, drain_id)
-    return _issues_for(project, {drain_id}) 
+    return _issues_for(project, {drain_id})
 
 
 def check_foundation(project: Any, foundation_id: str) -> list[dict[str, str]]:
