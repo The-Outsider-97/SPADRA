@@ -64,6 +64,8 @@ from . import autorooms as AR
 from . import cutting as CU
 from . import foundations as FD
 from . import forms as FX
+from . import design_spec as DSP
+from . import reconstruct as RC
 from . import arrays as AY
 from . import datums as DT
 from . import families as FM
@@ -86,8 +88,8 @@ _BACKUP_ID = re.compile(r"^\d{8}T\d{6}Z-r\d{1,9}(-\d{1,3})?$")
 NO_DRAWING = ("3d", "schedule")                 # view kinds that have no SDRW document of their own
 MAX_COORD = 1.0e9                              # drawing units; anything larger is a typo, not a building
 MAX_POINTS = 10_000
-CATEGORIES = ("Walls", "Doors", "Windows", "Roof windows", "Floors", "Roofs", "Gutters", "Downpipes", "Stairs", "Structural", "Rooms", "Grids", "Generic Models", "Extrusions", "Voids", "Sweeps", "Foundations", "Curtain walls", "Arrays")
-CATEGORY_KEY = {"wall": "Walls", "door": "Doors", "window": "Windows", "roof_window": "Roof windows", "floor": "Floors", "roof": "Roofs", "gutter": "Gutters", "downpipe": "Downpipes", "stair": "Stairs", "structural": "Structural", "room": "Rooms",
+CATEGORIES = ("Walls", "Doors", "Windows", "Roof windows", "Floors", "Roofs", "Gutters", "Downpipes", "Drains", "Flashings", "Stairs", "Structural", "Rooms", "Grids", "Generic Models", "Extrusions", "Voids", "Sweeps", "Foundations", "Curtain walls", "Arrays")
+CATEGORY_KEY = {"wall": "Walls", "door": "Doors", "window": "Windows", "roof_window": "Roof windows", "floor": "Floors", "roof": "Roofs", "gutter": "Gutters", "downpipe": "Downpipes", "drain": "Drains", "flashing": "Flashings", "stair": "Stairs", "structural": "Structural", "room": "Rooms",
                 "grid": "Grids", "generic": "Generic Models", "extrusion": "Extrusions", "void": "Voids", "sweep": "Sweeps", "foundation": "Foundations", "curtainwall": "Curtain walls", "array": "Arrays"}
 
 
@@ -456,11 +458,13 @@ class Project:
                 E.refresh_opening_profiles_for_drawing(self, key.split(":", 1)[1],
                                                        MM_PER[self.manifest["unit"]] / 1000.0)
             if model_edit:
+                GU.reconcile_drains(self)                               # ground inlets follow their downpipes, drains their floors (before the floors are re-cut)
                 FD.reconcile(self)                                      # foundations follow the walls and columns they stand on, and strips re-cut their joints
                 AY.reconcile(self)                                      # linked arrays follow their sources; items a person edited or deleted are let go
                 PG.reconcile(self)                                      # generated façades follow their wall and its openings
                 FX.reconcile(self)                                      # solids follow the voids that cut them
-                AT.reconcile(self)                                      # walls attached to a roof or extended to a level follow it
+                AT.reconcile(self)                                      # walls attached to a roof or extended to a level follow it, and stand on their floor
+                CW.reconcile(self)                                      # curtain walls follow the walls their ends are on, and their corners follow their neighbours
                 AR.reconcile(self)                                      # rooms follow the walls that enclose them, inside the same command
                 AN.sync_tags(self)                                      # tags follow their elements inside the same command
                 DL.sync(self)                                           # dimensions on wall faces follow the faces (a layer added, a wall moved)
@@ -682,7 +686,19 @@ class Project:
                 across = E._rectangle([list(q) for q in E.m(meta, "boundary")])[2]
                 z = E.level_elevation(self, E.m(meta, "level")) + float(E.m(meta, "offset", 0.0)) + E.roof_rise(meta)
                 ridge_handle = {"point": [*mid, z], "across": list(across), "offset_mm": float(E.m(meta, "ridge_offset", 0.0)) * 1000}
-            objects.append({"id": oid, "name": obj["name"], "category": category,
+            extra: dict[str, Any] = {}
+            runs = E.m(meta, "component_faces")
+            if runs and sum(int(r["count"]) for r in runs) == len(mesh["faces"]):            # which part every face is, for picking one part
+                if category == "downpipe":                                     # the Properties key of a downpipe part: a component or a connector
+                    runs = [{**r, "part": ("conn:" if str(r["id"]).startswith("k") else "comp:") + str(r["id"])} for r in runs]
+                elif category == "curtainwall":
+                    runs = [{**r, "part": str(r["id"])} for r in runs]
+                extra["components"] = runs
+            if category == "curtainwall":
+                extra["door_handles"] = CW.door_handles(self, oid)
+            elif category == "door":
+                extra["door_handles"] = E.door_handles(self, oid)
+            objects.append({**extra, "id": oid, "name": obj["name"], "category": category,
                             "material": meta.get(f"{NS}:material"), "color": E.appearance_color(self, meta), "vertices": verts, "faces": mesh["faces"],
                             "layer_colors": layer_colors,
                             "ridge_handle": ridge_handle,
@@ -915,6 +931,45 @@ class Project:
         """What ``model.set_roof_end`` would make for one eave: the cross-section, the numbers and the findings, without making it. Read-only."""
         return E.preview_roof_end(self, params)
 
+    def connections(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        """The BIM connection check (``connections.diagnose``): rainwater, roof-edge and curtain-wall findings for ``ids`` (default: the whole model) and
+        ``domains``, at the current revision, each with its evidence and, where there is one, a correction that can be proposed. Read-only."""
+        from . import connections as CX
+        return CX.DIAGNOSER.diagnose(self, self._id_list(params.get("ids")), params.get("domains"))
+
+    def propose_connection_fix(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        """A reviewable assistant proposal from the corrections of the findings ``findings`` made at ``revision``. Nothing changes until it is approved."""
+        from . import connections as CX
+        raw = params.get("findings") or []
+        if not isinstance(raw, (list, tuple)) or not raw or len(raw) > 100:
+            raise BadRequest("Choose 1 to 100 findings to correct")
+        return CX.DIAGNOSER.propose_fix(self, params.get("revision"), [text(f, "finding", 20) for f in raw], self._id_list(params.get("ids")), params.get("domains"))
+
+    @staticmethod
+    def _id_list(raw: Any) -> list[str] | None:
+        if raw in (None, "", []):
+            return None
+        if not isinstance(raw, (list, tuple)) or len(raw) > 500:
+            raise BadRequest("ids is a list of at most 500 element ids")
+        return [text(i, "id", 80) for i in raw]
+
+    def pick_part(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        """The component of the assembly ``id`` (a curtain wall) at ``point`` [x, y] in drawing units, at absolute height ``z`` in metres (default: the plan
+        cut, a metre above the element's base). For double-click editing from a plan, where there is no picked face. Read-only."""
+        oid = text(params.get("id"), "id", 80)
+        if not E.alive(self, oid):
+            raise NotFound(f"Element {oid} does not exist")
+        if E.category(self, oid) != "curtainwall":
+            raise BadRequest("Only a curtain wall's parts are picked from a plan")
+        q = params.get("point")
+        if not isinstance(q, (list, tuple)) or len(q) != 2:
+            raise BadRequest("A pick needs a point [x, y]")
+        to_m = MM_PER[self.manifest["unit"]] / 1000.0
+        meta = E.meta_of(self, oid)
+        z = params.get("z")
+        zz = float(number(z, "z", -1e6, 1e6)) if z is not None else CW.base_z(self, meta) + min(1.0, float(E.m(meta, "height", 3.0)) / 2)
+        return CW.pick(self, oid, [float(number(q[0], "x", -1e12, 1e12)) * to_m, float(number(q[1], "y", -1e12, 1e12)) * to_m], zz)
+
     def preview_curtainwall(self, params: Mapping[str, Any]) -> dict[str, Any]:
         """What ``model.add_curtainwall`` would make for the same parameters: member positions, bays and panel count. Read-only."""
         return CW.preview(self, params, MM_PER[self.manifest["unit"]] / 1000.0)
@@ -931,8 +986,16 @@ class Project:
     def properties(self, ref: Mapping[str, Any], relations: bool = False) -> dict[str, Any]:
         """The Properties panel for a selection: ``{"model": id}``, ``{"drawing": view_id, "entity": id}`` or ``{"sheet": id}``. ``relations``
         adds the links from a model element to what it is connected to (the panel asks for them; the assistant and the calculator do not)."""
+        if "model" in ref and ref.get("part"):                                  # one component of an assembly (a downpipe fitting, a curtain-wall panel)
+            return E.part_properties(self, str(ref["model"]), str(ref["part"]))
         if "model" in ref:
             props = E.properties(self, str(ref["model"]), relations)
+            accessory = E.m(E.meta_of(self, str(ref["model"])), "accessory_kind")
+            if accessory:                                                       # what kind of roof accessory it is, for its context menu
+                props["accessory"] = accessory
+            if props.get("category") == "downpipe":                              # its components in order, for the component editor
+                props["assembly"] = [{"id": str(c["id"]), "kind": str(c["kind"]), "label": GU.COMPONENT_KINDS[str(c["kind"])]}
+                                     for c in GU.components_of(E.meta_of(self, str(ref["model"])))]
             modifiers = [m for m in self.model.modifiers()
                          if m["target"]["item_id"] == str(ref["model"])]
             if modifiers:
@@ -1626,6 +1689,8 @@ class _Commands:
         project.model.attach_semantics(oid, {"category": "wall", "type": "Basic Wall", "level": level["id"], "start": list(start), "end": list(end),
                                              "thickness": thickness, "height": height, "base_offset": 0.0, "material": material,
                                              "reference": reference, "reference_offset": offset, "ref_thickness": thickness}, namespace=NS)
+        if p.get("base_floor", "auto") == "auto":                                 # stand on the floor under it (its base follows that floor's top)
+            AT.auto_base(project, oid)
         moved = E.join_drawn_corners(project, oid)
         regenerate_wall(project, oid)
         for wid in sorted(moved):                                                 # the walls whose ends moved to the new corner
@@ -1784,7 +1849,9 @@ class _Commands:
             return AT.attach_to_roof(project, ids, p.get("roof"), p.get("offset", 0))
         if to == "level":
             return AT.extend_to_level(project, ids, p.get("level"), p.get("offset", 0))
-        raise BadRequest("'to' is 'roof' or 'level'")
+        if to == "floor":                                                      # the base, not the top: stand on a floor's top surface
+            return AT.attach_base(project, ids, p.get("floor"), p.get("offset", 0))
+        raise BadRequest("'to' is 'roof', 'level' or 'floor'")
 
     @staticmethod
     @command(_model_target("Detach walls"))
@@ -1792,6 +1859,8 @@ class _Commands:
         """Free the top of walls attached to a roof (``from: "roof"``) or extended to a level (``from: "level"``); either if not given."""
         ids = [text(i, "id", 80) for i in (p.get("ids") or [])]
         kind = p.get("from")
+        if kind == "floor":
+            return AT.detach_base(project, ids)
         return AT.detach(project, ids, None if kind is None else text(kind, "from", 10))
 
     @staticmethod
@@ -1984,6 +2053,48 @@ class _Commands:
         return {"id": FX.add_sweep(project, p, MM_PER[project.manifest["unit"]] / 1000.0)}
 
     @staticmethod
+    @command(_model_target("Define design specification"))
+    def spec__define(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Store a design specification (typed parameters, constrained sketches, typed operations, expectations). Nothing is built until ``spec.run``."""
+        return DSP.define(project, p)
+
+    @staticmethod
+    @command(_drawing_target("Draw reconstructed plan"))
+    def reconstruct__draw(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Write a reconstruction (``model``, the result of ``/api/reconstruct``) into the drawing as walls, openings and space outlines on the layers A-WALL, A-OPEN and A-ROOM.
+        ``origin_mm`` places the plan's lower-left corner."""
+        model = RC.validate_model(p.get("model"))
+        doc = project.drawing(p["drawing"])
+        origin = p.get("origin_mm", (0.0, 0.0))
+        if not (isinstance(origin, (list, tuple)) and len(origin) == 2):
+            raise BadRequest("origin_mm must be [x, y]")
+        return {"created": RC.draw_plan(doc, model, MM_PER[project.manifest["unit"]], origin)}
+
+    @staticmethod
+    @command(_model_target("Build reconstructed plan"))
+    def reconstruct__build(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Make SPADRA walls, doors, windows and rooms from a reconstruction (``model``): the same elements and joins as drawing them by hand, each carrying its confidence and evidence
+        as ``spadra:recon``. ``level``, ``origin_mm``, ``height`` (m) and ``min_confidence`` (elements below it are skipped and reported) are optional."""
+        model = RC.validate_model(p.get("model"))
+        return RC.build_plan(project, model, p, _Commands.model__add_wall, MM_PER[project.manifest["unit"]] / 1000.0)
+
+    @staticmethod
+    @command(_model_target("Edit design specification"))
+    def spec__update(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        return DSP.update(project, p)
+
+    @staticmethod
+    @command(_model_target("Delete design specification"))
+    def spec__delete(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        return DSP.delete(project, p)
+
+    @staticmethod
+    @command(_model_target("Run design specification"))
+    def spec__run(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Build the specification's elements (only what changed), verify them against its expectations, and commit all of it or nothing."""
+        return DSP.run_command(project, p)
+
+    @staticmethod
     @command(_model_target("Apply SGEO modifier"))
     def model__modifier(project: Project, p: dict[str, Any]) -> dict[str, Any]:
         """Use the SLAI SGEO modifier kernel, preserving a non-destructive DAG.
@@ -2001,10 +2112,12 @@ class _Commands:
         source = project.model.get(oid)
         meta = source.get("metadata", {})
         cat = E.m(meta, "category")
+        # Parametric forms (extrusions, sweeps) and family instances have native, parameter-generated geometry: the modifier DAG is layered over it, so they
+        # stay editable by their parameters. Walls, floors, roofs, openings... keep their dedicated editing commands.
         # Family instances have native, parameter-generated SGEO geometry.
         # They do not lose their family link when a modifier DAG is layered
         # over that geometry; only destructive baking would break that link.
-        if cat not in (None, "generic") and not p.get("independent_copy", False):
+        if cat not in (None, "generic", "extrusion", "sweep") and not p.get("independent_copy", False):
             raise BadRequest("This BIM host has construction or attachment semantics",
                              hint="Edit its native parameters or enable 'Create independent editable copy' to apply modifiers without changing the BIM family or host.")
         if source.get("geometry") is None:
@@ -2204,8 +2317,19 @@ class _Commands:
         ``frame_material`` (Aluminium, Steel, Timber), ``frame_profile`` (a Stabalux library id, which fixes the width and depth), ``frame_width``, ``frame_depth``,
         ``corner_radius`` (mm) and ``join`` (mullions, transoms, mitre); the panels by ``panel_type`` (Window, Opaque panel), ``panel_material``, ``panel_thickness`` and
         ``panel_offset`` (mm). ``door_type`` (Single Flush Door, Double Door, Sliding Door), ``door_hinge`` and ``door_swing`` are what a field turned into a door starts with."""
-        oid = CW.add_curtainwall(project, p, MM_PER[project.manifest["unit"]] / 1000.0)
-        return {"id": oid}
+        made = CW.add_curtainwalls(project, p, MM_PER[project.manifest["unit"]] / 1000.0)
+        return {"id": made[0], "ids": made}
+
+    @staticmethod
+    @command(_model_target("Set curtain wall corner"))
+    def model__set_curtainwall_corner(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """The corner where the ``end`` (start or end) of curtain wall ``id`` meets another curtain wall: ``type`` L, quad, trapezoid, V or auto, and its sizes in
+        mm (``depth_a``/``depth_b`` for quad, ``leg`` for trapezoid, ``leg_a``/``leg_b``/``thickness`` for L and V). Refused when the corner cannot be built at the angle."""
+        oid = text(p.get("id"), "id", 80)
+        if not E.alive(project, oid) or E.category(project, oid) != "curtainwall":
+            raise NotFound(f"Curtain wall {oid} does not exist")
+        values = {k: p[k] for k in ("type", "depth_a", "depth_b", "leg", "leg_a", "leg_b", "thickness") if p.get(k) is not None}
+        return {"id": oid, **CW.set_corner(project, oid, text(p.get("end"), "end", 10), values)}
 
     @staticmethod
     @command(_model_target("Edit curtain wall members"))
@@ -2266,6 +2390,24 @@ class _Commands:
     def model__add_downpipe(project: Project, p: dict[str, Any]) -> dict[str, Any]:
         """A downpipe under ``gutter``, ``offset`` m along it, of ``diameter`` mm, down to ``bottom`` (m, default a little above the lowest level)."""
         return {"id": GU.add_downpipe(project, p, MM_PER[project.manifest["unit"]] / 1000.0)}
+
+    @staticmethod
+    @command(_model_target("Add drain"))
+    def model__add_drain(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """A ground drain: ``kind`` gully (point drain), channel (linear channel drain) or inlet (downpipe ground inlet), on ``level`` at ``point`` (or
+        ``start``/``end`` for a channel; or under a ``downpipe`` for an inlet). It stands in the floor under it (``floor``: auto, an id or none) and cuts
+        that floor's opening; sizes in mm (``width``, ``diameter``, ``depth``, ``outlet_diameter`` ...)."""
+        return {"id": GU.add_drain(project, p, MM_PER[project.manifest["unit"]] / 1000.0)}
+
+    @staticmethod
+    @command(_model_target("Edit downpipe components"))
+    def model__edit_downpipe(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Change the assembly of the downpipe ``id``: ``action`` add (``kind``: pipe, offset_bend, elbow, shoe, y_branch, hopper; optional ``index``),
+        remove / replace (``kind``) / move (``index``) / split the ``component``, or set its ``field`` to ``value`` (mm, degrees). Connectors are made
+        wherever two downpipe sections meet. The whole assembly is checked first; a change that cannot be built changes nothing."""
+        index = p.get("index")
+        return GU.edit_components(project, text(p.get("id"), "id", 80), text(p.get("action"), "action", 20), component=p.get("component"),
+                                  kind=p.get("kind"), index=int(index) if index is not None else None, field=p.get("field"), value=p.get("value"))
 
     # -- procedural groups -----------------------------------------------------------------------------------------------------
     @staticmethod

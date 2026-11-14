@@ -8,6 +8,10 @@ from ..tools.errors import BadRequest, NotFound
 from ..tools.server import Request, Response, Router, created, file_response
 from ..tools.validation import boolean, choice, integer, text
 from .app import SpadraApp
+from . import impact as IM
+from . import design_spec as DSP
+from . import reconstruct as RC
+from src.utils.spatial_formats.common.errors import SpatialFormatError
 from .project import UNITS, slug
 
 router = Router()
@@ -186,6 +190,12 @@ def foundation_report(app: SpadraApp, req: Request) -> Any:
 def curtainwall_preview(app: SpadraApp, req: Request) -> Any:
     with app.lock:
         return app.require().preview_curtainwall(req.json())
+
+
+@router.route("POST", "/api/curtainwall/pick")
+def curtainwall_pick(app: SpadraApp, req: Request) -> Any:
+    with app.lock:
+        return app.require().pick_part(req.json())
 
 
 @router.route("GET", "/api/curtainwall/profiles")
@@ -523,6 +533,34 @@ def agents(app: SpadraApp, req: Request) -> Any:
     from .agent_hub import HUB
     with app.lock:
         return {"agents": HUB.status(), "calls": HUB.calls[-50:]}
+
+
+@router.route("POST", "/api/connections")
+def connections(app: SpadraApp, req: Request) -> Any:
+    with app.lock:
+        return app.require().connections(req.json())
+
+
+@router.route("POST", "/api/connections/propose")
+def connections_propose(app: SpadraApp, req: Request) -> Any:
+    with app.lock:
+        project = app.require()
+        return {"message": project.propose_connection_fix(req.json()), "project": project.summary()}
+
+
+@router.route("GET", "/api/agents/roles")
+def agents_roles(app: SpadraApp, req: Request) -> Any:
+    """How each agent role named for parametric design / reconstruction / impact work maps to SPADRA, and whether that agent is really available now."""
+    from .agent_hub import roles
+    with app.lock:
+        return {"roles": roles()}
+
+
+@router.route("GET", "/api/agents/health")
+def agents_health(app: SpadraApp, req: Request) -> Any:
+    from .agent_hub import HUB
+    with app.lock:
+        return HUB.health()
 
 
 @router.route("GET", "/api/simulation")
@@ -871,23 +909,140 @@ def modifier_preview(app: SpadraApp, req: Request) -> Any:
         if not op:
             raise BadRequest("Preview kind must be model or drawing")
         draft = project.scratch()
+        request = {k: v for k, v in params.items() if k != "kind"}
         if kind == "model":
             oid = text(params.get("id"), "id", 80)
             before_vertices, before_faces = D.world_mesh(project, oid)
-            result = draft.execute(op, {k: v for k, v in params.items() if k != "kind"})["result"]
+            try:
+                result = draft.execute(op, request)["result"]
+                failure = None
+            except (BadRequest, SpatialFormatError) as exc:             # the kernel's refusal is the finding: report it with the analysis instead of a bare error
+                result, failure = None, exc
+            analysis = IM.analyze_model_modifier(project, draft, request, result, failure)
+            if result is None:                                                # the same 400 as before, now carrying the analysis (what was measured, what is affected)
+                raise BadRequest(str(failure), hint=getattr(failure, "hint", None), details={"analysis": analysis})
             after_vertices, after_faces = D.world_mesh(draft, result["id"])
             if len(after_faces) > 25000 or len(after_vertices) > 30000:
                 raise LimitExceeded("Modifier preview exceeds the interactive geometry budget")
             return {"revision": project.revision, "result": result,
                     "before": {"vertices": before_vertices, "faces": before_faces},
-                    "after": {"vertices": after_vertices, "faces": after_faces}}
+                    "after": {"vertices": after_vertices, "faces": after_faces}, "analysis": analysis}
         view = text(params.get("drawing"), "drawing", 80)
         source = text(params.get("id"), "id", 80)
         previous = project.drawing(view).get(source)
-        result = draft.execute(op, {k: v for k, v in params.items() if k != "kind"})["result"]
-        current = draft.drawing(view).get(result["id"])
-        return {"revision": project.revision, "result": result,
-                "before": previous, "after": current}
+        try:
+            result = draft.execute(op, request)["result"]
+            failure = None
+        except (BadRequest, SpatialFormatError) as exc:
+            result, failure = None, exc
+        analysis = IM.analyze_drawing_modifier(project, draft, request, result, failure)
+        if result is None:
+            raise BadRequest(str(failure), hint=getattr(failure, "hint", None), details={"analysis": analysis})
+        current = draft.drawing(view).get(result["id"]) if result else None
+        return {"revision": project.revision, "result": result, "before": previous, "after": current, "analysis": analysis}
+
+
+@router.route("GET", "/api/specs")
+def specs_list(app: SpadraApp, req: Request) -> Any:
+    """The project's design specifications and what this installation can run (constraint kinds, operation contracts, backends probed rather than assumed)."""
+    with app.lock:
+        return {"specs": DSP.list_specs(app.require()), "capabilities": DSP.capabilities()}
+
+
+@router.route("GET", "/api/specs/{id}")
+def specs_get(app: SpadraApp, req: Request) -> Any:
+    with app.lock:
+        ent = DSP.entry(app.require(), req.params["id"])
+        return {"id": req.params["id"], "revision": ent["revision"], "spec": ent["spec"], "state": ent.get("state"), "values": ent.get("values") or {},
+                "status": ent.get("status"), "ok": ent.get("ok")}
+
+
+@router.route("POST", "/api/specs/check")
+def specs_check(app: SpadraApp, req: Request) -> Any:
+    """Static validation of a specification that is not stored: contracts, references, cycles, parameter table. Touches nothing."""
+    with app.lock:
+        spec = DSP.normalise(req.json().get("spec"))
+        diags, _, order = DSP.static_check(spec)
+        return {"ok": not any(d["severity"] == "error" for d in diags), "diagnostics": diags, "order": order}
+
+
+@router.route("POST", "/api/specs/{id}/verify")
+def specs_verify(app: SpadraApp, req: Request) -> Any:
+    """Run the specification on the project's throw-away copy and return the full report with measured evidence. Nothing in the project changes."""
+    with app.lock:
+        project = app.require()
+        body = req.json()
+        return {"revision": project.revision, "report": DSP.verify(project, req.params["id"], body.get("overrides"), body.get("on_drift"))}
+
+
+@router.route("POST", "/api/specs/{id}/repairs")
+def specs_repairs(app: SpadraApp, req: Request) -> Any:
+    """Re-validated repair proposals (parameter changes, constraint removals). None is applied; each carries the commands that would apply it."""
+    with app.lock:
+        project = app.require()
+        body = req.json()
+        return DSP.propose_repairs(project, req.params["id"], body.get("overrides"))
+
+
+@router.route("POST", "/api/specs/{id}/repairs/propose")
+def specs_repairs_propose(app: SpadraApp, req: Request) -> Any:
+    """Turn one re-validated repair into an assistant proposal (dry-run on a scratch copy, then the person approves or rejects). Nothing is applied here."""
+    from .assistant import ASSISTANT
+    with app.lock:
+        project = app.require()
+        body = req.json()
+        sid = req.params["id"]
+        out = DSP.propose_repairs(project, sid, body.get("overrides"))
+        index = integer(body.get("index", 0), "index", 0, 10_000)
+        if index >= len(out["proposals"]):
+            raise BadRequest("There is no repair with that index", details={"proposals": len(out["proposals"]), "unrepairable": out["unrepairable"]})
+        r = out["proposals"][index]
+        steps = [{"op": c["op"], "params": c["params"]} for c in r["commands"]]
+        message = ASSISTANT.propose_commands(
+            project, source="spec-repair", title=f"Set {r['parameter']} to {r['to']:g} in specification {sid}", steps=steps, targets=[], risk="medium",
+            explanation=(f"Verification of the specification failed ({r['fixes']}). Changing the parameter {r['parameter']} from {r['from']} to {r['to']:g} re-verified "
+                         f"{'with every expectation met' if r['revalidated'] else 'but expectations still fail: ' + '; '.join(r['remaining_failures'])}. "
+                         "The specification itself is not edited; approving runs it once with this value."),
+            evidence=r, evidence_kind="spec-repair")
+        return {"message": message, "project": project.summary()}
+
+
+@router.route("GET", "/api/reconstruct/capabilities")
+def reconstruct_capabilities(app: SpadraApp, req: Request) -> Any:
+    """What 2D-to-BIM reconstruction can read in this installation (raster needs OpenCV and Tesseract for printed dimensions, PDF needs pdfplumber) and its stated limits."""
+    return RC.capabilities()
+
+
+@router.route("POST", "/api/reconstruct/run")
+def reconstruct_run(app: SpadraApp, req: Request) -> Any:
+    """Read a dimensioned plan (``kind`` raster or pdf with base64 ``data``, or sdrw with the ``drawing`` view) and return the reconstruction: scale, dimensions, walls, openings, spaces,
+    the constraint report, diagnostics with a confidence on everything, and an ``overlay`` in source coordinates to check it against. ``options`` and ``corrections`` re-run it
+    deterministically. Read-only: nothing is created until ``reconstruct.build`` / ``reconstruct.draw`` is executed with the result."""
+    from .interop import decode
+    body = req.json()
+    kind = choice(body.get("kind"), ("raster", "pdf", "sdrw"), "kind")
+    with app.lock:
+        project = app.require()
+        source: dict[str, Any] = {"kind": kind}
+        if kind == "sdrw":
+            source["drawing"] = text(body.get("drawing"), "drawing", 80)
+        else:
+            source["data"] = decode(body.get("data"), label="plan")
+        return RC.run(source, body.get("options"), body.get("corrections"), project=project)
+
+
+@router.route("POST", "/api/modifier/predict")
+def modifier_predict(app: SpadraApp, req: Request) -> Any:
+    """The deterministic prediction for a model modifier, without running the kernel: cheap enough to call on every keystroke (``analysis.predicted`` of a full preview
+    is the same data). Read-only."""
+    with app.lock:
+        project = app.require()
+        params = req.json()
+        if not isinstance(params, dict):
+            raise BadRequest("Modifier prediction must be an object")
+        oid = text(params.get("id"), "id", 80)
+        before = IM.element_state(project, oid)
+        return {"revision": project.revision, "target": oid, "before": before, "predicted": IM.predict(project, params), "learned": IM.learned_prediction()}
 
 
 @router.route("GET", "/api/model/{id}/layers/{layer}/preview")

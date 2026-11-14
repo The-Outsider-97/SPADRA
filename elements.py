@@ -11,6 +11,7 @@ anything that would no longer fit (a wall shortened past a door, two openings ov
 """
 from __future__ import annotations
 
+import copy
 import math
 import re
 from typing import Any, Mapping, NamedTuple
@@ -40,7 +41,7 @@ SLIDE_DIRECTIONS = ("left", "right", "both")      # as seen from the face the le
 SLIDE_GAP = 0.02                                   # m: between a sliding leaf and the wall face, and between two rails
 RAIL = 0.04                                        # m: the drawn track above a surface-mounted sliding door
 WINDOW_OPERATIONS = ("fixed", "casement")        # a casement has one sash hinged at one jamb; a fixed window does not open
-SPECIAL = ("wall", "door", "window", "roof_window", "opening_profile", "floor", "roof", "structural", "room", "stair", "generic", "extrusion", "void", "sweep", "gutter", "downpipe", "foundation", "curtainwall")
+SPECIAL = ("wall", "door", "window", "roof_window", "opening_profile", "floor", "roof", "structural", "room", "stair", "generic", "extrusion", "void", "sweep", "gutter", "downpipe", "foundation", "curtainwall", "drain", "flashing")
 FORMS = ("extrusion", "void", "sweep")                     # solids made from a profile (see forms.py)
 FLOOR_TYPES = ("Generic Floor", "Structural Slab")
 IDENTITY = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
@@ -48,6 +49,15 @@ IDENTITY = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0
 
 # ---------------------------------------------------------------------------------------------------------------------- access
 def meta_of(project: Any, oid: str) -> dict[str, Any]:
+    """A detached copy of one element's metadata. Only the metadata is copied: ``model.get`` copies the whole object with its mesh, which made every
+    parameter read as slow as copying the geometry."""
+    raw = getattr(project.model, "_model", None)
+    if raw is not None and hasattr(raw, "objects") and hasattr(raw, "_mutation_lock"):
+        with raw._mutation_lock:
+            for obj in raw.objects:
+                if obj["id"] == oid:
+                    return copy.deepcopy(obj.get("metadata") or {})
+        raise NotFound(f"Element {oid} does not exist")
     try:
         return project.model.get(oid)["metadata"]
     except SpatialFormatError as exc:
@@ -820,7 +830,11 @@ def _place_opening(project: Any, oid: str, frame: Mapping[str, Any]) -> None:
         _attach(project, oid, {"level": m(frame["meta"], "level")})
         return
     project.model.set_geometry(oid, {"kind": "box", "center": [(x0 + x1) / 2 - hinge_x, yd - yh, 0.0], "size": [x1 - x0, thickness, z1 - z0]})
-    project.model.set_transform(oid, _rot(frame["angle"], frame["start"][0] + c * hinge_x - s * yh, frame["start"][1] + s * hinge_x + c * yh, frame["base"] + (z0 + z1) / 2))
+    turn = 0.0
+    if bool(m(meta, "show_open", False)) and opens(meta):                         # shown open in 3D: turned about its hinge by its opening angle
+        from .door_swing import turn_sign
+        turn = turn_sign(str(m(meta, "hinge", "start")), int(m(meta, "swing", 1))) * math.radians(float(m(meta, "opening_angle", DEFAULT_OPENING_ANGLE)))
+    project.model.set_transform(oid, _rot(frame["angle"] + turn, frame["start"][0] + c * hinge_x - s * yh, frame["start"][1] + s * hinge_x + c * yh, frame["base"] + (z0 + z1) / 2))
     _attach(project, oid, {"level": m(frame["meta"], "level")})
 
 
@@ -2113,7 +2127,7 @@ def add_beam(project: Any, p: Mapping[str, Any], to_m: float) -> str:
 
 
 # ------------------------------------------ roof-hosted members (independent SGEO objects with stable host references)
-ROOF_ACCESSORIES = {"ridge_beam": "Ridge Beam", "ridge_strap": "Ridge Strap", "roof_edge": "Roof Edge"}
+ROOF_ACCESSORIES = {"ridge_beam": "Ridge Beam", "ridge_strap": "Ridge Strap", "roof_edge": "Roof Edge", "drip_edge": "Drip Edge"}
 
 
 def _ridge_for_accessory(meta: Mapping[str, Any]) -> tuple[tuple[float, float], tuple[float, float]]:
@@ -2129,15 +2143,123 @@ def _ridge_for_accessory(meta: Mapping[str, Any]) -> tuple[tuple[float, float], 
     raise BadRequest("Only a roof with a real ridge can host a ridge beam or strap")
 
 
-def _roof_edge_mesh(project: Any, roof: Mapping[str, Any], edge: int, width: float, depth: float, vertical_offset: float, lateral_offset: float) -> G.Mesh:
-    """One continuous watertight edge solid, with mitred *roof* corners and facet breaks.
+def edge_section_frame(project: Any, roof: Mapping[str, Any], edge: int) -> dict[str, Any]:
+    """The cross-section of a roof's end along one outline edge, in that edge's section plane: ``q`` horizontal and outward, ``z`` up, both from the
+    roof's outermost top corner (where the edge member's stations lie). It gives the roof-end cut as the vector ``du`` from that top corner down to the
+    underside corner (plumb ``(0, -t)`` unless an end connection cuts the eave square or horizontal), the unit vector ``dcut`` up the cut face, the
+    unit normal ``ncut`` out of the roof's material, the slope ``g`` (dz/dq) of the top surface across the edge, and the core's depth below the top.
+    Everything an edge member's section is laid out from comes from here, so a fascia and a drip edge always sit on the actual cut."""
+    thickness = float(m(roof, "thickness"))
+    cursor, core_ranges = 0.0, []
+    for layer in m(roof, "layers") or []:
+        t = float(layer["thickness"])
+        if layer.get("role") == "core":
+            core_ranges.append((cursor, cursor + t))
+        cursor += t
+    core_depth = (core_ranges[0][0] + core_ranges[-1][1]) / 2 if core_ranges else thickness / 2
+    du = (0.0, -thickness)
+    cut = roof_end_cuts(project, roof).get(edge) if m(roof, "roof_ends") else None
+    if cut is not None:
+        du = (cut["under"][0] - cut["top"][0], cut["under"][1] - cut["top"][1])
+    boundary = effective_boundary(project, roof)
+    a, b = boundary[edge], boundary[(edge + 1) % len(boundary)]
+    length = math.dist(a, b)
+    sigma = 1.0 if G.signed_area(boundary) > 0 else -1.0
+    n = (sigma * (b[1] - a[1]) / length, -sigma * (b[0] - a[0]) / length)
+    facets = roof_facets(project, roof)
+    mid = ((a[0] + b[0]) / 2 - n[0] * 1e-3, (a[1] + b[1]) / 2 - n[1] * 1e-3)
 
-    The old implementation assembled separately capped boxes along each roof
-    plane. Their square ends intersected at the gable ridge (the visible
-    diamond) and extended into one another at outline corners. A shared mitre
-    station between adjacent centre-line segments replaces those overlapping
-    end caps. Boundary corner mitres are computed from the neighbouring roof
-    edges even when only one edge component has been installed.
+    def dist2(poly: list[tuple[float, float]]) -> float:
+        best = math.inf
+        for p, q in zip(poly, poly[1:] + poly[:1]):
+            vx, vy = q[0] - p[0], q[1] - p[1]
+            t = max(0.0, min(1.0, ((mid[0] - p[0]) * vx + (mid[1] - p[1]) * vy) / max(1e-16, vx * vx + vy * vy)))
+            best = min(best, (mid[0] - p[0] - t * vx) ** 2 + (mid[1] - p[1] - t * vy) ** 2)
+        return best
+    plane = min(facets, key=lambda item: dist2(item[0]))[1]
+    g = plane[0] * n[0] + plane[1] * n[1]
+    length_du = math.hypot(*du)
+    dcut = (-du[0] / length_du, -du[1] / length_du)
+    inner_q = min(du[0], 0.0) - 0.05                                                  # a point in the slab, just inside the cut, on its mid-plane
+    inner = (inner_q, g * inner_q - thickness / 2)
+    face_mid = (du[0] / 2, du[1] / 2)
+    ncut = (dcut[1], -dcut[0])
+    if ncut[0] * (inner[0] - face_mid[0]) + ncut[1] * (inner[1] - face_mid[1]) > 0:
+        ncut = (-ncut[0], -ncut[1])
+    return {"du": du, "dcut": dcut, "ncut": ncut, "g": g, "thickness": thickness, "core_depth": core_depth, "cut": cut is not None,
+            "kind": cut["cfg"]["cut"] if cut is not None else "plumb"}
+
+
+def fascia_section(project: Any, roof: Mapping[str, Any], edge: int, width: float, depth: float, vertical_offset: float, lateral_offset: float) -> list[tuple[float, float]]:
+    """A roof edge member's section in its edge's section plane (see ``edge_section_frame``): a ``width`` × ``depth`` rectangle whose inner face lies on
+    the roof-end cut, parallel to it whatever the cut (plumb, square to the slope or horizontal), centred on the roof's core along the cut, moved
+    ``vertical_offset`` along the cut and ``lateral_offset`` out from it. Corners in order: inner upper, outer upper, outer lower, inner lower."""
+    fr = edge_section_frame(project, roof, edge)
+    f = fr["core_depth"] / fr["thickness"] if fr["thickness"] > 0 else 0.5
+    dc, nc = fr["dcut"], fr["ncut"]
+    anchor = (fr["du"][0] * f + dc[0] * vertical_offset, fr["du"][1] * f + dc[1] * vertical_offset)
+    out = []
+    for w, c in ((0.0, 0.5), (1.0, 0.5), (1.0, -0.5), (0.0, -0.5)):
+        across = lateral_offset + w * width
+        out.append((anchor[0] + dc[0] * c * depth + nc[0] * across, anchor[1] + dc[1] * c * depth + nc[1] * across))
+    return out
+
+
+DRIP_DEFAULTS = {"flange": 0.075, "face": 0.05, "kick": 0.015, "kick_angle": 30.0, "thickness": 0.001, "vertical_offset": 0.0, "lateral_offset": 0.0}
+DRIP_MATERIALS = ("Aluminium", "Steel", "Zinc", "Copper")
+
+
+def drip_section(project: Any, roof: Mapping[str, Any], edge: int, meta: Mapping[str, Any]) -> list[tuple[float, float]]:
+    """A drip edge's section in its edge's section plane: a sheet of ``thickness`` lying on the roof's top face for ``flange`` inward from the edge,
+    turned down over the roof end (outside the edge member, when the edge has one) for ``face`` parallel to the roof-end cut, and kicked out by ``kick``
+    at ``kick_angle`` from the face to throw the water clear. It is laid on the roof's top surface: when that surface rises or tilts, it follows."""
+    fr = edge_section_frame(project, roof, edge)
+    p = {k: float(m(meta, k, v)) for k, v in DRIP_DEFAULTS.items()}
+    if not (0.01 <= p["flange"] <= 1.0 and 0.005 <= p["face"] <= 1.0 and 0.0 <= p["kick"] <= 0.2 and 0.0 <= p["kick_angle"] <= 80.0 and 0.0003 <= p["thickness"] <= 0.005):
+        raise BadRequest("A drip edge needs a flange of 10-1000 mm, a face of 5-1000 mm, a kick of 0-200 mm at 0-80° and a sheet of 0.3-5 mm")
+    standoff = p["lateral_offset"]
+    roof_id = m(meta, "roof_host")
+    for oid in element_ids(project):                                                 # an edge member on the same edge: the drip edge wraps it
+        om = meta_of(project, oid)
+        if m(om, "roof_host") == roof_id and m(om, "accessory_kind") == "roof_edge" and int(m(om, "edge", -1)) == edge:
+            standoff += float(m(om, "lateral_offset", 0.0)) + float(m(om, "width"))
+            break
+    dc, nc, g = fr["dcut"], fr["ncut"], fr["g"]
+    lift = p["vertical_offset"]
+    # the top surface (z = g·q + lift) and the face line (the cut moved out by the standoff) meet at the drip edge's outer top corner
+    fq, fz = nc[0] * standoff, nc[1] * standoff                                       # a point of the face line
+    den = dc[1] - g * dc[0]
+    if abs(den) < 1e-9:
+        raise BadRequest("The roof end runs along the roof's top surface here: a drip edge cannot turn down over it")
+    k = (g * fq + lift - fz) / den
+    corner = (fq + dc[0] * k, fz + dc[1] * k)
+    up = (-1.0, -g)                                                                   # one step in along the top surface
+    norm = math.hypot(*up)
+    inward = (up[0] / norm, up[1] / norm)                                             # up the top surface, into the roof
+    p0 = (corner[0] + inward[0] * p["flange"], corner[1] + inward[1] * p["flange"])
+    p2 = (corner[0] - dc[0] * p["face"], corner[1] - dc[1] * p["face"])
+    ka = math.radians(p["kick_angle"])
+    kick_dir = (-dc[0] * math.cos(ka) + nc[0] * math.sin(ka), -dc[1] * math.cos(ka) + nc[1] * math.sin(ka))
+    line = [p0, corner, p2] + ([(p2[0] + kick_dir[0] * p["kick"], p2[1] + kick_dir[1] * p["kick"])] if p["kick"] > 1e-6 else [])
+    try:
+        outer = G.offset_chain(line, False, p["thickness"])
+        side = outer[0][1] - p0[1] - g * (outer[0][0] - p0[0])
+        if side < 0:                                                                  # the sheet thickens away from the roof, never into it
+            outer = G.offset_chain(line, False, -p["thickness"])
+    except G.GeometryError as exc:
+        raise BadRequest(f"The drip edge's section cannot be made: {exc}") from exc
+    return line + outer[::-1]
+
+
+def _roof_edge_mesh(project: Any, roof: Mapping[str, Any], edge: int, width: float, depth: float, vertical_offset: float, lateral_offset: float,
+                    section: list[tuple[float, float]] | None = None) -> G.Mesh:
+    """One continuous watertight edge solid along a roof outline edge, with mitred *roof* corners and facet breaks.
+
+    The section (``fascia_section`` unless one is given) is laid out in the edge's section plane, so it stands parallel to the roof-end cut: upright for
+    a plumb end or an uncut outline, tilted square to the slope for a square cut, flat under a horizontal cut. Each station of the sweep lies on the
+    roof's top surface at the edge (the gable's ridge crossing is a station of its own), and at the two ends the section is carried onto the vertical
+    plane that bisects the outline corner, so neighbouring edge members meet on a shared plane without overlapping. Boundary corner mitres are
+    computed from the neighbouring roof edges even when only one edge member has been installed.
     """
     boundary = effective_boundary(project, roof)                                      # an eave with an end connection is where it is cut, not where the outline was drawn
     a, b = boundary[edge], boundary[(edge + 1) % len(boundary)]
@@ -2146,6 +2268,7 @@ def _roof_edge_mesh(project: Any, roof: Mapping[str, Any], edge: int, width: flo
     if length < 1e-7:
         raise BadRequest("A roof boundary edge is too short")
     sigma = 1.0 if G.signed_area(boundary) > 0 else -1.0
+
     def outward(i: int) -> tuple[float, float, float]:
         start, stop = boundary[i % len(boundary)], boundary[(i + 1) % len(boundary)]
         vx, vy = stop[0] - start[0], stop[1] - start[1]
@@ -2156,29 +2279,19 @@ def _roof_edge_mesh(project: Any, roof: Mapping[str, Any], edge: int, width: flo
 
     facets = roof_facets(project, roof)
     thickness = float(m(roof, "thickness"))
-    # The roof assembly is ordered outer/top to inner/bottom. Locate
-    # the structural core from explicit consecutive layer roles, or fall
-    # back to the complete legacy assembly when no core has been assigned.
-    cursor, core_ranges = 0.0, []
-    for layer in m(roof, "layers") or []:
-        t = float(layer["thickness"])
-        if layer.get("role") == "core":
-            core_ranges.append((cursor, cursor + t))
-        cursor += t
-    core_depth = ((core_ranges[0][0] + core_ranges[-1][1]) / 2
-                  if core_ranges else thickness / 2)
     ridge = roof_ridge(roof)
+    sec = section if section is not None else fascia_section(project, roof, edge, width, depth, vertical_offset, lateral_offset)
+
     def facet_distance_sq(poly: list[tuple[float, float]], x: float, y: float) -> float:
         return min((lambda dx, dy: dx * dx + dy * dy)(x - (p[0] + t * vx), y - (p[1] + t * vy))
                    for p, q in zip(poly, poly[1:] + poly[:1])
                    for vx, vy in [(q[0] - p[0], q[1] - p[1])]
                    for t in [max(0.0, min(1.0, ((x - p[0]) * vx + (y - p[1]) * vy) / max(1e-16, vx * vx + vy * vy)))])
+
     def roof_point(x: float, y: float) -> tuple[float, float, float]:
-        # Use the roof facet actually incident on this *boundary edge*.
-        # Extrapolated planes from a non-incident facet may be far below it.
+        # Use the roof facet actually incident on this *boundary edge*: extrapolated planes from a non-incident facet may be far below it.
         _, plane = min(facets, key=lambda item: facet_distance_sq(item[0], x, y))
-        z = plane[0] * x + plane[1] * y + plane[2] + thickness
-        return x, y, z + vertical_offset
+        return x, y, plane[0] * x + plane[1] * y + plane[2] + thickness
 
     def edge_points(i: int) -> list[tuple[float, float, float]]:
         p, q = boundary[i % len(boundary)], boundary[(i + 1) % len(boundary)]
@@ -2190,48 +2303,35 @@ def _roof_edge_mesh(project: Any, roof: Mapping[str, Any], edge: int, width: flo
         return [roof_point(p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t) for t in ts]
 
     stations = edge_points(edge)
-    # An adjacent gable-end slope can change direction at the ridge. Using the
-    # neighbour's far corner instead of its *local* facet produces mismatched
-    # lower mitre corners, despite sharing the same outline vertex.
-    before = edge_points(edge - 1)[-2]
-    after = edge_points(edge + 1)[1]
     normals = [outward(edge - 1), *([outward(edge)] * max(0, len(stations) - 2)), outward(edge + 1)]
     this_normal = outward(edge)
 
-    # Roof thickness is explicitly vertical in SPADRA's roof solid. A fascia
-    # following its roof-end must therefore have vertical section edges too;
-    # an edge-tangent cross product makes those edges lean in plan on slopes.
     def mitre(u: tuple[float, float, float], v: tuple[float, float, float]) -> tuple[float, float, float]:
-        """The offset-line intersection: both incident sections project to one mitre."""
+        """The offset-line intersection: a point q out from both incident edges lies q times this vector out from their shared corner."""
         d = 1 + sum(u[i] * v[i] for i in range(3))
         if d < 0.05:
-            raise BadRequest("This roof corner is too sharp to mitre with a rectangular edge profile")
+            raise BadRequest("This roof corner is too sharp to mitre with an edge profile")
         return tuple((u[i] + v[i]) / d for i in range(3))  # type: ignore[return-value]
 
     verts: list[list[float]] = []
+    m_ = len(sec)
     for i, centre in enumerate(stations):
-        prev = before if i == 0 else stations[i - 1]
-        nxt = after if i == len(stations) - 1 else stations[i + 1]
         prev_normal = normals[i] if i == 0 else this_normal
         next_normal = normals[i] if i == len(stations) - 1 else this_normal
         horizontal = mitre(prev_normal, next_normal)
-        # Keep every profile upright in world coordinates. Stations still
-        # rise and fall along the exact gable/hip roof boundary, and XY corner
-        # mitres come from the adjoining *plan* edges. Top and bottom corners
-        # of each station must share XY; the end cap is never a slanted fascia.
-        for side, lower in ((-0.5, False), (0.5, False), (0.5, True), (-0.5, True)):
-            v = [centre[0] + horizontal[0] * (lateral_offset + side * width),
-                 centre[1] + horizontal[1] * (lateral_offset + side * width),
-                 centre[2] + (depth / 2 if not lower else -depth / 2) - core_depth]
-            verts.append(v)
-    faces: list[list[int]] = [[0, 2, 1], [0, 3, 2]]
+        for q, z in sec:
+            verts.append([centre[0] + horizontal[0] * q, centre[1] + horizontal[1] * q, centre[2] + z])
+    sides: list[list[int]] = []
     for i in range(len(stations) - 1):
-        first, second = 4 * i, 4 * (i + 1)
-        for j in range(4):
-            k = (j + 1) % 4
-            faces += [[first + j, first + k, second + k], [first + j, second + k, second + j]]
-    last = 4 * (len(stations) - 1)
-    faces += [[last, last + 1, last + 2], [last, last + 2, last + 3]]
+        first, second = m_ * i, m_ * (i + 1)
+        for j in range(m_):
+            k = (j + 1) % m_
+            sides += [[first + j, first + k, second + k], [first + j, second + k, second + j]]
+    last = m_ * (len(stations) - 1)
+    caps = [[[t[0], t[2], t[1]], [last + t[0], last + t[1], last + t[2]]] for t in G.triangulate(sec)]
+    faces = sides + [f for pair in caps for f in pair]
+    if not G.is_closed((verts, faces)):                                                 # the caps' winding follows the section's: turn them to match the sides
+        faces = sides + [f for c0, c1 in caps for f in ([c0[0], c0[2], c0[1]], [c1[0], c1[2], c1[1]])]
     return _positive_volume((verts, faces))
 
 
@@ -2242,13 +2342,16 @@ def regenerate_roof_accessory(project: Any, oid: str) -> None:
         raise BadRequest("The roof accessory has lost its host roof")
     roof = meta_of(project, roof_id)
     kind = m(meta, "accessory_kind")
-    if kind == "roof_edge":
+    if kind in ("roof_edge", "drip_edge"):
         edge = int(m(meta, "edge"))
         boundary = m(roof, "boundary")
         if edge < 0 or edge >= len(boundary):
             raise BadRequest("The roof edge reference is no longer valid")
-        _set_mesh(project, oid, _roof_edge_mesh(project, roof, edge, float(m(meta, "width")), float(m(meta, "depth")), float(m(meta, "vertical_offset", 0.0)),
-                                                float(m(meta, "lateral_offset", 0.0))))
+        if kind == "drip_edge":
+            _set_mesh(project, oid, _roof_edge_mesh(project, roof, edge, 0.0, 0.0, 0.0, 0.0, section=drip_section(project, roof, edge, meta)))
+        else:
+            _set_mesh(project, oid, _roof_edge_mesh(project, roof, edge, float(m(meta, "width")), float(m(meta, "depth")), float(m(meta, "vertical_offset", 0.0)),
+                                                    float(m(meta, "lateral_offset", 0.0))))
         placed = effective_boundary(project, roof)                                    # where the eave really ends: the member's plan line must lie on its roof end, as its solid does
         start, end = placed[edge], placed[(edge + 1) % len(placed)]
         vx, vy = end[0] - start[0], end[1] - start[1]
@@ -2279,15 +2382,24 @@ def regenerate_roof_accessory(project: Any, oid: str) -> None:
 
 
 def add_roof_accessory(project: Any, p: Mapping[str, Any]) -> list[str]:
+    """Ridge beams and straps, roof-edge members and drip edges on ``roof``. Along an edge, ``edge`` is 1, 2, ... or all; ``member`` (a roof-edge member
+    or drip edge) stands for its roof and its edge, so an accessory can be added from the edge it goes on."""
+    if p.get("member"):
+        member = text(p.get("member"), "member", 80)
+        mm = meta_of(project, member) if alive(project, member) else {}
+        if not m(mm, "roof_host") or int(m(mm, "edge", -1)) < 0:
+            raise BadRequest("Right-click a roof edge member or drip edge, or the roof itself")
+        p = {**p, "roof": m(mm, "roof_host"), "edge": str(int(m(mm, "edge")) + 1)}
     roof_id = text(p.get("roof"), "roof", 80)
     if not alive(project, roof_id) or category(project, roof_id) != "roof":
         raise BadRequest("Select a roof to add a ridge or edge component")
     kind = _choice(p.get("kind"), tuple(ROOF_ACCESSORIES), "roof accessory")
     roof = meta_of(project, roof_id)
-    if kind != "roof_edge":
+    along_edge = kind in ("roof_edge", "drip_edge")
+    if not along_edge:
         _ridge_for_accessory(roof)
     boundary = m(roof, "boundary")
-    if kind == "roof_edge":
+    if along_edge:
         requested = str(p.get("edge", "all"))
         if requested != "all" and (not requested.isdigit() or not 1 <= int(requested) <= len(boundary)):
             raise BadRequest(f"Choose roof edge 1 through {len(boundary)}, or all")
@@ -2300,24 +2412,85 @@ def add_roof_accessory(project: Any, p: Mapping[str, Any]) -> list[str]:
     for edge in edges:
         if (kind, edge) in existing:
             continue
-        width = number(p.get("width", 60 if kind == "roof_edge" else 200 if kind == "ridge_beam" else 50), "width", 10, 1000) / 1000.0
-        depth = number(p.get("depth", 180 if kind == "roof_edge" else 300 if kind == "ridge_beam" else 12), "depth", 10, 1000) / 1000.0
-        material = _choice(p.get("material", "Timber" if kind != "ridge_strap" else "Steel"), BEAM_MATERIALS, "material")
         name = ROOF_ACCESSORIES[kind] + (f" {edge + 1}" if edge >= 0 else "")
+        if kind == "drip_edge":                                                         # a sheet-metal flashing on the roof's top face, not a member
+            values = {"category": "flashing", "type": ROOF_ACCESSORIES[kind], "level": m(roof, "level"), "roof_host": roof_id, "accessory_kind": kind, "edge": edge,
+                      "material": _choice(p.get("material", "Aluminium"), DRIP_MATERIALS, "material")}
+            for key, default in DRIP_DEFAULTS.items():
+                if p.get(key) is not None:
+                    values[key] = number(p[key], key.replace("_", " "), -5000, 5000) if key == "kick_angle" else number(p[key], key.replace("_", " "), -5000, 5000) / 1000.0
+                else:
+                    values[key] = default
+        else:
+            width = number(p.get("width", 60 if kind == "roof_edge" else 200 if kind == "ridge_beam" else 50), "width", 10, 1000) / 1000.0
+            depth = number(p.get("depth", 180 if kind == "roof_edge" else 300 if kind == "ridge_beam" else 12), "depth", 10, 1000) / 1000.0
+            material = _choice(p.get("material", "Timber" if kind != "ridge_strap" else "Steel"), BEAM_MATERIALS, "material")
+            values = {"category": "structural", "type": ROOF_ACCESSORIES[kind], "profile": "rect", "level": m(roof, "level"),
+                      "roof_host": roof_id, "accessory_kind": kind, "edge": edge, "width": width, "depth": depth, "material": material,
+                      "span": number(p.get("span", 800), "span", 200, 3000) / 1000.0,
+                      "vertical_offset": number(p.get("vertical_offset", 0), "vertical offset", -5000, 5000) / 1000.0,
+                      "lateral_offset": number(p.get("lateral_offset", 0), "lateral offset", -5000, 5000) / 1000.0}
         oid = project.model.add_box(width=1.0, depth=1.0, height=1.0, name=name)
-        _attach(project, oid, {"category": "structural", "type": ROOF_ACCESSORIES[kind], "profile": "rect", "level": m(roof, "level"),
-                               "roof_host": roof_id, "accessory_kind": kind, "edge": edge, "width": width, "depth": depth, "material": material,
-                               "span": number(p.get("span", 800), "span", 200, 3000) / 1000.0,
-                               "vertical_offset": number(p.get("vertical_offset", 0), "vertical offset", -5000, 5000) / 1000.0,
-                               "lateral_offset": number(p.get("lateral_offset", 0), "lateral offset", -5000, 5000) / 1000.0})
-        regenerate_roof_accessory(project, oid)
+        _attach(project, oid, values)
+        try:
+            regenerate_roof_accessory(project, oid)
+        except BadRequest:
+            project.model.remove(oid)
+            raise
         created.append(oid)
     if not created:
         raise BadRequest("This roof already has the selected accessory; select its existing element to edit it")
     if kind == "roof_edge":
         from . import gutters as GU
         GU.follow(project, roof_id)                     # new trim displaces any existing gutter runs without overwriting their requested gap
+        for oid in element_ids(project):                # and a drip edge on the same edge moves out over it
+            om = meta_of(project, oid)
+            if m(om, "roof_host") == roof_id and m(om, "accessory_kind") == "drip_edge":
+                regenerate_roof_accessory(project, oid)
     return created
+
+
+def refresh_drip_edges(project: Any, roof_id: str) -> None:
+    """Rebuild the drip edges of a roof: one wraps the edge member on its edge, so it follows that member's width and offset."""
+    for oid in element_ids(project):
+        om = meta_of(project, oid)
+        if m(om, "roof_host") == roof_id and m(om, "accessory_kind") == "drip_edge":
+            regenerate_roof_accessory(project, oid)
+
+
+def set_drip_edge_property(meta: Mapping[str, Any], key: str, value: Any) -> dict[str, Any]:
+    """One drip-edge parameter: lengths in mm (stored in m), the kick angle in degrees, the material."""
+    limits = {"flange": (10, 1000), "face": (5, 1000), "kick": (0, 200), "thickness": (0.3, 5), "vertical_offset": (-500, 500), "lateral_offset": (-500, 500)}
+    if key in limits:
+        return {key: number(value, key.replace("_", " ") + " (mm)", *limits[key]) / 1000.0}
+    if key == "kick_angle":
+        return {key: number(value, "kick angle (°)", 0, 80)}
+    if key == "material":
+        return {key: _choice(value, DRIP_MATERIALS, "material")}
+    raise BadRequest(f"'{key}' is not an editable drip-edge property", hint="Edit its flange, face, kick, kick angle, thickness, offsets or material")
+
+
+def drip_edge_properties(project: Any, oid: str, out: dict[str, Any], volume: dict[str, Any]) -> dict[str, Any]:
+    meta = meta_of(project, oid)
+    roof_id = m(meta, "roof_host")
+    roof_name = project.model.get(roof_id)["name"] if alive(project, roof_id) else "(missing roof)"
+    mm = lambda k: round(float(m(meta, k, DRIP_DEFAULTS[k])) * 1000, 6)                         # noqa: E731
+    out["top"] = [{"key": "flange", "label": "Flange on the roof", "type": "number", "unit": "mm", "value": mm("flange")},
+                  {"key": "face", "label": "Face down the roof end", "type": "number", "unit": "mm", "value": mm("face")},
+                  {"key": "kick", "label": "Drip kick", "type": "number", "unit": "mm", "value": mm("kick")},
+                  {"key": "kick_angle", "label": "Kick angle (from the face)", "type": "number", "unit": "°", "value": float(m(meta, "kick_angle", DRIP_DEFAULTS["kick_angle"]))},
+                  {"key": "thickness", "label": "Sheet thickness", "type": "number", "unit": "mm", "value": mm("thickness")},
+                  {"key": "material", "label": "Material", "type": "choice", "value": m(meta, "material", "Aluminium"), "choices": _choices(DRIP_MATERIALS)}]
+    fr = edge_section_frame(project, meta_of(project, roof_id), int(m(meta, "edge"))) if alive(project, roof_id) else None
+    out["groups"] = [{"title": "Placement", "rows": [
+        {"label": "Host roof", "type": "link", "value": roof_name, "target": {"select": {"model": roof_id}}},
+        {"label": "Roof edge", "type": "readonly", "value": int(m(meta, "edge", 0)) + 1},
+        {"label": "Lies on", "type": "readonly", "value": "the roof's top face" + (f", turned down parallel to its {fr['kind']} end cut" if fr else "")},
+        {"key": "vertical_offset", "label": "Above the top face", "type": "number", "unit": "mm", "value": mm("vertical_offset")},
+        {"key": "lateral_offset", "label": "Out from the roof end", "type": "number", "unit": "mm", "value": mm("lateral_offset")}]},
+        {"title": "IFC", "rows": [{"label": "IFC entity", "type": "readonly", "value": "IfcCovering.USERDEFINED (ObjectType FLASHING)"}]},
+        {"title": "Geometry", "rows": [volume]}]
+    return out
 
 
 def is_column(meta: Mapping[str, Any]) -> bool:
@@ -2399,12 +2572,18 @@ def regenerate(project: Any, oid: str) -> None:
     elif cat == "downpipe":
         from . import gutters as GU
         GU.regenerate_downpipe(project, oid)
+    elif cat == "drain":
+        from . import gutters as GU
+        GU.regenerate_drain(project, oid)
+    elif cat == "flashing":
+        regenerate_roof_accessory(project, oid)
     elif cat == "structural":
         if m(meta, "roof_host"):
             regenerate_roof_accessory(project, oid)
             if m(meta, "accessory_kind") == "roof_edge":
                 from . import gutters as GU
                 GU.follow(project, str(m(meta, "roof_host")))
+                refresh_drip_edges(project, str(m(meta, "roof_host")))
         else:
             regenerate_column(project, oid) if is_column(meta) else regenerate_beam(project, oid)
     elif cat == "stair":
@@ -2432,8 +2611,7 @@ def regenerate(project: Any, oid: str) -> None:
 def alive(project: Any, oid: str) -> bool:
     """Whether the model still holds this id. The one place that asks (a missing id raises the library's own error, nothing else is caught)."""
     try:
-        project.model.get(oid)
-        return True
+        return isinstance(oid, str) and oid in project.model                      # a membership test, not a copy of the object
     except SpatialFormatError:
         return False
 
@@ -2445,7 +2623,7 @@ def regenerate_all(project: Any) -> None:
         if m(project.model.get(oid)["metadata"], "category") == "wall":
             regenerate_wall(project, oid)
     for oid in ids:
-        if m(project.model.get(oid)["metadata"], "category") in ("floor", "roof", "structural", "stair", "generic", "gutter", "downpipe", "foundation", "curtainwall", *FORMS):
+        if m(project.model.get(oid)["metadata"], "category") in ("floor", "roof", "structural", "flashing", "stair", "generic", "gutter", "downpipe", "drain", "foundation", "curtainwall", *FORMS):
             regenerate(project, oid)
 
 
@@ -2494,6 +2672,22 @@ def set_property(project: Any, oid: str, key: str, value: Any) -> None:
         return
     if key == "description":
         _attach(project, oid, {"description": text(value, "description", 2000, empty=True, multiline=True)})
+        return
+    if key == "base_offset" and cat in ("wall", "curtainwall") and isinstance(m(meta, "base_to"), Mapping):
+        from . import attachments as AT                                            # standing on a floor: the offset is measured from the floor's top
+        base_to = dict(m(meta, "base_to"))
+        base_to["offset"] = number(value, "base offset", -100000, 100000) / 1000.0
+        _attach(project, oid, {"base_to": base_to})
+        AT.refresh_base(project, oid)
+        AT.refresh(project, oid)
+        regenerate(project, oid)
+        return
+    if key == "base_host" and cat in ("wall", "curtainwall"):
+        from . import attachments as AT
+        if value in (None, "", "none", "level"):
+            AT.detach_base(project, [oid])
+        else:
+            AT.attach_base(project, [oid], None if value == "auto" else text(value, "floor", 80), 0)
         return
     if key == "color":
         if not m(meta, "material"):
@@ -2624,6 +2818,11 @@ def set_property(project: Any, oid: str, key: str, value: Any) -> None:
             values[key] = _mm(value, key.replace("_", " "), -5000, 5000)
         elif key == "opening_angle" and cat == "door":
             values["opening_angle"] = number(value, "opening angle", MIN_OPENING_ANGLE, MAX_OPENING_ANGLE)
+        elif key == "show_open" and cat == "door":
+            values["show_open"] = value in (True, "open", "true", "1", 1)
+        elif key == "open_to" and cat == "door":                                  # dragged open in 3D: the angle, and the leaf shown at it
+            values["opening_angle"] = number(value, "opening angle", MIN_OPENING_ANGLE, MAX_OPENING_ANGLE)
+            values["show_open"] = True
         elif key == "door_type" and cat == "door":
             if _choice(value, ("hinged", "sliding"), "door type") == "sliding":
                 make_sliding(project, oid)
@@ -2715,6 +2914,8 @@ def set_property(project: Any, oid: str, key: str, value: Any) -> None:
             values["material"] = _choice(value, BEAM_MATERIALS, "material")
         else:
             raise BadRequest(f"'{key}' is not an editable column property")
+    elif cat == "flashing":
+        values.update(set_drip_edge_property(meta, key, value))
     elif cat == "structural":
         if m(meta, "roof_host") and key in ("vertical_offset", "lateral_offset"):
             values[key] = _mm(value, key.replace("_", " "), -5000, 5000)
@@ -2748,6 +2949,9 @@ def set_property(project: Any, oid: str, key: str, value: Any) -> None:
     elif cat in ("gutter", "downpipe"):
         from . import gutters as GU
         values.update(GU.set_gutter_property(project, oid, meta, key, value) if cat == "gutter" else GU.set_downpipe_property(project, meta, key, value))
+    elif cat == "drain":
+        from . import gutters as GU
+        values.update(GU.set_drain_property(project, meta, key, value))
     elif cat == "stair":
         from . import stairs as SR
         values.update(SR.set_property(project, meta, key, value))
@@ -2836,6 +3040,8 @@ def move(project: Any, oid: str, dx: float, dy: float, dz: float) -> None:
     elif cat == "structural" and is_column(meta):
         x, y = m(meta, "point")
         _attach(project, oid, {"point": [x + dx, y + dy], "base": float(m(meta, "base", 0.0)) + dz, "top": float(m(meta, "top")) + dz})
+    elif cat == "flashing":
+        raise BadRequest("A drip edge lies on its roof's top face along its edge: change its offsets, or edit the roof")
     elif cat == "structural":
         if m(meta, "roof_host"):
             kind, roof = m(meta, "accessory_kind"), meta_of(project, m(meta, "roof_host"))
@@ -2861,6 +3067,11 @@ def move(project: Any, oid: str, dx: float, dy: float, dz: float) -> None:
     elif cat == "downpipe":
         from . import gutters as GU
         GU.slide_downpipe(project, oid, dx, dy)
+    elif cat == "drain":
+        from . import gutters as GU
+        GU.move_drain(project, oid, dx, dy)
+        if abs(dz) > 1e-12:
+            _attach(project, oid, {"offset": float(m(meta, "offset", 0.0)) + dz})
     elif cat == "stair":
         s = m(meta, "start")
         _attach(project, oid, {"start": [s[0] + dx, s[1] + dy], "base_offset": float(m(meta, "base_offset", 0.0)) + dz, "top_offset": float(m(meta, "top_offset", 0.0)) + dz})
@@ -2932,6 +3143,14 @@ def rotate(project: Any, oid: str, angle: float, centre: tuple[float, float], re
         _attach(project, oid, {"start": _turn(m(meta, "start"), angle, centre), "end": _turn(m(meta, "end"), angle, centre)})
     elif cat in ("floor", "roof", "room"):
         _attach(project, oid, {"boundary": [_turn(q, angle, centre) for q in m(meta, "boundary")]})
+    elif cat == "drain":
+        if m(meta, "downpipe"):
+            raise BadRequest("This inlet stands under its downpipe: it turns with nothing of its own")
+        if m(meta, "drain_kind") == "channel":
+            _attach(project, oid, {"start": _turn(m(meta, "start"), angle, centre), "end": _turn(m(meta, "end"), angle, centre)})
+        else:
+            _attach(project, oid, {"point": _turn(m(meta, "point"), angle, centre), "rotation": float(m(meta, "rotation", 0.0)) + angle,
+                                   "outlet_direction": float(m(meta, "outlet_direction", 0.0)) + (math.degrees(angle) if m(meta, "drain_kind") == "inlet" else 0.0)})
     elif cat == "structural":
         _attach(project, oid, {"point": _turn(m(meta, "point"), angle, centre), "rotation": float(m(meta, "rotation", 0.0)) + angle})
     elif cat == "stair":
@@ -3027,8 +3246,11 @@ def remove(project: Any, oid: str) -> None:
                 if m(meta_of(project, did), "roof_host") == oid or (m(meta_of(project, did), "category") == "roof_window" and m(meta_of(project, did), "host") == oid):
                     project.model.remove(did)
         project.model.remove(oid)
-        if m(meta, "accessory_kind") == "roof_edge" and alive(project, m(meta, "roof_host")):
+        if cat == "downpipe" and m(meta, "gutter") and alive(project, m(meta, "gutter")):
+            GU._build(project, str(m(meta, "gutter")))                              # its outlet hole closes again
+        if m(meta, "accessory_kind") in ("roof_edge", "drip_edge") and alive(project, m(meta, "roof_host")):
             GU.follow(project, str(m(meta, "roof_host")))
+            refresh_drip_edges(project, str(m(meta, "roof_host")))
         if run:
             GU.settle_after_delete(project, *run)                                   # its neighbours lose the mitre and get a stop end
 
@@ -3110,6 +3332,18 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
                     out.append(item)
             except BadRequest:
                 pass  # Missing gutter: model checking reports the broken association.
+            continue
+        if cat == "drain":
+            from . import gutters as GU
+            try:
+                dr = GU.drain_frame(project, oid)
+            except BadRequest:
+                continue
+            cut = dr["bottom"] - 1e-9 <= cut_z <= dr["top"] + 1e-9
+            if m(meta, "level") == level_id or cut:
+                item = GU.drain_plan_item(project, oid, f)
+                item["cut"] = cut
+                out.append(item)
             continue
         if cat in ("grid", "array") or cat in OPENINGS:
             # Grids are level-independent, openings are emitted with their
@@ -3300,6 +3534,29 @@ def _column_outline(centre: tuple[float, float], angle: float, width: float, dep
             for dx, dy in ((-width / 2, -depth / 2), (width / 2, -depth / 2), (width / 2, depth / 2), (-width / 2, depth / 2))]
 
 
+def door_handles(project: Any, oid: str) -> list[dict[str, Any]]:
+    """For the 3D view: the drag handle of a hinged single-leaf door in a wall (at the leaf's free edge, with its hinge axis), as a curtain wall's door
+    leaves have (``curtainwall.door_handles``). A door of several panels has none here: its panels are edited in Properties."""
+    meta = meta_of(project, oid)
+    if m(meta, "category") != "door" or has_panels(meta) or not opens(meta) or not alive(project, m(meta, "host")):
+        return []
+    from .door_swing import turn_sign
+    fr = wall_frame(project, str(m(meta, "host")))
+    lay = leaf_layout(project, oid, fr["thickness"], meta)
+    c, s = math.cos(fr["angle"]), math.sin(fr["angle"])
+    hinge_side = str(m(meta, "hinge", "start"))
+    sign = turn_sign(hinge_side, int(m(meta, "swing", 1)))
+    hx, hy = lay["hinge_x"], lay["y_hinge"]
+    free = lay["x1"] if hinge_side == "start" else lay["x0"]
+    shown = bool(m(meta, "show_open", False))
+    ang = math.radians(float(m(meta, "opening_angle", DEFAULT_OPENING_ANGLE)) if shown else 0.0) * sign
+    zc = fr["base"] + (lay["z0"] + lay["z1"]) / 2
+    world = lambda x, y: [fr["start"][0] + c * x - s * y, fr["start"][1] + s * x + c * y, zc]           # noqa: E731
+    fx, fy = hx + (free - hx) * math.cos(ang), hy + (free - hx) * math.sin(ang)
+    return [{"part": None, "key": None, "hinge": world(hx, hy), "free": world(fx, fy), "closed": world(free, hy), "sign": sign,
+             "angle": float(m(meta, "opening_angle", DEFAULT_OPENING_ANGLE)), "open": shown}]
+
+
 def opens(meta: Mapping[str, Any]) -> bool:
     """True when a door or window has a leaf that swings: every door, and a window whose operation is a casement."""
     cat = m(meta, "category")
@@ -3479,6 +3736,19 @@ def _choices(values: tuple[str, ...]) -> list[dict[str, str]]:
     return [{"value": v, "label": v} for v in values]
 
 
+def part_properties(project: Any, oid: str, part: str) -> dict[str, Any]:
+    """The Properties panel of one component of an element that is an assembly: a downpipe's fittings and sections, a curtain wall's panels and members.
+    Its rows edit the element with keys that name the component, so every change is an ordinary, undoable edit of the element."""
+    cat = category(project, oid)
+    if cat == "downpipe":
+        from . import gutters as GU
+        return GU.component_properties(project, oid, part)
+    if cat == "curtainwall":
+        from . import curtainwall as CW
+        return CW.component_properties(project, oid, part)
+    raise BadRequest(f"A {cat} has no components to select")
+
+
 def properties(project: Any, oid: str, relations: bool = False) -> dict[str, Any]:
     """The Properties panel for any element: its editable parameters first, then read-only figures, then what every element shares
     (identification and custom properties; with ``relations`` also the links to what it is connected to, which costs a little more)."""
@@ -3610,13 +3880,18 @@ def _properties(project: Any, oid: str) -> dict[str, Any]:
     name_row = {"key": "name", "label": "Name", "type": "text", "value": obj["name"]}
     mm = lambda v: f"{v * 1000:,.0f} mm"                                                    # noqa: E731
     volume = volume_row(project, oid) if cat not in ("room", "void") else {}                # a room has no solid; a void's volume is not a quantity
-    if cat in ("stair", "generic", "grid", "gutter", "downpipe", "foundation", "curtainwall", "array", *FORMS):
+    if cat in ("stair", "generic", "grid", "gutter", "downpipe", "drain", "flashing", "foundation", "curtainwall", "array", *FORMS):
         if cat == "array":
             from . import arrays as AY
             return AY.properties(project, oid, out)
         if cat in ("gutter", "downpipe"):
             from . import gutters as GU
             GU.properties(project, oid, out, volume)
+        elif cat == "drain":
+            from . import gutters as GU
+            GU.drain_properties(project, oid, out, volume)
+        elif cat == "flashing":
+            drip_edge_properties(project, oid, out, volume)
         elif cat == "foundation":
             from . import foundations as FD
             FD.properties(project, oid, out, volume)
@@ -3956,6 +4231,9 @@ def check(project: Any) -> list[dict[str, str]]:
         elif cat in ("gutter", "downpipe"):
             from . import gutters as GU
             issues.extend(GU.issues(project, oid, label, issue))
+        elif cat == "drain":
+            from . import gutters as GU
+            issues.extend(GU.drain_issues(project, oid, label, issue))
         elif cat == "foundation":
             from . import foundations as FD
             issues.extend(FD.issues(project, oid, label, issue))

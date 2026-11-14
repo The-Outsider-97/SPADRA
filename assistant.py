@@ -60,6 +60,8 @@ CAPABILITIES = [
     {"id": "connected", "kind": "analysis", "example": "Find all elements connected to this wall", "needs": "one selected element and the SLAI Spatial Agent"},
     {"id": "explain", "kind": "explanation", "example": "Explain the selected element's parameters", "needs": "a selection"},
     {"id": "check", "kind": "analysis", "example": "Check whether the selected elements contain inconsistent dimensions", "needs": "nothing, or a selection"},
+    {"id": "connections", "kind": "analysis, or a proposal with “fix”", "example": "Check the drainage, roof edge and curtain wall connections",
+     "needs": "nothing, or a selection; add “fix” to have the corrections proposed"},
     {"id": "simulate", "kind": "analysis", "example": "Simulate the selected beam, simply supported, uniform load 10 kN/m, damping 2%", "needs": "a beam, its support and its load; the Simulation and STEM agents"},
     {"id": "optimize", "kind": "proposal", "example": "Optimize the depth of the selected beam between 200 and 600 mm, simply supported, uniform load 10 kN/m", "needs": "a beam, bounds, support and load; the Optimization and STEM agents"},
 ]
@@ -184,6 +186,7 @@ class Assistant:
             ("section", lambda t: "section" in t and bool(re.search(r"\b(?:generate|create|add|make|cut)\b", t)), self._section),
             ("animate", has(r"\banimat"), self._animate),
             ("move", has(r"\bmove\b"), self._move),
+            ("connections", has(r"\bconnections?\b(?! to)", r"\bdiagnos", r"\bdrainage\b", r"\bdrip edges?\b", r"\bcorners?\b"), self._connections),
             ("connected", has(r"\bconnected\b", r"\btouching\b", r"\badjacent\b", r"\bneighbou?rs?\b", r"\bnearby\b", r"\bcolliding\b"), self._connected),
             ("check", has(r"\bcheck\b", r"\binconsisten", r"\bvalidate\b", r"\bverify\b"), self._check),
             ("explain", has(r"\bexplain\b", r"\bdescribe\b", r"\bwhat is\b", r"\btell me about\b"), self._explain),
@@ -231,6 +234,31 @@ class Assistant:
         what = f"within {radius:g} m" if radius else "whose bounding boxes touch, overlap or contain it"
         return self._post(project, request, "analysis", f"Elements {what}: {names}.{extra} This is a bounding-box query by the SLAI Spatial Agent, so it is preliminary: "
                           "a diagonal wall's box can overlap elements the wall does not touch.", context, mark, data=out)
+
+    def _connections(self, project, request, t, context, mark):
+        from . import connections as CX
+        domains = [d for d, words in (("rainwater", ("drain", "rain", "downpipe", "gutter", "pipe")), ("roof", ("roof", "drip", "fascia", "edge")),
+                                      ("curtainwall", ("curtain", "corner", "glazing", "facade"))) if any(w in t for w in words)] or list(CX.DOMAINS)
+        ids = [s["id"] for s in context["selection"]] or None
+        out = CX.DIAGNOSER.diagnose(project, ids, domains)
+        found = out["findings"]
+        wants_fix = bool(re.search(r"\b(?:fix|correct|repair|resolve)\b", t))
+        fixable = [f for f in found if f.get("fix")]
+        if wants_fix and fixable:
+            msg = CX.DIAGNOSER.propose_fix(project, project.revision, [f["id"] for f in fixable], ids, domains)
+            return msg
+        scope = "the selected elements" if ids else "the model"
+        checked = ", ".join(f"{n} {d}" for d, n in out["checked"].items())
+        if not found:
+            body = f"No connection problems found in {scope} ({checked} checked) at revision {project.revision}."
+        else:
+            errors = sum(1 for f in found if f["severity"] == "error")
+            body = (f"{len(found)} connection finding{'s' if len(found) != 1 else ''} in {scope} ({errors} error{'s' if errors != 1 else ''}; {checked} checked): "
+                    + "; ".join(f["message"] for f in found[:8]) + ("; …" if len(found) > 8 else "") + "."
+                    + (f" {len(fixable)} can be corrected: ask to “fix the connections” for a proposal you review first." if fixable and not wants_fix else ""))
+        src = out["candidates"]["source"]
+        body += f" Geometry is the model's own; proximity candidates came from the {src}."
+        return self._post(project, request, "analysis", body, context, mark, data=out)
 
     def _explain(self, project, request, t, context, mark):
         sel = self._need_selection(context, None, "an element")

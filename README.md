@@ -163,3 +163,6 @@ and a stale proposal is refused rather than applied. Requires the planning adapt
   changes (a tag or animation track on a copy is lost then; it is kept when only the count or spacing changes). Foundations, grids, gutters and voids: see their
   sections above and `docs/SPADRA_completion_report.md` for what each does not do.
 
+## Specifications, reconstruction and impact previews
+
+See [docs/SPEC_RECONSTRUCTION_IMPACT.md](docs/SPEC_RECONSTRUCTION_IMPACT.md): constraint-aware design specifications, a typed operation graph, dimension-aware 2D-to-BIM reconstruction (Model → Reconstruct), and live impact analysis in the modifier dialog.

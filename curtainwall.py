@@ -138,12 +138,16 @@ def spec(meta: Mapping[str, Any]) -> dict[str, Any]:
             "panel_thickness": _num(meta, "panel_thickness", DEFAULTS_MM["panel_thickness"] / 1000), "panel_offset": _num(meta, "panel_offset", 0.0),
             "panels": dict(E.m(meta, "panels") or {}),
             "door_type": str(E.m(meta, "door_type", "Single Flush Door")), "door_hinge": str(E.m(meta, "door_hinge", "start")), "door_swing": int(E.m(meta, "door_swing", 1)),
-            "opening_angle": _num(meta, "opening_angle", E.DEFAULT_OPENING_ANGLE)}
+            "opening_angle": _num(meta, "opening_angle", E.DEFAULT_OPENING_ANGLE),
+            "top_profile": [tuple(map(float, q)) for q in (E.m(meta, "top_profile") or ())] or None,     # a top that follows a roof (attachments)
+            "end_cond": dict(E.m(meta, "end_cond") or {}), "corner_posts": list(E.m(meta, "corner_posts") or [])}         # what its ends meet (resolve_ends)
 
 
 # ------------------------------------------------------------------------------------------------------------------------- layout
-def bays(span: float, mode: str, value: float, align: str = "start") -> list[float]:
-    """The lengths of the bays a span is divided into, in order. ``span`` is axis to axis."""
+def bays(span: float, mode: str, value: float, align: str = "start", min_bay: float = 0.0) -> list[float]:
+    """The lengths of the bays a span is divided into, in order. ``span`` is axis to axis. With centre-to-centre spacing, a remainder bay shorter than
+    ``min_bay`` (too short for a field between two members) is not made: it is folded into the bay next to it, so a rule never produces a member that
+    cannot be built (the same as a façade's sliver)."""
     if span <= 1e-9:
         raise BadRequest("The curtain wall is too small for its frame")
     if mode == "centre":
@@ -155,6 +159,15 @@ def bays(span: float, mode: str, value: float, align: str = "start") -> list[flo
             rest = 0.0
         if full == 0:
             out = [span]
+        elif rest and rest < min_bay - 1e-12:                                     # a sliver: fold it into the neighbouring bay(s)
+            if align == "start":
+                out = [value] * (full - 1) + [value + rest]
+            elif align == "end":
+                out = [value + rest] + [value] * (full - 1)
+            elif full >= 2:
+                out = [value + rest / 2] + [value] * (full - 2) + [value + rest / 2]
+            else:
+                out = [span]
         elif align == "start":
             out = [value] * full + ([rest] if rest else [])
         elif align == "end":
@@ -197,7 +210,7 @@ def lines(sp: Mapping[str, Any], direction: str) -> list[dict[str, Any]]:
     out = []
     if span > 1e-9:
         at = w / 2
-        for b in bays(span, rule["mode"], rule["value"], rule["align"])[:-1]:
+        for b in bays(span, rule["mode"], rule["value"], rule["align"], w + MIN_FIELD)[:-1]:
             at += b
             out.append({"pos": at, "src": "rule", "removed": any(_same(at, r) for r in sp["removed"][direction])})
     for x in sp["extra"][direction]:
@@ -234,7 +247,7 @@ def cell_spec(sp: Mapping[str, Any], cell: Mapping[str, Any]) -> dict[str, Any]:
     material = str(over.get("material") or base.get(kind, "Glass"))
     return {"type": kind, "material": material, "thickness": float(over.get("thickness", sp["panel_thickness"])), "offset": float(over.get("offset", sp["panel_offset"])),
             "door_type": str(over.get("door_type", sp["door_type"])), "hinge": str(over.get("hinge", sp["door_hinge"])), "swing": int(over.get("swing", sp["door_swing"])),
-            "slide": str(over.get("slide", "end")), "opening_angle": float(over.get("opening_angle", sp["opening_angle"]))}
+            "slide": str(over.get("slide", "end")), "opening_angle": float(over.get("opening_angle", sp["opening_angle"])), "show_open": bool(over.get("show_open", False))}
 
 
 def _remap_panels(project: Any, oid: str, old: Sequence[Mapping[str, Any]], old_panels: Mapping[str, Any], new: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -295,62 +308,319 @@ def _box(u0: float, u1: float, d0: float, d1: float, z0: float, z1: float) -> G.
     return E._positive_volume(E._box(u0, u1, d0, d1, z0, z1))
 
 
+def _prism_uz(poly: Sequence[tuple[float, float]], d0: float, d1: float) -> G.Mesh:
+    """A solid from a polygon in the wall's own (u, z) plane, ``d0`` to ``d1`` across the wall."""
+    verts, faces = G.prism([tuple(q) for q in poly], d0, d1)
+    return _positive([[x, z_, y] for x, y, z_ in verts], faces)
+
+
+def _line_at(profile: Sequence[tuple[float, float]], u: float) -> float:
+    """Height of a polyline of (u, z) points at ``u`` (held level beyond its ends)."""
+    if u <= profile[0][0]:
+        return profile[0][1]
+    for (u0, z0), (u1, z1) in zip(profile, profile[1:]):
+        if u <= u1 + 1e-12:
+            return z0 if u1 - u0 < 1e-12 else z0 + (z1 - z0) * (u - u0) / (u1 - u0)
+    return profile[-1][1]
+
+
+def top_lines(sp: Mapping[str, Any]) -> tuple[list[tuple[float, float]], list[tuple[float, float]]] | None:
+    """For a curtain wall whose top follows a roof: the top line (the roof's underside along the wall, as (u, z) from the base) and the underside of
+    the sloped top member, a frame width below it measured square to it. ``None`` for a level top."""
+    prof = sp.get("top_profile")
+    if not prof:
+        return None
+    top = [(float(u), float(z)) for u, z in prof]
+    w = sp["frame_width"]
+    try:
+        low = G.offset_chain(top, False, -w)                                             # to the right of travel along +u: below the top line
+    except G.GeometryError as exc:
+        raise BadRequest(f"The roof line is too sharp for a {w * 1000:.0f} mm top member: {exc}") from exc
+    for k, idx in ((0, 0), (1, -1)):                                                      # carry the ends back onto u = 0 and u = L along their own segments
+        p, q = (low[0], low[1]) if k == 0 else (low[-1], low[-2])
+        target = top[0][0] if k == 0 else top[-1][0]
+        if abs(q[0] - p[0]) > 1e-12:
+            low[idx] = (target, p[1] + (q[1] - p[1]) * (target - p[0]) / (q[0] - p[0]))
+    return top, low
+
+
+def _clip_below(u0: float, u1: float, z0: float, z1: float, low: Sequence[tuple[float, float]] | None) -> list[list[tuple[float, float]]]:
+    """The parts of the rectangle u0..u1 × z0..z1 that lie under the polyline ``low`` (all of it when there is none), as polygons in (u, z)."""
+    if low is None:
+        return [[(u0, z0), (u1, z0), (u1, z1), (u0, z1)]]
+    xs = {u0, u1} | {u for u, _ in low if u0 < u < u1}
+    for (a, za), (b, zb) in zip(low, low[1:]):                                            # where the line crosses the rectangle's top and bottom
+        for level in (z0, z1):
+            if (za - level) * (zb - level) < 0 and abs(zb - za) > 1e-12:
+                u = a + (b - a) * (level - za) / (zb - za)
+                if u0 < u < u1:
+                    xs.add(u)
+    xs_sorted = sorted(xs)
+    top = [(u, min(z1, _line_at(low, u))) for u in xs_sorted]
+    out: list[list[tuple[float, float]]] = []
+    run: list[tuple[float, float]] = []
+    for u, z in top + [(math.inf, -math.inf)]:
+        if z > z0 + 1e-6:
+            run.append((u, z))
+            continue
+        if len(run) >= 2:
+            poly = [(run[0][0], z0), (run[-1][0], z0)] + run[::-1]
+            pts: list[tuple[float, float]] = []
+            for q in poly:
+                if not pts or math.dist(pts[-1], q) > 1e-9:
+                    pts.append(q)
+            if len(pts) >= 3 and abs(G.signed_area(pts)) > 1e-8:
+                out.append(pts)
+        run = []
+    return out
+
+
+def _field_box(sp: Mapping[str, Any], cell: Mapping[str, Any], low: Sequence[tuple[float, float]] | None) -> tuple[float, float, float, float]:
+    """A field's clear opening ``(u0, u1, z0, z1)`` as it is built: stopping at a corner post where an end gives up its perimeter member, and, under a
+    sloped top, the top row reaching up to the sloped member's underside."""
+    ends = sp["end_cond"]
+    s0 = float(ends.get("start", {}).get("setback", 0.0)) if ends.get("start", {}).get("suppress") else None
+    s1 = float(ends.get("end", {}).get("setback", 0.0)) if ends.get("end", {}).get("suppress") else None
+    u0, u1, z0, z1 = cell["u0"], cell["u1"], cell["z0"], cell["z1"]
+    if cell["col"] == 0 and s0 is not None:
+        u0 = s0
+    if cell["col"] == len(axes(sp, "v")) - 2 and s1 is not None:
+        u1 = sp["length"] - s1
+    if low is not None and cell["row"] == len(axes(sp, "h")) - 2:
+        z1 = sp["height"]
+    return u0, u1, z0, z1
+
+
+def _under(line: Sequence[tuple[float, float]], u0: float, u1: float) -> tuple[float, float]:
+    """The lowest and highest height of a polyline over ``u0``..``u1``."""
+    zs = [_line_at(line, u0), _line_at(line, u1)] + [z for u, z in line if u0 < u < u1]
+    return min(zs), max(zs)
+
+
+def _door_top(low: Sequence[tuple[float, float]], u0: float, u1: float, z1: float, top_row: bool) -> float | None:
+    """Where a door in a field ends under a roof-following top: the field's own top when the roof is above it everywhere over the field, the roof's
+    level when the field is the top row and the roof is level over it, and ``None`` when the roof slopes down into it (a leaf is a whole rectangle)."""
+    lo, hi = _under(low, u0, u1)
+    if lo >= z1 - 1e-9:
+        return z1
+    return lo if top_row and hi - lo < 1e-9 else None
+
+
+def door_conflicts(sp: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The door fields a roof-following top cuts into (a door leaf is a whole rectangle and cannot be cut), each with its measures in metres:
+    ``cell`` (key), ``col``, ``row``, ``u0 u1 z0 z1``, ``clear`` (the lowest height the frame leaves under the roof over the field) and ``roof`` (the roof's
+    own lowest and highest height over it)."""
+    both = top_lines(sp)
+    if both is None:
+        return []
+    top, low = both
+    out = []
+    for cell in cells(sp):
+        if cell_spec(sp, cell)["type"] != "Door":
+            continue
+        u0, u1, z0, z1 = _field_box(sp, cell, low)
+        top_row = cell["row"] == len(axes(sp, "h")) - 2
+        zt = _door_top(low, u0, u1, z1, top_row)
+        if zt is not None and zt - z0 >= MIN_DOOR_FIELD[1]:
+            continue
+        out.append({"cell": cell["key"], "col": cell["col"], "row": cell["row"], "u0": u0, "u1": u1, "z0": z0, "z1": z1,
+                    "clear": _under(low, u0, u1)[0], "roof": _under(top, u0, u1)})
+    return out
+
+
 def members(project: Any, meta: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Every solid of the curtain wall in the wall's own frame (u along, d across, z up from the base), in drawing order: the frame, then each field's
-    glazing, panel or door leaves. Each carries its ``kind``, ``material``, ``mesh`` and what it is (``role``, ``cell``, ``length``)."""
-    sp = spec(meta)
+    glazing, panel or door leaves. Each carries its ``kind``, ``material``, ``mesh``, what it is (``role``, ``cell``, ``length``) and its component
+    ``id`` (``v:start``, ``v:<n>``, ``v:end`` for the vertical members, ``h:...`` for the horizontal ones, ``top`` for a sloped top member, ``cell:c,r``
+    for a field, ``corner:start`` / ``corner:end`` for a corner post), so a click, the Properties panel and the plan all name the same part.
+
+    Two things beyond the grid: a top that follows a roof (``top_profile``) becomes one sloped top member, the members and fields under it are cut
+    along its underside and those wholly above it are left out; and an end that meets another curtain wall (``end_cond``) gives up its perimeter
+    member to the corner post and stops where the post begins."""
+    return _members(project, spec(meta))
+
+
+def _members(project: Any, sp: Mapping[str, Any], doors: bool = True) -> list[dict[str, Any]]:
+    """``members`` for a given spec (so a correction can be tried on a changed copy of it); ``doors=False`` leaves the check that a door is whole to the caller."""
     L, H, w, D = sp["length"], sp["height"], sp["frame_width"], sp["frame_depth"]
     sec = ring(w, D, sp["corner_radius"])
     area = _area(sec)
     V, Hh = axes(sp, "v"), axes(sp, "h")
+    v_ids = ["v:start"] + [f"v:{i}" for i, q in enumerate(lines(sp, "v")) if not q["removed"]] + ["v:end"]
+    h_ids = ["h:bottom"] + [f"h:{i}" for i, q in enumerate(lines(sp, "h")) if not q["removed"]] + ["h:top"]
+    ends = sp["end_cond"]
+    s0 = float(ends.get("start", {}).get("setback", 0.0)) if ends.get("start", {}).get("suppress") else None
+    s1 = float(ends.get("end", {}).get("setback", 0.0)) if ends.get("end", {}).get("suppress") else None
+    lines_top = top_lines(sp)
+    low = lines_top[1] if lines_top else None
     out: list[dict[str, Any]] = []
 
-    def frame(role: str, horizontal: bool, axis: float, a0: float, a1: float, k0: float = 0.0, k1: float = 0.0) -> None:
+    def frame(cid: str, role: str, horizontal: bool, axis: float, a0: float, a1: float, k0: float = 0.0, k1: float = 0.0) -> None:
         if a1 - a0 < 1e-6:
             return
-        out.append({"kind": "frame", "material": sp["frame_material"], "role": role, "cell": None, "length": a1 - a0, "area": area, "mesh": _member(sec, horizontal, axis, a0, a1, k0, k1)})
+        out.append({"kind": "frame", "material": sp["frame_material"], "role": role, "cell": None, "id": cid, "length": a1 - a0, "area": area,
+                    "mesh": _member(sec, horizontal, axis, a0, a1, k0, k1)})
+
+    def vertical(cid: str, role: str, u: float, z_lo: float, z_hi: float, k0: float = 0.0) -> None:
+        """A vertical member from z_lo up to z_hi, or, under a sloped top, up to the top member's underside (cut along it)."""
+        if low is None:
+            frame(cid, role, False, u, z_lo, z_hi, k0, 0.0)
+            return
+        za, zb = _line_at(low, u - w / 2), _line_at(low, u + w / 2)
+        top = min(z_hi, (za + zb) / 2)
+        k1 = (zb - za) / w if top < z_hi - 1e-9 else 0.0
+        if top - max(abs(k1) * w / 2, 0) - z_lo > 1e-6:
+            frame(cid, role, False, u, z_lo, top, k0, k1)
+
+    def horizontal(cid: str, role: str, z: float, a0: float, a1: float, k0: float = 0.0, k1: float = 0.0) -> None:
+        """A horizontal member from a0 to a1 at height z; under a sloped top it is trimmed where its top face would rise into the top member, and
+        its end is then cut along the top member's underside (so the two meet on that plane without overlapping)."""
+        if low is None:
+            frame(cid, role, True, z, a0, a1, k0, k1)
+            return
+        need = z + w / 2
+        pts = [(a0, _line_at(low, a0)), *[(u, zz) for u, zz in low if a0 < u < a1], (a1, _line_at(low, a1))]
+        ok = [zz >= need - 1e-9 for _, zz in pts]
+        if all(ok):
+            frame(cid, role, True, z, a0, a1, k0, k1)
+            return
+        if not any(ok):
+            return
+        first, last = ok.index(True), len(ok) - 1 - ok[::-1].index(True)
+        if not all(ok[first:last + 1]):
+            raise BadRequest("The roof dips into the middle of a horizontal member of the curtain wall: remove that member or lower it")
+        lo_u, hi_u = a0, a1
+        if first > 0:                                                                     # it rises past the line on the left: cut along it there
+            (pu, pz), (qu, qz) = pts[first - 1], pts[first]
+            slope = (qz - pz) / (qu - pu)
+            u_top = pu + (qu - pu) * (need - pz) / (qz - pz)
+            lo_u, k0 = u_top - (w / 2) / slope, 1.0 / slope
+        if last < len(pts) - 1:                                                           # and on the right
+            (pu, pz), (qu, qz) = pts[last], pts[last + 1]
+            slope = (qz - pz) / (qu - pu)
+            u_top = pu + (qu - pu) * (need - pz) / (qz - pz)
+            hi_u, k1 = u_top - (w / 2) / slope, 1.0 / slope
+        if hi_u - lo_u > w:
+            frame(cid, role, True, z, max(lo_u, a0 - w), min(hi_u, a1 + w), k0, k1)
 
     join = sp["join"]
     last_v, last_h = len(V) - 1, len(Hh) - 1
-    # vertical members
+    top_index = last_h if low is None else last_h - 1                                    # a sloped top replaces the top perimeter member
     for i, u in enumerate(V):
         perimeter = i in (0, last_v)
+        if (i == 0 and s0 is not None) or (i == last_v and s1 is not None):
+            continue                                                                      # given up to the corner post
         role = "perimeter" if perimeter else "mullion"
-        if join == "mullions":
-            frame(role, False, u, 0.0, H)
+        cid = v_ids[i]
+        if low is not None:
+            vertical(cid, role, u, 0.0 if perimeter and join in ("mullions", "mitre") else w, H)
+        elif join == "mullions":
+            frame(cid, role, False, u, 0.0, H)
         elif join == "transoms":
             for r in range(len(Hh) - 1):
-                frame(role, False, u, Hh[r] + w / 2, Hh[r + 1] - w / 2)
+                frame(cid, role, False, u, Hh[r] + w / 2, Hh[r + 1] - w / 2)
         elif perimeter:                                                                  # mitre: the perimeter members are cut at 45° where they meet
             left = i == 0
-            frame(role, False, u, w / 2, H - w / 2, 1.0 if left else -1.0, -1.0 if left else 1.0)
+            frame(cid, role, False, u, w / 2, H - w / 2, 1.0 if left else -1.0, -1.0 if left else 1.0)
         else:
-            frame(role, False, u, w, H - w)
-    # horizontal members
+            frame(cid, role, False, u, w, H - w)
+    start_u = s0 if s0 is not None else None
+    end_u = L - s1 if s1 is not None else None
     for r, z in enumerate(Hh):
+        if r > top_index:
+            continue
         perimeter = r in (0, last_h)
         role = "perimeter" if perimeter else "transom"
-        if join == "transoms":
-            frame(role, True, z, 0.0, L)
+        cid = h_ids[r]
+        if join == "transoms" or low is not None:
+            a0 = start_u if start_u is not None else (0.0 if join == "transoms" else V[0] + w / 2)
+            a1 = end_u if end_u is not None else (L if join == "transoms" else V[-1] - w / 2)
+            if low is not None and join != "transoms":
+                for c in range(len(V) - 1):
+                    b0 = start_u if (c == 0 and start_u is not None) else V[c] + w / 2
+                    b1 = end_u if (c == len(V) - 2 and end_u is not None) else V[c + 1] - w / 2
+                    horizontal(cid, role, z, b0, b1)
+            else:
+                horizontal(cid, role, z, a0, a1)
         elif join == "mitre" and perimeter:
             bottom = r == 0
-            frame(role, True, z, w / 2, L - w / 2, 1.0 if bottom else -1.0, -1.0 if bottom else 1.0)
+            a0 = start_u if start_u is not None else w / 2
+            a1 = end_u if end_u is not None else L - w / 2
+            k0 = 0.0 if start_u is not None else (1.0 if bottom else -1.0)
+            k1 = 0.0 if end_u is not None else (-1.0 if bottom else 1.0)
+            frame(cid, role, True, z, a0, a1, k0, k1)
         else:
             for c in range(len(V) - 1):
-                frame(role, True, z, V[c] + w / 2, V[c + 1] - w / 2)
+                b0 = start_u if (c == 0 and start_u is not None) else V[c] + w / 2
+                b1 = end_u if (c == len(V) - 2 and end_u is not None) else V[c + 1] - w / 2
+                frame(cid, role, True, z, b0, b1)
+    if lines_top is not None:                                                            # the sloped top member, from end to end (or post to post)
+        top, lowl = lines_top
+        a0 = start_u if start_u is not None else 0.0
+        a1 = end_u if end_u is not None else L
+        poly = [(u, z) for u, z in top if a0 - 1e-9 <= u <= a1 + 1e-9]
+        poly = [(a0, _line_at(top, a0))] + [q for q in poly if a0 + 1e-9 < q[0] < a1 - 1e-9] + [(a1, _line_at(top, a1))]
+        under = [(a0, _line_at(lowl, a0))] + [q for q in lowl if a0 + 1e-9 < q[0] < a1 - 1e-9] + [(a1, _line_at(lowl, a1))]
+        outline = poly + under[::-1]
+        length = sum(math.dist(p, q) for p, q in zip(poly, poly[1:]))
+        out.append({"kind": "frame", "material": sp["frame_material"], "role": "perimeter", "cell": None, "id": "top", "length": length, "area": w * D,
+                    "mesh": _prism_uz(outline, -D / 2, D / 2)})
+    for post in sp["corner_posts"]:                                                      # a corner post this wall carries for its junction
+        poly = [(float(u), float(d)) for u, d in post["poly"]]
+        zt = H if low is None else _line_at(lines_top[0], 0.0 if post["end"] == "start" else L)
+        verts, faces = G.prism(poly, 0.0, zt)
+        out.append({"kind": "frame", "material": sp["frame_material"], "role": "corner", "cell": None, "id": f"corner:{post['end']}", "length": zt,
+                    "area": abs(G.signed_area(poly)), "mesh": _positive([[x, y, z_] for x, y, z_ in verts], faces)})
     # fields
     for cell in cells(sp):
         cs = cell_spec(sp, cell)
         kind = {"Window": "glass", "Opaque panel": "panel", "Door": "door"}[cs["type"]]
-        u0, u1, z0, z1, yd, t = cell["u0"], cell["u1"], cell["z0"], cell["z1"], cs["offset"], cs["thickness"]
+        u0, u1, z0, z1 = _field_box(sp, cell, low)
+        yd, t = cs["offset"], cs["thickness"]
+        regions = _clip_below(u0, u1, z0, z1, [(u, zz) for u, zz in low] if low is not None else None)
         if kind != "door":
-            out.append({"kind": kind, "material": cs["material"], "role": "panel", "cell": cell["key"], "area": (u1 - u0) * (z1 - z0), "thickness": t, "mesh": _box(u0, u1, yd - t / 2, yd + t / 2, z0, z1)})
+            for poly in regions:
+                out.append({"kind": kind, "material": cs["material"], "role": "panel", "cell": cell["key"], "id": f"cell:{cell['key']}", "area": abs(G.signed_area(poly)),
+                            "thickness": t, "mesh": _prism_uz(poly, yd - t / 2, yd + t / 2)})
             continue
+        if low is not None:
+            zt = _door_top(low, u0, u1, z1, cell["row"] == len(Hh) - 2)
+            if zt is None and doors:
+                raise BadRequest(f"The roof comes down into door field {cell['col'] + 1}.{cell['row'] + 1}: a door needs a field the roof does not cut")
+            z1 = zt if zt is not None else z1
         for n, (a, b, y) in enumerate(door_leaves(cs, u0, u1, yd)):
-            out.append({"kind": "door", "material": cs["material"], "role": "leaf", "cell": cell["key"], "leaf": n, "area": (b - a) * (z1 - z0 - 2 * GAP), "thickness": E.DOOR_LEAF,
-                        "mesh": _box(a, b, y - E.DOOR_LEAF / 2, y + E.DOOR_LEAF / 2, z0 + GAP, z1 - GAP)})
+            mesh = _box(a, b, y - E.DOOR_LEAF / 2, y + E.DOOR_LEAF / 2, z0 + GAP, z1 - GAP)
+            if cs["show_open"]:
+                mesh = _open_leaf(mesh, cs, n, a, b, y)
+            out.append({"kind": "door", "material": cs["material"], "role": "leaf", "cell": cell["key"], "id": f"cell:{cell['key']}", "leaf": n,
+                        "area": (b - a) * (z1 - z0 - 2 * GAP), "thickness": E.DOOR_LEAF, "mesh": mesh})
     out.sort(key=lambda q: PART_ORDER.index(q["kind"]))                                   # stable: the frame first, then glazing, panels and leaves, so faces group by part
     return out
+
+
+def leaf_hinges(cs: Mapping[str, Any], a: float, b: float, y: float, n: int) -> tuple[float, float, int]:
+    """Where a door leaf turns (u, d of its hinge axis) and which way (+1 counter-clockwise seen from above, in the wall's frame), by the same rule as a door
+    in a wall (``door_swing.turn_sign``): a single leaf on its hinge side, a pair on both jambs."""
+    from .door_swing import turn_sign
+    hinge = cs["hinge"] if cs["door_type"] == "Single Flush Door" else ("start" if n == 0 else "end")
+    swing = int(cs["swing"])
+    u = a if hinge == "start" else b
+    d = y + swing * E.DOOR_LEAF / 2                                                       # on the leaf's face toward the swing side, as a wall's door
+    return u, d, turn_sign(hinge, swing)
+
+
+def _open_leaf(mesh: G.Mesh, cs: Mapping[str, Any], n: int, a: float, b: float, y: float) -> G.Mesh:
+    """A closed leaf shown open: turned by the field's opening angle about its hinge (a sliding leaf slides its own width instead)."""
+    verts, faces = mesh
+    if cs["door_type"] == "Sliding Door":
+        if n != 0:
+            return mesh
+        shift = (b - a) * (1 if cs["slide"] == "end" else -1)
+        return [[x + shift, d, z] for x, d, z in verts], faces
+    hu, hd, sign = leaf_hinges(cs, a, b, y, n)
+    ang = math.radians(cs["opening_angle"]) * sign
+    c, s = math.cos(ang), math.sin(ang)
+    return [[hu + (x - hu) * c - (d - hd) * s, hd + (x - hu) * s + (d - hd) * c, z] for x, d, z in verts], faces
 
 
 def door_leaves(cs: Mapping[str, Any], u0: float, u1: float, yd: float) -> list[tuple[float, float, float]]:
@@ -400,11 +670,24 @@ def _parts(project: Any, meta: Mapping[str, Any]) -> tuple[G.Mesh, list[dict[str
 
 
 def build(project: Any, oid: str) -> None:
+    resolve_ends(project, oid)                                                            # what its ends meet decides where its frame stops
     meta = E.meta_of(project, oid)
-    check_spec(project, meta)
+    check_spec(project, meta, oid)
     mesh, runs = _parts(project, meta)
-    E._attach(project, oid, {"parts": runs})
+    E._attach(project, oid, {"parts": runs, "component_faces": _component_runs(project, meta), "built_sig": _signature(meta)})
     E._set_mesh(project, oid, mesh)
+
+
+def _component_runs(project: Any, meta: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Which part every face of the built mesh belongs to, as runs in face order (the same order ``_parts`` builds them in)."""
+    runs: list[dict[str, Any]] = []
+    for q in members(project, meta):
+        n = len(q["mesh"][1])
+        if runs and runs[-1]["id"] == q["id"]:
+            runs[-1]["count"] += n
+        else:
+            runs.append({"id": q["id"], "count": n})
+    return runs
 
 
 def regenerate(project: Any, oid: str) -> None:
@@ -423,8 +706,184 @@ def part_colors(project: Any, meta: Mapping[str, Any], face_count: int) -> list[
 
 
 # ----------------------------------------------------------------------------------------------------------------------- validation
-def check_spec(project: Any, meta: Mapping[str, Any]) -> None:
-    """Raise ``BadRequest`` for parameters that cannot make a curtain wall (a message for the person, not a stack trace)."""
+def _ordinal(n: int) -> str:
+    return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
+
+
+DOOR_MIN_HEIGHT = 1.8                  # m: the least clear height a correction may leave a door (what is offered, not what is allowed)
+DOOR_MIN_WIDTH = 0.7                   # m: and the least width of a field a door is moved to
+
+
+def door_conflict(project: Any, sp: Mapping[str, Any], hit: Mapping[str, Any], oid: str | None, free: Mapping[str, Any] | None = None) -> BadRequest:
+    """The error for a roof that comes down into a door field: it names the field and says where the roof is over it and by how much the door
+    would be cut, then offers the corrections that leave every door whole, each verified here on a changed copy of the wall (``details.fixes``). The corrections
+    run on the wall as it is stored (``free``: its own height, not yet following the roof) and the change that was refused is then made again, so each must
+    work in both states."""
+    w = sp["frame_width"]
+    col, row, key = hit["col"], hit["row"], hit["cell"]
+    mm = lambda v: f"{v * 1000:,.0f}"                                                      # noqa: E731
+    cut = hit["z1"] - hit["clear"]
+    name = (project.model.get(oid)["name"] or "Curtain wall") if oid and E.alive(project, oid) else "The curtain wall"
+    follows = free is not None and abs(free["height"] - sp["height"]) > 1e-6
+    message = (f"{name}: the roof comes down across the door in field {col + 1}.{row + 1} ({_ordinal(col + 1)} field from the start, {_ordinal(row + 1)} from the base). "
+               + (f"With its top following the roof the wall is {mm(sp['height'])} mm high, which makes that door field {mm(hit['z1'] - hit['z0'])} mm tall "
+                  f"({mm(hit['u1'] - hit['u0'])} mm wide). " if follows else
+                  f"The door is {mm(hit['u1'] - hit['u0'])} mm wide and {mm(hit['z1'] - hit['z0'])} mm tall. ")
+               + f"Over that field the roof's underside is only {mm(hit['roof'][0])} to {mm(hit['roof'][1])} mm above the base and the top frame member needs "
+               f"{mm(w)} mm under it, so the door would be cut off by {mm(cut)} mm. A door cannot be cut: it needs a field the roof does not reach")
+    fixes: list[dict[str, Any]] = []
+    blocked = ""
+    before = len(door_conflicts(sp))
+    if oid:
+        set_ = lambda k, value: {"op": "model.set_property", "params": {"id": oid, "key": k, "value": value}}          # noqa: E731
+
+        def works(changed: Mapping[str, Any]) -> bool:
+            """The changed wall has room everywhere, fewer cut doors than now, and builds; and the same change leaves the stored (free) wall buildable."""
+            try:
+                trial = {**sp, **changed}
+                if not _fits(trial) or len(door_conflicts(trial)) >= before:
+                    return False
+                _members(project, trial, doors=False)
+                stored = {**(free or {**sp, "top_profile": None}), **changed}
+                if not _fits(stored):
+                    return False
+                _members(project, stored, doors=False)
+                return True
+            except (BadRequest, G.GeometryError):
+                return False
+
+        def panels_with(edit: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+            out = {k: dict(v) for k, v in sp["panels"].items()}
+            for k, v in edit.items():
+                out[k] = {**out.get(k, {}), **v}
+            return out
+
+        over = sp["panels"].get(key) or {}
+        carried = [(f, over[f]) for f in ("door_type", "hinge", "swing", "slide", "opening_angle") if f in over]
+        names = {"swing": lambda v: "left" if int(v) == 1 else "right"}
+        # 1. a transom just under the roof's lowest point over the field: the door keeps its width, loses only the part the roof would cut
+        at = math.floor((hit["clear"] - w / 2) * 1000) / 1000
+        door_h = at - w / 2 - hit["z0"]
+        stored_top = (free or sp)["height"] - w - MIN_FIELD / 2
+        if door_h >= DOOR_MIN_HEIGHT and at > stored_top:
+            blocked = (f"a transom at {mm(at)} mm would keep the door {mm(door_h)} mm tall, but this wall is only {mm((free or sp)['height'])} mm high before it follows "
+                       f"the roof: make it taller first")
+        if door_h >= DOOR_MIN_HEIGHT and at - w / 2 > hit["z0"]:
+            extra = {**sp["extra"], "h": list(sp["extra"]["h"]) + [at]}
+            trial = {**sp, "extra": extra}
+            trial["panels"] = _remap_panels(project, oid or "", cells(sp), sp["panels"], cells(trial))
+            if works({"extra": extra, "panels": trial["panels"]}):
+                fixes.append({"label": f"Add a transom at {mm(at)} mm above the base: the door stays {mm(hit['u1'] - hit['u0'])} mm wide and becomes {mm(door_h)} mm tall, "
+                                       f"and the roof cuts only the glazing above it", "steps": [set_("add_line:h", at * 1000)]})
+        # 2. the nearest field the roof does not reach takes the door, this one becomes glazing
+        mid = (hit["u0"] + hit["u1"]) / 2
+        both = top_lines(sp)
+        low = both[1] if both else None
+        spare = []
+        for cell in cells(sp):
+            if cell["key"] == key or cell["row"] != 0 or cell_spec(sp, cell)["type"] == "Door":                  # a door stands on the floor: the bottom row only
+                continue
+            u0, u1, z0, z1 = _field_box(sp, cell, low)
+            zt = z1 if low is None else _door_top(low, u0, u1, z1, cell["row"] == len(axes(sp, "h")) - 2)
+            if zt is not None and u1 - u0 >= DOOR_MIN_WIDTH and zt - z0 >= DOOR_MIN_HEIGHT:
+                spare.append((abs((u0 + u1) / 2 - mid), cell))
+        for _, cell in sorted(spare, key=lambda t: t[0])[:1]:
+            tk = cell["key"]
+            edit = {key: {"type": "Window"}, tk: {"type": "Door", **dict(carried)}}
+            if works({"panels": panels_with(edit)}):
+                steps = [set_(f"panel:{col}:{row}:type", "Window"), set_(f"panel:{cell['col']}:{cell['row']}:type", "Door")]
+                steps += [set_(f"panel:{cell['col']}:{cell['row']}:{f}", names[f](v) if f in names else v) for f, v in carried]
+                fixes.append({"label": f"Move the door to field {cell['col'] + 1}.{cell['row'] + 1} ({mm(cell['u1'] - cell['u0'])} mm wide, fully under the roof) "
+                                       f"and make field {col + 1}.{row + 1} a window", "steps": steps})
+        # 3. just make the field glazing
+        if works({"panels": panels_with({key: {"type": "Window"}})}):
+            fixes.append({"label": f"Make field {col + 1}.{row + 1} a window instead of a door", "steps": [set_(f"panel:{col}:{row}:type", "Window")]})
+    hint = ("Or leave the wall's top free of the roof: choose Leave it." if fixes else
+            "Make that field a window or panel, or add a transom under the roof, or leave the wall's top free of the roof.")
+    return BadRequest(message, hint=(f"{blocked[0].upper()}{blocked[1:]}. {hint}" if blocked else hint),
+                      details={"element": oid, "part": f"cell:{key}", "cell": key, "cut_mm": round(cut * 1000, 3), "clear_mm": round(hit["clear"] * 1000, 3),
+                               "fixes": fixes})
+
+
+def spacing_conflict(project: Any, sp: Mapping[str, Any], d: str, i: int, oid: str | None) -> BadRequest:
+    """The error for two members too close for a field between them: it names the wall, both members and where they are, says how much room is
+    missing, and offers the corrections that would make it buildable, each as ready-to-run commands with exact values (``details.fixes``)."""
+    w = sp["frame_width"]
+    pos = axes(sp, d)
+    a, b = pos[i], pos[i + 1]
+    total = sp["length"] if d == "v" else sp["height"]
+    noun, nouns, along = ("mullion", "mullions", "from the start") if d == "v" else ("transom", "transoms", "above the base")
+    listing = lines(sp, d)
+    present = [k for k, q in enumerate(listing) if not q["removed"]]
+
+    def member(j: int) -> tuple[str, str, int | None]:
+        """Label, part id and (for an interior member) its index in ``lines``."""
+        if j == 0:
+            return ("the start member" if d == "v" else "the bottom member"), f"{d}:{'start' if d == 'v' else 'bottom'}", None
+        if j == len(pos) - 1:
+            return ("the end member" if d == "v" else "the top member"), f"{d}:{'end' if d == 'v' else 'top'}", None
+        k = present[j - 1]
+        return f"{noun} {k + 1}", f"{d}:{k}", k
+
+    (la, pa, ka), (lb, pb, kb) = member(i), member(i + 1)
+    gap = b - a - w
+    name = (project.model.get(oid)["name"] or "Curtain wall") if oid and E.alive(project, oid) else "The curtain wall"
+    message = (f"{name}: {la} ({a * 1000:,.0f} mm {along}) and {lb} ({b * 1000:,.0f} mm) are {(b - a) * 1000:,.0f} mm apart axis to axis. With a "
+               f"{w * 1000:.0f} mm frame that leaves {max(gap, 0) * 1000:.0f} mm between them, and a panel needs at least {MIN_FIELD * 1000:.0f} mm")
+    fixes: list[dict[str, Any]] = []
+    if oid:
+        set_ = lambda key, value: {"op": "model.set_property", "params": {"id": oid, "key": key, "value": value}}          # noqa: E731
+
+        def offer(label: str, steps: list[dict[str, Any]], changed: Mapping[str, Any]) -> None:
+            """Offer a correction only when the wall it leads to really has room for every panel (checked here, on the same rules)."""
+            if _fits({**sp, **changed}):
+                fixes.append({"label": label, "steps": steps})
+
+        for label, k, at in ((la, ka, a), (lb, kb, b)):
+            if k is None:
+                continue
+            q = listing[k]
+            gone = ({"removed": {**sp["removed"], d: list(sp["removed"][d]) + [q["pos"]]}} if q["src"] == "rule"
+                    else {"extra": {**sp["extra"], d: [x for x in sp["extra"][d] if not _same(x, q["pos"])]}})
+            offer(f"Remove {label} (at {at * 1000:,.0f} mm)", [set_(f"line:{d}:{k}", "removed")], gone)
+        rule, span, need = sp[d], total - w, w + MIN_FIELD
+        fresh = {"removed": {**sp["removed"], d: []}, "extra": {**sp["extra"], d: []}}
+        own = bays(span, rule["mode"], rule["value"], rule["align"], need)
+        if min(own) >= need - 1e-9:
+            pass                                                                          # the rule itself leaves room: the clash is a hand-placed member
+        elif rule["mode"] == "centre":
+            n0 = max(1, int(span / rule["value"]))
+            for n in (n0, n0 + 1, n0 - 1):
+                if n >= 1 and span / n >= need:
+                    value = round(span / n * 1000, 1)
+                    offer(f"Space the {nouns} {value:,.1f} mm apart ({n} equal bays)", [set_(f"{d}_value", value)], {d: {**rule, "value": value / 1000}, **fresh})
+                    break
+        elif rule["mode"] == "count":
+            most = max(0, int(span / need + 1e-9) - 1)
+            offer(f"Use {most} interior {nouns}, the most that leave room for panels", [set_(f"{d}_value", most)], {d: {**rule, "value": float(most)}, **fresh})
+        else:
+            value = math.ceil(need * 1000)
+            offer(f"Set the {rule['mode']}imum spacing to {value:,} mm", [set_(f"{d}_value", value)], {d: {**rule, "value": value / 1000}, **fresh})
+        narrow = math.floor(((b - a) - MIN_FIELD) * 1000)
+        if narrow >= max(10, w * 1000 / 2):                                                # a frame less than half as wide is not a sensible suggestion
+            offer(f"Make the frame {narrow} mm wide (a custom size instead of the catalogue profile)", [set_("frame_width", narrow)], {"frame_width": narrow / 1000})
+    return BadRequest(message, hint=(f"Or change it yourself: a wider spacing, one {noun} fewer, or a narrower frame." if fixes else f"Use a wider spacing, remove a {noun}, or make the frame narrower."),
+                      details={"element": oid, "part": pb if kb is not None else pa, "direction": d, "positions_mm": [round(a * 1000, 3), round(b * 1000, 3)],
+                               "gap_mm": round(gap * 1000, 3), "needed_mm": MIN_FIELD * 1000, "fixes": fixes})
+
+
+def _fits(sp: Mapping[str, Any]) -> bool:
+    """Whether every field of a (possibly changed) spec has room for a panel in both directions."""
+    w = sp["frame_width"]
+    try:
+        return all(b - a - w >= MIN_FIELD - 1e-9 for d in ("v", "h") for a, b in zip(axes(sp, d), axes(sp, d)[1:]))
+    except BadRequest:
+        return False
+
+
+def check_spec(project: Any, meta: Mapping[str, Any], oid: str | None = None) -> None:
+    """Raise ``BadRequest`` for parameters that cannot make a curtain wall (a message for the person, not a stack trace). With ``oid`` the error can
+    offer corrections as commands on that element."""
     sp = spec(meta)
     if sp["length"] < 0.1:
         raise BadRequest("The curtain wall is too short: its start and end must be at least 100 mm apart")
@@ -448,12 +907,15 @@ def check_spec(project: Any, meta: Mapping[str, Any]) -> None:
     for d in ("v", "h"):
         if sp[d]["mode"] not in MODES or sp[d]["align"] not in ALIGNS:
             raise BadRequest(f"The {'vertical' if d == 'v' else 'horizontal'} spacing mode must be one of {', '.join(MODES)}")
-    for d, name in (("v", "mullions"), ("h", "transoms")):
+    for d in ("v", "h"):
         pos = axes(sp, d)
-        for a, b in zip(pos, pos[1:]):
+        for i, (a, b) in enumerate(zip(pos, pos[1:])):
             if b - a - w < MIN_FIELD - 1e-9:
-                raise BadRequest(f"Two {name} are only {(b - a) * 1000:.0f} mm apart (axis to axis): with a {w * 1000:.0f} mm frame no panel is left between them",
-                                 hint="Use a wider spacing, remove a member, or make the frame narrower")
+                raise spacing_conflict(project, sp, d, i, oid)
+    top_to = E.m(meta, "top_to")
+    free_height = float(top_to["free_height"]) if isinstance(top_to, Mapping) and top_to.get("free_height") else sp["height"]
+    for hit in door_conflicts(sp):
+        raise door_conflict(project, sp, hit, oid, {**sp, "height": free_height, "top_profile": None})
     n = len(cells(sp))
     if n > MAX_CELLS:
         raise BadRequest(f"That makes {n} panels: the most is {MAX_CELLS}")
@@ -523,22 +985,64 @@ def _setup(p: Mapping[str, Any], to_m: float) -> dict[str, Any]:
 
 def add_curtainwall(project: Any, p: Mapping[str, Any], to_m: float) -> str:
     """A curtain wall on the line ``start`` to ``end`` (drawing units) of ``level``: ``height`` and ``base_offset`` in mm, then the frame, spacing and panel
-    parameters named in the module's description. All or nothing."""
-    start, end = _point(p.get("start"), "start", to_m), _point(p.get("end"), "end", to_m)
+    parameters named in the module's description. All or nothing. (``add_curtainwalls`` makes a connected run from ``points``.)"""
+    return add_curtainwalls(project, p, to_m)[0]
+
+
+def add_curtainwalls(project: Any, p: Mapping[str, Any], to_m: float) -> list[str]:
+    """One curtain wall per segment of ``points`` (or the one segment ``start`` to ``end``), all with the same parameters, joined end to end: each junction
+    gets the corner that suits its angle (``corner``: auto, or one corner type for all) and can be changed afterwards. Each segment stays its own
+    element with its own id. A base on a floor of its level stands on that floor's top surface (``base_floor``: auto, the default, or none); an end
+    placed on a wall is hosted by it. All or nothing."""
+    if p.get("points") is not None:
+        raw = p.get("points")
+        if not isinstance(raw, (list, tuple)) or len(raw) < 2:
+            raise BadRequest("A run of curtain walls needs at least two points")
+        pts = [_point(q, f"point {i + 1}", to_m) for i, q in enumerate(raw)]
+    else:
+        pts = [_point(p.get("start"), "start", to_m), _point(p.get("end"), "end", to_m)]
+    pts = [q for i, q in enumerate(pts) if i == 0 or math.dist(q, pts[i - 1]) > 1e-9]
+    if len(pts) < 2:
+        raise BadRequest("The curtain wall's points are all at one place")
+    closed = bool(p.get("closed")) and len(pts) >= 3
     level = project.level(text(p.get("level"), "level", 80))
     height = number(p.get("height", 3000), "height", 100, 500000) / 1000.0
     setup = _setup(p, to_m)
-    values = {**setup, "category": "curtainwall", "type": "Curtain Wall", "level": level["id"], "start": list(start), "end": list(end), "height": height,
-              "base_offset": number(p.get("base_offset", 0.0), "base_offset", -100000, 100000) / 1000.0, "removed_v": [], "removed_h": [], "extra_v": [], "extra_h": [], "panels": {},
-              "material": setup["frame_material"], "opening_angle": number(p.get("opening_angle", E.DEFAULT_OPENING_ANGLE), "opening_angle", E.MIN_OPENING_ANGLE, E.MAX_OPENING_ANGLE)}
-    oid = project.model.add_box(width=1.0, depth=1.0, height=1.0, name=text(p.get("name") or "Curtain Wall", "name", 80))
-    E._attach(project, oid, values)
+    corner = p.get("corner", "auto")
+    if corner != "auto":
+        corner = E._choice(corner, tuple(CORNER_TYPES), "corner type")
+    base_offset = number(p.get("base_offset", 0.0), "base_offset", -100000, 100000) / 1000.0
+    made: list[str] = []
+    segs = list(zip(pts, pts[1:])) + ([(pts[-1], pts[0])] if closed else [])
+    name = text(p.get("name") or "Curtain Wall", "name", 80)
     try:
-        build(project, oid)
+        for i, (a, b) in enumerate(segs):
+            values = {**setup, "category": "curtainwall", "type": "Curtain Wall", "level": level["id"], "start": list(a), "end": list(b), "height": height,
+                      "base_offset": base_offset, "removed_v": [], "removed_h": [], "extra_v": [], "extra_h": [], "panels": {},
+                      "material": setup["frame_material"], "opening_angle": number(p.get("opening_angle", E.DEFAULT_OPENING_ANGLE), "opening_angle", E.MIN_OPENING_ANGLE, E.MAX_OPENING_ANGLE)}
+            oid = project.model.add_box(width=1.0, depth=1.0, height=1.0, name=name if len(segs) == 1 else f"{name} {i + 1}")
+            E._attach(project, oid, values)
+            made.append(oid)
+            if p.get("base_floor", "auto") == "auto":
+                from . import attachments as AT
+                AT.auto_base(project, oid)
+        for i in range(len(made) - 1 + (1 if closed else 0)):                              # the run's own junctions, end to start
+            link(project, made[i], "end", made[(i + 1) % len(made)], "start")
+        for oid in made:
+            detect(project, oid)                                                          # and what the run's free ends land on
+        if corner != "auto":
+            for i in range(len(made) - 1 + (1 if closed else 0)):
+                j = _junction(project, made[i], "end")
+                if j is not None and j["angle"] < INLINE:
+                    set_corner(project, made[i], "end", {"type": corner})
+        for oid in made:
+            build(project, oid)
     except BadRequest:
-        project.model.remove(oid)
+        for oid in made:
+            if E.alive(project, oid):
+                project.model.remove(oid)
         raise
-    return oid
+    return made
 
 
 def _point(value: Any, label: str, to_m: float) -> tuple[float, float]:
@@ -598,6 +1102,11 @@ def set_panel_field(project: Any, oid: str, cell: str, field: str, value: Any) -
             over["slide"] = E._choice(value, ("start", "end"), "slide direction")
         elif field == "opening_angle":
             over["opening_angle"] = number(value, "opening angle", E.MIN_OPENING_ANGLE, E.MAX_OPENING_ANGLE)
+        elif field == "show_open":                                                        # the 3D view shows the leaf open at its opening angle
+            over["show_open"] = value in (True, "open", "true", "1", 1)
+        elif field == "open_to":                                                          # dragged in 3D: the angle, and shown open there
+            over["opening_angle"] = number(value, "opening angle", E.MIN_OPENING_ANGLE, E.MAX_OPENING_ANGLE)
+            over["show_open"] = True
         else:
             raise BadRequest(f"'{field}' is not a panel property")
         panels[cell] = over
@@ -645,6 +1154,10 @@ _LAYOUT_KEYS = {"v_mode", "v_value", "v_align", "h_mode", "h_value", "h_align"}
 
 def set_property(project: Any, oid: str, meta: Mapping[str, Any], key: str, value: Any) -> dict[str, Any]:
     """The stored values a change of ``key`` sets (the caller attaches them and rebuilds). Line and panel keys edit the element themselves and return nothing to store."""
+    if key.startswith("corner:"):
+        _, end, field = (key.split(":", 2) + ["", ""])[:3]
+        set_corner(project, oid, end, {field: value})
+        return {}
     if key.startswith("panel:"):
         cell, field = _cell_key(project, oid, key)
         set_panel_field(project, oid, cell, field, value)
@@ -721,7 +1234,10 @@ def set_property(project: Any, oid: str, meta: Mapping[str, Any], key: str, valu
         fr = frame_of(meta)
         new = number(value, "length", 100, 1e9) / 1000.0
         s = fr["start"]
-        return {"end": [s[0] + math.cos(fr["angle"]) * new, s[1] + math.sin(fr["angle"]) * new], "removed_v": [], "extra_v": []}
+        end = [s[0] + math.cos(fr["angle"]) * new, s[1] + math.sin(fr["angle"]) * new]
+        E._attach(project, oid, {"end": end})
+        follow_links(project, oid, {"start": list(fr["start"]), "end": list(fr["end"])})
+        return {"end": end, "removed_v": [], "extra_v": []}
     raise BadRequest(f"'{key}' is not an editable curtain wall property")
 
 
@@ -732,12 +1248,27 @@ def _clear_if_width(project: Any, oid: str, meta: Mapping[str, Any], key: str) -
 
 
 def move(project: Any, oid: str, meta: Mapping[str, Any], dx: float, dy: float, dz: float) -> None:
+    """Move a curtain wall; the ends of the curtain walls linked to it go with its ends, so a connected run stays connected. An end hosted by a wall
+    is let go when the move takes it off that wall (it is placed again where it lands)."""
     s, e = E.m(meta, "start"), E.m(meta, "end")
-    E._attach(project, oid, {"start": [s[0] + dx, s[1] + dy], "end": [e[0] + dx, e[1] + dy], "base_offset": float(E.m(meta, "base_offset", 0.0)) + dz})
+    values: dict[str, Any] = {"start": [s[0] + dx, s[1] + dy], "end": [e[0] + dx, e[1] + dy]}
+    if abs(dz) > 1e-12:
+        base_to = E.m(meta, "base_to")
+        if isinstance(base_to, Mapping):
+            values["base_to"] = {**base_to, "offset": float(base_to.get("offset", 0.0)) + dz}
+        values["base_offset"] = float(E.m(meta, "base_offset", 0.0)) + dz
+    if abs(dx) + abs(dy) > 1e-12:
+        values["end_hosts"] = {}
+    E._attach(project, oid, values)
+    follow_links(project, oid, {"start": s, "end": e})
+    if abs(dx) + abs(dy) > 1e-12:
+        detect(project, oid)
 
 
 def rotate(project: Any, oid: str, meta: Mapping[str, Any], angle: float, centre: Sequence[float]) -> None:
-    E._attach(project, oid, {"start": E._turn(E.m(meta, "start"), angle, centre), "end": E._turn(E.m(meta, "end"), angle, centre)})
+    s, e = E.m(meta, "start"), E.m(meta, "end")
+    E._attach(project, oid, {"start": E._turn(s, angle, centre), "end": E._turn(e, angle, centre), "end_hosts": {}})
+    follow_links(project, oid, {"start": s, "end": e})
 
 
 # ------------------------------------------------------------------------------------------------------------------------- drawing
@@ -816,6 +1347,13 @@ def plan_item(project: Any, oid: str, f: float, cut_z: float, show_hatching: boo
     symbols = plan_symbols(project, oid, f, cut_z, show_opening)
     if symbols:
         item["symbols"] = symbols
+    corners = []
+    for end in ("start", "end"):                                                  # the corner at each joined end, for the on-canvas corner control
+        j = _junction(project, oid, end)
+        if j is not None:
+            corners.append({"endpoint": end, "other": j["other"], "point": [j["P"][0] * f, j["P"][1] * f], "type": corner_type(j), "angle": round(j["angle"], 3)})
+    if corners:
+        item["cw_corners"] = corners
     return item
 
 
@@ -939,7 +1477,40 @@ def properties(project: Any, oid: str, out: dict[str, Any], volume: dict[str, An
                                                       {"label": "Opaque panel area", "type": "readonly", "value": f"{q['panel_area']:.2f} m²"},
                                                       {"label": "Doors", "type": "readonly", "value": f"{q['door_count']} ({q['door_leaves']} leaves)"}, volume]},
                      {"title": "Identity", "rows": [{"key": "name", "label": "Name", "type": "text", "value": project.model.get(oid)["name"]}]}]
+    out["groups"].insert(1, {"title": "Ends and attachment", "rows": _connection_rows(project, oid, meta)})
     return out
+
+
+def _connection_rows(project: Any, oid: str, meta: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """What the ends meet (a curtain wall with its corner, a wall that hosts the end, or nothing) and what the base and top are attached to."""
+    from . import attachments as AT
+    rows: list[dict[str, Any]] = []
+    hosts = E.m(meta, "end_hosts") or {}
+    for end in ("start", "end"):
+        j = _junction(project, oid, end)
+        label = f"{end.title()}"
+        if j is not None:
+            kind = corner_type(j)
+            other = project.model.get(j["other"])["name"] or "Curtain Wall"
+            rows.append({"label": f"{label} meets", "type": "link", "value": f"{other} at {j['angle']:.0f}°", "target": {"select": {"model": j["other"]}}})
+            if kind == "inline":
+                rows.append({"label": f"{label} corner", "type": "readonly", "value": "In line: one shared member"})
+            else:
+                rows.append({"key": f"corner:{end}:type", "label": f"{label} corner", "type": "choice", "value": str(j["cfg"].get("type", "auto")),
+                             "choices": [{"value": "auto", "label": f"Automatic ({CORNER_TYPES[kind]})"}] + [{"value": k, "label": v} for k, v in CORNER_TYPES.items()]})
+                rows.append({"label": f"{label} corner post", "type": "link", "value": f"{CORNER_TYPES[kind]}: edit its sizes",
+                             "target": {"select": {"model": oid, "part": f"corner:{end}"}}})
+        elif hosts.get(end) and E.alive(project, hosts[end].get("wall", "")):
+            wid = hosts[end]["wall"]
+            rows.append({"label": f"{label} on wall", "type": "link", "value": project.model.get(wid)["name"] or "Wall", "target": {"select": {"model": wid}}})
+        else:
+            rows.append({"label": f"{label}", "type": "readonly", "value": "free"})
+    base = AT.base_attachment(meta)
+    floor_choices = [{"value": "none", "label": "Its level (not on a floor)"}, {"value": "auto", "label": "The floor under it"}]
+    rows.append({"key": "base_host", "label": "Base stands on", "type": "choice", "value": base["floor"] if base else "none",
+                 "choices": floor_choices + ([{"value": base["floor"], "label": project.model.get(base["floor"])["name"] or "Floor"}] if base and E.alive(project, base["floor"]) else [])})
+    rows.append({"label": "Top", "type": "readonly", "value": AT.describe(project, meta)})
+    return rows
 
 
 def issues(project: Any, oid: str, label: str, issue: Any) -> list[dict[str, str]]:
@@ -976,8 +1547,8 @@ def preview(project: Any, p: Mapping[str, Any], to_m: float) -> dict[str, Any]:
     q = {"length": sp["length"], "height": sp["height"]}
     return {"mullions": [round(x * 1000, 3) for x in axes(sp, "v")], "transoms": [round(x * 1000, 3) for x in axes(sp, "h")], "panels": len(cs),
             "frame_width_mm": round(sp["frame_width"] * 1000, 3), "frame_depth_mm": round(sp["frame_depth"] * 1000, 3), "profile": provenance(setup["frame_profile"]),
-            "bays_v_mm": [round(b * 1000, 3) for b in bays(sp["length"] - sp["frame_width"], sp["v"]["mode"], sp["v"]["value"], sp["v"]["align"])],
-            "bays_h_mm": [round(b * 1000, 3) for b in bays(sp["height"] - sp["frame_width"], sp["h"]["mode"], sp["h"]["value"], sp["h"]["align"])], **{k: round(v * 1000, 3) for k, v in q.items()}}
+            "bays_v_mm": [round(b * 1000, 3) for b in bays(sp["length"] - sp["frame_width"], sp["v"]["mode"], sp["v"]["value"], sp["v"]["align"], sp["frame_width"] + MIN_FIELD)],
+            "bays_h_mm": [round(b * 1000, 3) for b in bays(sp["height"] - sp["frame_width"], sp["h"]["mode"], sp["h"]["value"], sp["h"]["align"], sp["frame_width"] + MIN_FIELD)], **{k: round(v * 1000, 3) for k, v in q.items()}}
 
 
 def material_volumes(project: Any, oid: str) -> list[dict[str, Any]]:
@@ -994,3 +1565,531 @@ def library_listing() -> dict[str, Any]:
     lib = library()
     return {"manufacturer": lib["meta"]["manufacturer"], "date": lib["meta"]["date"], "note": lib["meta"]["note"], "materials": lib["meta"]["materials"],
             "profiles": [{**p, "provenance": provenance(p["id"])} for p in lib["list"]]}
+
+
+# ------------------------------------------------------------------------------------------------------------------- connections
+# A curtain wall knows what its two ends meet.
+#
+# * Another curtain wall. Ends that are joined (drawn as one connected run, or one end placed on another's) keep a stable link to each other
+#   (``links``) and move together. The junction gets a **corner**: one of four corner posts, chosen per junction and kept until it is changed or can
+#   no longer be built (see ``CORNER_TYPES``). The post belongs to one of the two walls (the *owner*: the one with the smaller id), so it is never made
+#   twice; both walls give up their own perimeter member at that end and stop where the post begins. Two walls that run on in a straight line share
+#   the owner's perimeter member instead.
+# * A wall. An end placed on a wall (in it, or on its face) is *hosted* by it (``end_hosts``): the curtain wall's end stays on that wall's face
+#   toward it, along its own line, when either of them moves, turns or changes thickness.
+CORNER_TYPES = {"L": "L-Corner", "quad": "Quad Corner", "trapezoid": "Trapezoid Corner", "V": "V-Corner"}
+# The angle between the two walls (degrees, measured inside the corner) each corner can be built for. A corner outside its range is refused with the
+# reason; "auto" picks the first of quad, trapezoid, V that fits.
+CORNER_RANGES = {"L": (45.0, 135.0), "quad": (30.0, 150.0), "trapezoid": (60.0, 175.0), "V": (15.0, 165.0)}
+INLINE = 175.0                       # degrees: from here on two walls run on in a line and share one member
+JOIN = 0.002                         # m: ends this close are one junction
+
+
+def links_of(meta: Mapping[str, Any]) -> dict[str, dict[str, str]]:
+    return {k: dict(v) for k, v in (E.m(meta, "links") or {}).items() if isinstance(v, Mapping) and v.get("id")}
+
+
+def _end_point(meta: Mapping[str, Any], end: str) -> tuple[float, float]:
+    q = E.m(meta, "start" if end == "start" else "end")
+    return float(q[0]), float(q[1])
+
+
+def curtainwalls(project: Any) -> list[str]:
+    return list(project.model.query_ids(metadata={f"{E.NS}:category": "curtainwall"}, limit=10_000))
+
+
+def link(project: Any, a: str, a_end: str, b: str, b_end: str) -> None:
+    """Join the ``a_end`` of curtain wall ``a`` to the ``b_end`` of ``b`` (both ways)."""
+    for x, xe, y, ye in ((a, a_end, b, b_end), (b, b_end, a, a_end)):
+        meta = E.meta_of(project, x)
+        ls = links_of(meta)
+        ls[xe] = {"id": y, "end": ye}
+        E._attach(project, x, {"links": ls})
+
+
+def unlink(project: Any, oid: str, end: str) -> None:
+    meta = E.meta_of(project, oid)
+    ls = links_of(meta)
+    other = ls.pop(end, None)
+    E._attach(project, oid, {"links": ls})
+    if other and E.alive(project, other["id"]):
+        om = E.meta_of(project, other["id"])
+        ols = links_of(om)
+        if ols.get(other["end"], {}).get("id") == oid:
+            ols.pop(other["end"])
+            E._attach(project, other["id"], {"links": ols})
+
+
+def detect(project: Any, oid: str) -> None:
+    """Link each free end of a curtain wall to another curtain wall's free end at the same place on the same level, and host an end that lies on a
+    wall by that wall. Run when a curtain wall is made or one of its ends is placed again."""
+    meta = E.meta_of(project, oid)
+    ls = links_of(meta)
+    level = E.m(meta, "level")
+    for end in ("start", "end"):
+        if end in ls:
+            continue
+        p = _end_point(meta, end)
+        for other in curtainwalls(project):
+            if other == oid:
+                continue
+            om = E.meta_of(project, other)
+            if E.m(om, "level") != level:
+                continue
+            ols = links_of(om)
+            hit = next((oe for oe in ("start", "end") if oe not in ols and math.dist(p, _end_point(om, oe)) <= JOIN), None)
+            if hit and _angle_between(meta, end, om, hit) < min(lo for lo, _ in CORNER_RANGES.values()):
+                hit = None                                                            # lying along each other, not meeting at a corner
+            if hit:
+                link(project, oid, end, other, hit)
+                ls = links_of(E.meta_of(project, oid))
+                break
+        else:
+            wall = _wall_at(project, level, p)
+            if wall:
+                hosts = dict(E.m(E.meta_of(project, oid), "end_hosts") or {})
+                hosts[end] = {"wall": wall}
+                E._attach(project, oid, {"end_hosts": hosts})
+
+
+def _angle_between(ma: Mapping[str, Any], ea: str, mb: Mapping[str, Any], eb: str) -> float:
+    """The angle (degrees) inside the corner two curtain walls would make if joined at these ends."""
+    P = _end_point(ma, ea)
+    fa, fb = _end_point(ma, "end" if ea == "start" else "start"), _end_point(mb, "end" if eb == "start" else "start")
+    da, db = (fa[0] - P[0], fa[1] - P[1]), (fb[0] - P[0], fb[1] - P[1])
+    na, nb = math.hypot(*da), math.hypot(*db)
+    if na < 1e-9 or nb < 1e-9:
+        return 0.0
+    return math.degrees(math.acos(max(-1.0, min(1.0, (da[0] * db[0] + da[1] * db[1]) / (na * nb)))))
+
+
+def _wall_at(project: Any, level: Any, p: tuple[float, float]) -> str | None:
+    """A wall of the same level that a point lies in or on (its footprint grown by the join tolerance)."""
+    for wid in project.model.query_ids(metadata={f"{E.NS}:category": "wall"}, limit=10_000):
+        wm = E.meta_of(project, wid)
+        if E.m(wm, "level") != level:
+            continue
+        s, e = tuple(E.m(wm, "start")), tuple(E.m(wm, "end"))
+        L = math.dist(s, e)
+        if L < 1e-9:
+            continue
+        u = ((e[0] - s[0]) / L, (e[1] - s[1]) / L)
+        along = (p[0] - s[0]) * u[0] + (p[1] - s[1]) * u[1]
+        across = abs(-(p[0] - s[0]) * u[1] + (p[1] - s[1]) * u[0])
+        if -JOIN <= along <= L + JOIN and across <= float(E.m(wm, "thickness")) / 2 + JOIN:
+            return wid
+    return None
+
+
+def _follow_host(project: Any, oid: str) -> bool:
+    """Put each hosted end back on its wall's face (the face toward the curtain wall), along the curtain wall's own line. A wall that is gone, or that
+    the line no longer meets, lets the end go (it stays where it is). Returns whether an end moved."""
+    meta = E.meta_of(project, oid)
+    hosts = dict(E.m(meta, "end_hosts") or {})
+    if not hosts:
+        return False
+    moved = False
+    for end, h in list(hosts.items()):
+        wid = h.get("wall")
+        if not wid or not E.alive(project, wid) or E.category(project, wid) != "wall":
+            hosts.pop(end)
+            moved = True
+            continue
+        wm = E.meta_of(project, wid)
+        a, b = _end_point(meta, "start"), _end_point(meta, "end")
+        here, there = (a, b) if end == "start" else (b, a)
+        d = (here[0] - there[0], here[1] - there[1])
+        Ld = math.hypot(*d)
+        s, e = tuple(E.m(wm, "start")), tuple(E.m(wm, "end"))
+        Lw = math.dist(s, e)
+        if Ld < 1e-9 or Lw < 1e-9:
+            continue
+        wu = ((e[0] - s[0]) / Lw, (e[1] - s[1]) / Lw)
+        wn = (-wu[1], wu[0])
+        side = 1.0 if (there[0] - s[0]) * wn[0] + (there[1] - s[1]) * wn[1] > 0 else -1.0       # the wall's face toward the rest of the curtain wall
+        face = (s[0] + wn[0] * side * float(E.m(wm, "thickness")) / 2, s[1] + wn[1] * side * float(E.m(wm, "thickness")) / 2)
+        hit = G.intersect_lines(there, d, face, wu)
+        if hit is None:
+            hosts.pop(end)
+            moved = True
+            continue
+        q = (there[0] + d[0] * hit[0], there[1] + d[1] * hit[0])
+        if math.dist(q, here) > 1e-9:
+            E._attach(project, oid, {end: [q[0], q[1]]})
+            meta = E.meta_of(project, oid)
+            moved = True
+    E._attach(project, oid, {"end_hosts": hosts})
+    return moved
+
+
+def _junction(project: Any, oid: str, end: str) -> dict[str, Any] | None:
+    """What an end of a curtain wall meets when it is linked to another curtain wall: the shared point, the directions of both walls away from it,
+    the angle inside the corner, the owner and the corner settings."""
+    meta = E.meta_of(project, oid)
+    lk = links_of(meta).get(end)
+    if not lk or not E.alive(project, lk["id"]) or E.category(project, lk["id"]) != "curtainwall":
+        return None
+    other, oend = lk["id"], lk["end"]
+    om = E.meta_of(project, other)
+    P = _end_point(meta, end)
+    if math.dist(P, _end_point(om, oend)) > JOIN:
+        return None
+    far = _end_point(meta, "end" if end == "start" else "start")
+    ofar = _end_point(om, "end" if oend == "start" else "start")
+    dA = G.unit((far[0] - P[0], far[1] - P[1]))
+    dB = G.unit((ofar[0] - P[0], ofar[1] - P[1]))
+    angle = math.degrees(math.acos(max(-1.0, min(1.0, dA[0] * dB[0] + dA[1] * dB[1]))))
+    owner = oid if oid < other else other
+    owner_end = end if owner == oid else oend
+    cfg = dict((E.m(E.meta_of(project, owner), "corners") or {}).get(owner_end) or {})
+    return {"me": oid, "end": end, "other": other, "other_end": oend, "P": P, "dA": dA, "dB": dB, "angle": angle, "owner": owner, "owner_end": owner_end,
+            "cfg": cfg, "depth": spec(meta)["frame_depth"], "other_depth": spec(om)["frame_depth"], "width": spec(meta)["frame_width"]}
+
+
+def corner_type(j: Mapping[str, Any]) -> str:
+    """The corner a junction has: the one chosen for it, or (``auto``) the first of quad, trapezoid and V whose range takes the angle; ``none`` when
+    the walls lie along each other more closely than any corner can be built for."""
+    chosen = str(j["cfg"].get("type", "auto"))
+    if j["angle"] >= INLINE:
+        return "inline"
+    if chosen != "auto":
+        return chosen
+    for kind in ("quad", "trapezoid", "V"):
+        lo, hi = CORNER_RANGES[kind]
+        if lo <= j["angle"] <= hi:
+            return kind
+    return "none"
+
+
+def corner_post(j: Mapping[str, Any]) -> list[tuple[float, float]] | None:
+    """The plan outline of a junction's corner post (world, metres), by its type. Raises ``BadRequest`` (with the angle and the range) for a type that
+    cannot be built at this angle or with these sizes; ``None`` for walls in line (they share a member, no post)."""
+    kind = corner_type(j)
+    if kind in ("inline", "none"):
+        return None
+    if kind not in CORNER_TYPES:
+        raise BadRequest(f"A curtain-wall corner is one of: {', '.join(CORNER_TYPES.values())}")
+    lo, hi = CORNER_RANGES[kind]
+    if not lo - 1e-9 <= j["angle"] <= hi + 1e-9:
+        raise BadRequest(f"A {CORNER_TYPES[kind]} is made for walls meeting at {lo:g}° to {hi:g}°; these meet at {j['angle']:.1f}°",
+                         hint="Choose another corner type for this junction")
+    P, dA, dB = j["P"], j["dA"], j["dB"]
+    cfg = j["cfg"]
+    DA, DB = j["depth"], j["other_depth"]
+    nA, nB = G.left(dA), G.left(dB)
+    bis = G.unit((dA[0] + dB[0], dA[1] + dB[1]))                                         # into the corner (the inside of the angle)
+    if nA[0] * bis[0] + nA[1] * bis[1] > 0:                                              # each normal turned to the outside of the corner
+        nA = (-nA[0], -nA[1])
+    if nB[0] * bis[0] + nB[1] * bis[1] > 0:
+        nB = (-nB[0], -nB[1])
+
+    def at(p: tuple[float, float], d: tuple[float, float], k: float) -> tuple[float, float]:
+        return (p[0] + d[0] * k, p[1] + d[1] * k)
+
+    def cross(p: tuple[float, float], d: tuple[float, float], q: tuple[float, float], e: tuple[float, float]) -> tuple[float, float]:
+        hit = G.intersect_lines(p, d, q, e)
+        if hit is None:
+            raise BadRequest("The two walls of this corner are parallel")
+        return at(p, d, hit[0])
+    if kind == "quad":                                                                   # four sides, each parallel to one wall: covers both walls' frames
+        qa, qb = float(cfg.get("depth_a", DA)), float(cfg.get("depth_b", DB))
+        lines_ = [(at(P, nA, qa / 2), dA), (at(P, nB, qb / 2), dB), (at(P, nA, -qa / 2), dA), (at(P, nB, -qb / 2), dB)]
+        poly = [cross(*lines_[i], *lines_[(i + 1) % 4]) for i in range(4)]
+    elif kind == "trapezoid":                                                            # sides square to each wall, at ``leg`` from the corner
+        leg = float(cfg.get("leg", max(DA, DB) / 2))
+        a_out, a_in = at(at(P, dA, leg), nA, DA / 2), at(at(P, dA, leg), nA, -DA / 2)
+        b_out, b_in = at(at(P, dB, leg), nB, DB / 2), at(at(P, dB, leg), nB, -DB / 2)
+        poly = [a_out, a_in, b_in, b_out]
+    elif kind == "L":                                                                    # an angle on the outside faces: two legs of ``thickness``
+        th = float(cfg.get("thickness", j["width"]))
+        reach = th / math.tan(math.radians(j["angle"]) / 2)                              # how far along a leg its inner corner lies from the outer one
+        la, lb = float(cfg.get("leg_a", max(DA, DB, reach + j["width"]))), float(cfg.get("leg_b", max(DA, DB, reach + j["width"])))
+        oa, ob = (at(P, nA, DA / 2), dA), (at(P, nB, DB / 2), dB)
+        ia, ib = (at(P, nA, DA / 2 - th), dA), (at(P, nB, DB / 2 - th), dB)
+        corner_o = cross(*oa, *ob)
+        corner_i = cross(*ia, *ib)
+        end_a_o = at(oa[0], dA, (corner_o[0] - oa[0][0]) * dA[0] + (corner_o[1] - oa[0][1]) * dA[1] + la)
+        end_b_o = at(ob[0], dB, (corner_o[0] - ob[0][0]) * dB[0] + (corner_o[1] - ob[0][1]) * dB[1] + lb)
+        poly = [corner_o, end_a_o, at(end_a_o, nA, -th), corner_i, at(end_b_o, nB, -th), end_b_o]
+    else:                                                                                # V: two legs on the walls' centre lines, mitred in the corner
+        th = float(cfg.get("thickness", j["width"]))
+        reach = th / 2 / math.tan(math.radians(j["angle"]) / 2)
+        la, lb = float(cfg.get("leg_a", max(DA, DB, reach + j["width"]))), float(cfg.get("leg_b", max(DA, DB, reach + j["width"])))
+        ao, ai = (at(P, nA, th / 2), dA), (at(P, nA, -th / 2), dA)
+        bo, bi = (at(P, nB, th / 2), dB), (at(P, nB, -th / 2), dB)
+        tip_o, tip_i = cross(*ao, *bo), cross(*ai, *bi)
+        poly = [tip_o, at(ao[0], dA, la), at(ai[0], dA, la), tip_i, at(bi[0], dB, lb), at(bo[0], dB, lb)]
+    clean: list[tuple[float, float]] = []
+    for q in poly:
+        if not clean or math.dist(clean[-1], q) > 1e-9:
+            clean.append(q)
+    if len(clean) < 3 or not G.is_simple_polygon(clean) or abs(G.signed_area(clean)) < 1e-6:
+        raise BadRequest(f"These sizes do not make a {CORNER_TYPES[kind]} at {j['angle']:.1f}°", hint="Change the corner's legs or depths, or choose another corner")
+    return clean
+
+
+def leg_default(j: Mapping[str, Any], share: float) -> float:
+    """The leg an L (``share`` 1) or V (``share`` 0.5) corner starts with: a frame depth, and always long enough to reach past its inner corner."""
+    th = float(j["cfg"].get("thickness", j["width"]))
+    return max(j["depth"], j["other_depth"], share * th / math.tan(math.radians(j["angle"]) / 2) + j["width"])
+
+
+def resolve_ends(project: Any, oid: str) -> dict[str, Any]:
+    """Work out, from the junctions as they are now, how this curtain wall ends at each end (``end_cond``: whether its perimeter member is given up
+    and how far its first field stands back from the junction) and which corner posts it carries (``corner_posts``, in its own u, d frame). Stored on
+    the wall and returned."""
+    meta = E.meta_of(project, oid)
+    sp = spec(meta)
+    L = sp["length"]
+    c, s = math.cos(sp["angle"]), math.sin(sp["angle"])
+    sx, sy = sp["start"]
+    to_local = lambda q: (round((q[0] - sx) * c + (q[1] - sy) * s, 9), round(-(q[0] - sx) * s + (q[1] - sy) * c, 9))     # noqa: E731
+    ends: dict[str, Any] = {}
+    posts: list[dict[str, Any]] = []
+    for end in ("start", "end"):
+        j = _junction(project, oid, end)
+        if j is None:
+            continue
+        kind = corner_type(j)
+        if kind == "none":
+            continue                                                                      # no corner can be built: each keeps its own member (the check says so)
+        if kind == "inline":
+            if j["owner"] != oid:                                                        # walls in line: the owner's member serves both
+                ends[end] = {"suppress": True, "setback": 0.0, "with": j["other"], "type": "inline"}
+            continue
+        poly = corner_post(j)
+        P, dA = j["P"], j["dA"]
+        setback = max(0.0, max((q[0] - P[0]) * dA[0] + (q[1] - P[1]) * dA[1] for q in poly))
+        if setback > L / 2:
+            raise BadRequest(f"The {CORNER_TYPES[kind]} reaches {setback * 1000:.0f} mm along a curtain wall that is only {L * 1000:.0f} mm long")
+        ends[end] = {"suppress": True, "setback": setback, "with": j["other"], "type": kind}
+        if j["owner"] == oid:
+            posts.append({"end": end, "type": kind, "poly": [list(to_local(q)) for q in poly]})
+    E._attach(project, oid, {"end_cond": ends, "corner_posts": posts})
+    return {"end_cond": ends, "corner_posts": posts}
+
+
+def set_corner(project: Any, oid: str, end: str, values: Mapping[str, Any]) -> dict[str, Any]:
+    """Choose the corner of the junction at ``end`` of curtain wall ``oid`` (``type``: L, quad, trapezoid, V or auto) and its sizes (mm: ``depth_a``,
+    ``depth_b`` for a quad corner, ``leg`` for a trapezoid, ``leg_a``, ``leg_b`` and ``thickness`` for an L or V). Stored once, on the junction's owner,
+    and checked against the angle before anything is kept."""
+    if end not in ("start", "end"):
+        raise BadRequest("end is start or end")
+    j = _junction(project, oid, end)
+    if j is None:
+        raise BadRequest("This end of the curtain wall does not meet another curtain wall")
+    om = E.meta_of(project, j["owner"])
+    corners = {k: dict(v) for k, v in (E.m(om, "corners") or {}).items()}
+    cfg = dict(corners.get(j["owner_end"]) or {})
+    swap = j["owner"] != oid                                                             # "a" is always the wall the edit was made on
+    for key, value in values.items():
+        if key == "type":
+            cfg["type"] = value if value == "auto" else E._choice(value, tuple(CORNER_TYPES), "corner type")
+        elif key in ("depth_a", "depth_b", "leg", "leg_a", "leg_b", "thickness"):
+            stored = {"depth_a": "depth_b", "depth_b": "depth_a", "leg_a": "leg_b", "leg_b": "leg_a"}.get(key, key) if swap else key
+            cfg[stored] = number(value, key.replace("_", " ") + " (mm)", 10, 2000) / 1000.0
+        else:
+            raise BadRequest(f"'{key}' is not a corner setting")
+    corners[j["owner_end"]] = cfg
+    E._attach(project, j["owner"], {"corners": corners})
+    corner_post(_junction(project, oid, end))                                            # refuse a corner that cannot be built at this angle
+    for x in (oid, j["other"]):
+        resolve_ends(project, x)
+        build(project, x)
+    return {"type": corner_type(_junction(project, oid, end)), "owner": j["owner"]}
+
+
+def reconcile(project: Any) -> list[str]:
+    """After a command: hosted ends follow their walls, broken links are let go, and every curtain wall whose ends or corners came out different is
+    rebuilt. Returns what was rebuilt."""
+    ids = curtainwalls(project)
+    if not ids:
+        return []
+    for oid in ids:
+        meta = E.meta_of(project, oid)
+        ls = links_of(meta)
+        for end, lk in list(ls.items()):
+            if not E.alive(project, lk["id"]):
+                ls.pop(end)
+        if ls != links_of(meta):
+            E._attach(project, oid, {"links": ls})
+        _follow_host(project, oid)
+    rebuilt = []
+    for oid in ids:
+        meta = E.meta_of(project, oid)
+        before = (E.m(meta, "end_cond") or {}, E.m(meta, "corner_posts") or [])
+        sig = _signature(meta)
+        after = resolve_ends(project, oid)
+        if (after["end_cond"], after["corner_posts"]) != before or sig != E.m(meta, "built_sig"):
+            build(project, oid)
+            rebuilt.append(oid)
+    return rebuilt
+
+
+def _signature(meta: Mapping[str, Any]) -> list[Any]:
+    return [E.m(meta, "start"), E.m(meta, "end"), E.m(meta, "height"), E.m(meta, "base_offset"), E.m(meta, "top_profile"), E.m(meta, "frame_depth"), E.m(meta, "frame_width")]
+
+
+def follow_links(project: Any, oid: str, before: Mapping[str, Sequence[float]]) -> None:
+    """After an end of a curtain wall moved (from ``before``), the linked end of its neighbour moves with it, so a connected run stays connected."""
+    meta = E.meta_of(project, oid)
+    for end, lk in links_of(meta).items():
+        if not E.alive(project, lk["id"]):
+            continue
+        now = _end_point(meta, end)
+        if math.dist(now, tuple(before[end])) > 1e-12:
+            E._attach(project, lk["id"], {lk["end"]: [now[0], now[1]]})
+
+
+# ------------------------------------------------------------------------------------------------------------------- components
+def component_list(project: Any, oid: str) -> list[dict[str, Any]]:
+    """Every selectable part of a curtain wall: its members (perimeter, mullions, transoms, sloped top), its fields and its corner posts, with a label
+    and where it is in the wall's frame (u along from the start, z up from the base)."""
+    meta = E.meta_of(project, oid)
+    sp = spec(meta)
+    out = []
+    seen = set()
+    for q in members(project, meta):
+        if q["id"] in seen:
+            continue
+        seen.add(q["id"])
+        verts = q["mesh"][0]
+        box = [min(v[0] for v in verts), max(v[0] for v in verts), min(v[2] for v in verts), max(v[2] for v in verts)]
+        out.append({"id": q["id"], "kind": q["kind"], "role": q["role"], "box": box, "label": _part_label(sp, q["id"])})
+    return out
+
+
+def _part_label(sp: Mapping[str, Any], pid: str) -> str:
+    if pid.startswith("cell:"):
+        c, r = (int(x) for x in pid[5:].split(","))
+        return f"Panel {c + 1}.{r + 1}"
+    if pid == "top":
+        return "Top member (follows the roof)"
+    if pid.startswith("corner:"):
+        return f"Corner post at the {pid[7:]}"
+    d, _, k = pid.partition(":")
+    noun = "Mullion" if d == "v" else "Transom"
+    if k in ("start", "end", "bottom", "top"):
+        return f"Perimeter member ({k})"
+    return f"{noun} {int(k) + 1}"
+
+
+def pick(project: Any, oid: str, point: Sequence[float], z: float | None = None) -> dict[str, Any]:
+    """The part of a curtain wall at a point (world metres; ``z`` absolute, or the point's own third coordinate). In plan (no height) a field is chosen
+    at the plan's cut height. The smallest part whose box holds the point wins, so a mullion is chosen over the field behind it."""
+    meta = E.meta_of(project, oid)
+    sp = spec(meta)
+    c, s = math.cos(sp["angle"]), math.sin(sp["angle"])
+    x, y = float(point[0]) - sp["start"][0], float(point[1]) - sp["start"][1]
+    u = x * c + y * s
+    zz = (float(point[2]) if len(point) > 2 and z is None else float(z if z is not None else 0.0)) - base_z(project, meta)
+    best = None
+    for part in component_list(project, oid):
+        u0, u1, z0, z1 = part["box"]
+        if u0 - 1e-6 <= u <= u1 + 1e-6 and z0 - 1e-6 <= zz <= z1 + 1e-6:
+            size = (u1 - u0) * (z1 - z0)
+            if best is None or size < best[0]:
+                best = (size, part)
+    if best is None:
+        raise NotFound("Nothing of the curtain wall is at that point")
+    return {"id": oid, "part": best[1]["id"], "label": best[1]["label"], "kind": best[1]["kind"]}
+
+
+def component_properties(project: Any, oid: str, part: str) -> dict[str, Any]:
+    """The Properties panel of one part of a curtain wall: a field (its type, material, thickness, offset; a door's type, hinge, swing, opening angle and
+    whether it is shown open), a member (where it is, its size, and removing or putting it back), or a corner post (its corner type and sizes)."""
+    meta = E.meta_of(project, oid)
+    sp = spec(meta)
+    name = project.model.get(oid)["name"] or "Curtain Wall"
+    mm = lambda v: round(v * 1000, 6)                                                       # noqa: E731
+    back = {"label": "Curtain wall", "type": "link", "value": name, "target": {"select": {"model": oid}}}
+    head = {"ref": {"model": oid, "part": part}, "category": "curtainwall", "kind": "model"}
+    if part.startswith("cell:"):
+        key = part[5:]
+        cell = next((c for c in cells(sp) if c["key"] == key), None)
+        if cell is None:
+            raise NotFound(f"This curtain wall has no panel {key}")
+        cs = cell_spec(sp, cell)
+        pre = f"panel:{cell['col']}:{cell['row']}:"
+        rows = [{"key": pre + "type", "label": "Type", "type": "choice", "value": cs["type"], "choices": E._choices(PANEL_TYPES)}]
+        if cs["type"] == "Door":
+            rows += [{"key": pre + "door_type", "label": "Door type", "type": "choice", "value": cs["door_type"], "choices": E._choices(DOOR_TYPES)},
+                     {"key": pre + "hinge", "label": "Hinge", "type": "choice", "value": cs["hinge"], "choices": [{"value": "start", "label": "Start side"}, {"value": "end", "label": "End side"}]},
+                     {"key": pre + "swing", "label": "Swing", "type": "choice", "value": "left" if cs["swing"] > 0 else "right", "choices": E._choices(("left", "right"))},
+                     {"key": pre + "opening_angle", "label": "Opening angle", "type": "number", "unit": "°", "value": cs["opening_angle"]},
+                     {"key": pre + "show_open", "label": "Shown in 3D", "type": "choice", "value": "open" if cs["show_open"] else "closed",
+                      "choices": [{"value": "closed", "label": "Closed"}, {"value": "open", "label": "Open at its opening angle"}]}]
+            if cs["door_type"] == "Sliding Door":
+                rows.append({"key": pre + "slide", "label": "Slides toward", "type": "choice", "value": cs["slide"], "choices": [{"value": "start", "label": "Start"}, {"value": "end", "label": "End"}]})
+        else:
+            rows += [{"key": pre + "material", "label": "Material", "type": "choice", "value": cs["material"], "choices": E._choices(PANEL_MATERIALS)},
+                     {"key": pre + "thickness", "label": "Thickness", "type": "number", "unit": "mm", "value": mm(cs["thickness"])},
+                     {"key": pre + "offset", "label": "Offset from the frame's centre", "type": "number", "unit": "mm", "value": mm(cs["offset"])}]
+        size = f"{(cell['u1'] - cell['u0']) * 1000:,.0f} × {(cell['z1'] - cell['z0']) * 1000:,.0f} mm"
+        return {**head, "title": f"{name} › Panel {cell['col'] + 1}.{cell['row'] + 1}", "top": rows,
+                "groups": [{"title": "Field", "rows": [{"label": "Clear opening", "type": "readonly", "value": size},
+                                                       {"label": "From the start / base", "type": "readonly", "value": f"{cell['u0'] * 1000:,.0f} mm / {cell['z0'] * 1000:,.0f} mm"},
+                                                       back],
+                            "action": {"label": "Reset to the wall's panel", "command": "model.set_property", "params": {"id": oid, "key": pre + "reset", "value": "1"}}}]}
+    if part.startswith("corner:"):
+        end = part[7:]
+        j = _junction(project, oid, end)
+        if j is None:
+            raise NotFound("That end has no corner")
+        kind = corner_type(j)
+        rows = [{"key": f"corner:{end}:type", "label": "Corner", "type": "choice", "value": kind if kind != "inline" else "auto",
+                 "choices": [{"value": "auto", "label": "Automatic (by the angle)"}] + [{"value": k, "label": v} for k, v in CORNER_TYPES.items()]}]
+        cfg = j["cfg"]
+        sizes = {"quad": (("depth_a", "Depth along this wall", j["depth"]), ("depth_b", "Depth along the other wall", j["other_depth"])),
+                 "trapezoid": (("leg", "Leg from the corner", max(j["depth"], j["other_depth"]) / 2),),
+                 "L": (("leg_a", "Leg along this wall", leg_default(j, 1.0)), ("leg_b", "Leg along the other wall", leg_default(j, 1.0)), ("thickness", "Thickness", j["width"])),
+                 "V": (("leg_a", "Leg along this wall", leg_default(j, 0.5)), ("leg_b", "Leg along the other wall", leg_default(j, 0.5)), ("thickness", "Thickness", j["width"]))}.get(kind, ())
+        swap = j["owner"] != oid
+        for k, label, default in sizes:
+            stored = {"depth_a": "depth_b", "depth_b": "depth_a", "leg_a": "leg_b", "leg_b": "leg_a"}.get(k, k) if swap else k
+            rows.append({"key": f"corner:{end}:{k}", "label": label, "type": "number", "unit": "mm", "value": mm(float(cfg.get(stored, default)))})
+        other = project.model.get(j["other"])["name"] or "Curtain Wall"
+        return {**head, "title": f"{name} › {CORNER_TYPES.get(kind, 'Corner')}", "top": rows,
+                "groups": [{"title": "Junction", "rows": [{"label": "Angle inside the corner", "type": "readonly", "value": f"{j['angle']:.1f}°"},
+                                                          {"label": "Meets", "type": "link", "value": other, "target": {"select": {"model": j["other"]}}},
+                                                          {"label": "Post carried by", "type": "readonly", "value": "this wall" if j["owner"] == oid else other}, back]}]}
+    label = _part_label(sp, part)
+    found = next((q for q in members(project, meta) if q["id"] == part), None)
+    if found is None:
+        raise NotFound(f"This curtain wall has no part {part}")
+    rows: list[dict[str, Any]] = [{"label": "Member", "type": "readonly", "value": label},
+                                  {"label": "Profile", "type": "readonly", "value": f"{sp['frame_width'] * 1000:.0f} × {sp['frame_depth'] * 1000:.0f} mm ({sp['frame_material']})"}]
+    d, _, k = part.partition(":")
+    if d in ("v", "h") and k.isdigit():
+        q = lines(sp, d)[int(k)]
+        rows.append({"key": f"line:{d}:{k}", "label": "In the wall", "type": "choice", "value": "removed" if q["removed"] else "present",
+                     "choices": [{"value": "present", "label": "Present"}, {"value": "removed", "label": "Remove"}]})
+        rows.append({"label": "Axis at", "type": "readonly", "value": f"{q['pos'] * 1000:,.0f} mm {'from the start' if d == 'v' else 'above the base'}"})
+    total = sum(m_["length"] for m_ in members(project, meta) if m_["id"] == part)
+    rows.append({"label": "Length", "type": "readonly", "value": f"{total:.3f} m"})
+    return {**head, "title": f"{name} › {label}", "top": rows,
+            "groups": [{"title": "Frame (shared by every member)", "rows": [
+                {"key": "frame_width", "label": "Frame width (face)", "type": "number", "unit": "mm", "value": mm(sp["frame_width"])},
+                {"key": "frame_depth", "label": "Frame thickness (depth)", "type": "number", "unit": "mm", "value": mm(sp["frame_depth"])},
+                {"key": "frame_material", "label": "Frame material", "type": "choice", "value": sp["frame_material"], "choices": E._choices(FRAME_MATERIALS)}, back]}]}
+
+
+def door_handles(project: Any, oid: str) -> list[dict[str, Any]]:
+    """For the 3D view: one handle per swinging door leaf of the curtain wall, at its free edge, with the hinge axis it turns about and the field it
+    belongs to, so the opening angle can be dragged."""
+    meta = E.meta_of(project, oid)
+    sp = spec(meta)
+    at = _to_world(frame_of(meta), base_z(project, meta))
+    out = []
+    for c, cs in _door_cells(sp):
+        if cs["door_type"] == "Sliding Door":
+            continue
+        for n, (a, b, y) in enumerate(door_leaves(cs, c["u0"], c["u1"], cs["offset"])):
+            hu, hd, sign = leaf_hinges(cs, a, b, y, n)
+            free = b if abs(hu - a) < 1e-9 else a
+            ang = math.radians(cs["opening_angle"] if cs["show_open"] else 0.0) * sign
+            fu, fd = hu + (free - hu) * math.cos(ang), hd + (free - hu) * math.sin(ang)
+            zmid = (c["z0"] + c["z1"]) / 2
+            out.append({"part": f"cell:{c['key']}", "key": f"panel:{c['col']}:{c['row']}", "hinge": at(hu, hd, zmid), "free": at(fu, fd, zmid),
+                        "closed": at(free, hd, zmid), "sign": sign, "angle": cs["opening_angle"], "open": cs["show_open"]})
+    return out

@@ -112,6 +112,8 @@ def voids(project: Any) -> list[dict[str, Any]]:
         meta = obj["metadata"]
         z0, z1 = z_range(project, meta)
         out.append({"id": vid, "name": obj["name"] or "Void", "poly": [(float(q[0]), float(q[1])) for q in E.m(meta, "profile")], "z0": z0, "z1": z1, **CU.settings(meta)})
+    from . import gutters as GU
+    out.extend(GU.drain_cutters(project))                                       # a ground drain cuts the floor it stands in, and only that floor
     return out
 
 

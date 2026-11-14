@@ -37,6 +37,10 @@ OPTIONAL: tuple[tuple[str, str, str, str], ...] = (
     ("scipy", "scipy", "1.10", "the STEM Agent's numerical integrator and the Optimization Agent"),
     ("psutil", "psutil", "5.9", "SLAI's resource monitoring, imported by the agents"),
     ("openpyxl", "openpyxl", "3.1", "optional XLSX classification table import"),
+    ("opencv-python", "cv2", "4.8", "reading raster plans in 2D-to-BIM reconstruction"),
+    ("scikit-image", "skimage", "0.21", "thinning strokes of raster plans in 2D-to-BIM reconstruction"),
+    ("pytesseract", "pytesseract", "0.3", "reading printed dimensions of raster plans (also needs the Tesseract program)"),
+    ("pdfplumber", "pdfplumber", "0.10", "reading vector PDF plans in 2D-to-BIM reconstruction"),
 )
 
 

@@ -648,3 +648,165 @@ def wall_mesh(length: float, thickness: float, height: float, openings: Sequence
             if abs(top_surface(x, y) - actual) > 1e-6:
                 raise GeometryError("A roof facet junction crosses this wall obliquely. Its top cannot be represented as a planar face without a split; adjust the join or roof geometry")
     return verts, faces
+
+
+# ------------------------------------------------------------------------------------------------------------------ solids: sweeps
+# Small 3D helpers on plain (verts, faces) meshes that the rainwater parts share: a thick-walled tube along a path of straight runs and bends (with
+# its ends laid onto another surface), bend paths, joining parts while remembering which faces came from which, and checks. Nothing here stores
+# anything. The outlet hole in a gutter is cut where the gutter is swept (``gutters._sweep_with_holes``), exactly, with the planar boolean.
+Point3 = tuple[float, float, float]
+
+
+def _area3(poly: Sequence[Sequence[float]]) -> float:
+    """Area of a planar 3D polygon (or triangle)."""
+    nx = ny = nz = 0.0
+    p0 = poly[0]
+    for i in range(1, len(poly) - 1):
+        u = [poly[i][k] - p0[k] for k in range(3)]
+        v = [poly[i + 1][k] - p0[k] for k in range(3)]
+        nx += u[1] * v[2] - u[2] * v[1]
+        ny += u[2] * v[0] - u[0] * v[2]
+        nz += u[0] * v[1] - u[1] * v[0]
+    return 0.5 * math.sqrt(nx * nx + ny * ny + nz * nz)
+
+
+def is_closed(mesh: "Mesh") -> bool:
+    """Whether every edge of a mesh is used exactly once in each direction (a closed, consistently oriented surface)."""
+    count: dict[tuple[int, int], int] = {}
+    for a, b, c in mesh[1]:
+        for e in ((a, b), (b, c), (c, a)):
+            count[e] = count.get(e, 0) + 1
+    return all(n == 1 and count.get((e[1], e[0])) == 1 for e, n in count.items())
+
+
+def circle(cx: float, cy: float, r: float, sides: int = 24) -> list[Point]:
+    return [(cx + r * math.cos(2 * math.pi * i / sides), cy + r * math.sin(2 * math.pi * i / sides)) for i in range(sides)]
+
+
+def _v3(a: Sequence[float], b: Sequence[float], k: float = 1.0) -> list[float]:
+    return [a[0] + b[0] * k, a[1] + b[1] * k, a[2] + b[2] * k]
+
+
+def unit3(v: Sequence[float]) -> Point3:
+    n = math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+    if n < 1e-12:
+        raise GeometryError("A direction of no length")
+    return (v[0] / n, v[1] / n, v[2] / n)
+
+
+def cross3(a: Sequence[float], b: Sequence[float]) -> Point3:
+    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+
+
+def dot3(a: Sequence[float], b: Sequence[float]) -> float:
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def tube(path: Sequence[tuple[Sequence[float], Sequence[float]]], r_out: float, r_in: float, *, sides: int = 24,
+         start_onto: Callable[[list[float], Point3], list[float]] | None = None,
+         end_onto: Callable[[list[float], Point3], list[float]] | None = None) -> "Mesh":
+    """A closed thick-walled tube along a path of ``(centre, tangent)`` stations: a ring of ``sides`` points round each centre, perpendicular to the
+    tangent, carried from station to station without twisting (parallel transport), with an annular end face at each end. ``r_in`` 0 makes a solid
+    rod. ``start_onto`` / ``end_onto`` move each end ring point along the tube's axis onto a surface (the underside of a gutter, the side of the pipe a
+    branch leaves): they take the point and the axis direction and return the point on that surface."""
+    if r_out <= 0 or r_in < 0 or r_in >= r_out:
+        raise GeometryError("A tube needs an outside radius larger than its bore")
+    if len(path) < 2:
+        raise GeometryError("A tube needs at least two stations")
+    t0 = unit3(path[0][1])
+    ref = (0.0, 0.0, 1.0) if abs(t0[2]) < 0.9 else (1.0, 0.0, 0.0)
+    e1 = unit3(cross3(t0, ref))
+    rings_o: list[list[list[float]]] = []
+    rings_i: list[list[list[float]]] = []
+    prev_t = t0
+    for idx, (centre, tangent) in enumerate(path):
+        t = unit3(tangent)
+        if idx:                                                              # transport the ring's first axis from the previous station
+            e1 = unit3([e1[c] - t[c] * dot3(e1, t) for c in range(3)])
+        e2 = cross3(t, e1)
+        ro, ri = [], []
+        for i in range(sides):
+            a = 2 * math.pi * i / sides
+            dirv = [e1[c] * math.cos(a) + e2[c] * math.sin(a) for c in range(3)]
+            ro.append(_v3(centre, dirv, r_out))
+            ri.append(_v3(centre, dirv, r_in))
+        rings_o.append(ro)
+        rings_i.append(ri)
+        prev_t = t
+    if start_onto is not None:
+        axis = unit3(path[0][1])
+        rings_o[0] = [start_onto(p, axis) for p in rings_o[0]]
+        rings_i[0] = [start_onto(p, axis) for p in rings_i[0]]
+    if end_onto is not None:
+        axis = unit3(prev_t)
+        rings_o[-1] = [end_onto(p, axis) for p in rings_o[-1]]
+        rings_i[-1] = [end_onto(p, axis) for p in rings_i[-1]]
+    verts: list[list[float]] = []
+    faces: list[list[int]] = []
+    m = len(path)
+    solid = r_in <= 1e-12
+    for ring in rings_o:
+        verts.extend(ring)
+    if not solid:
+        for ring in rings_i:
+            verts.extend(ring)
+    io = m * sides
+    for k in range(m - 1):
+        for i in range(sides):
+            j = (i + 1) % sides
+            a, b, c, d = k * sides + i, k * sides + j, (k + 1) * sides + j, (k + 1) * sides + i
+            faces += [[a, b, c], [a, c, d]]                                  # outside, facing out
+            if not solid:
+                faces += [[io + a, io + c, io + b], [io + a, io + d, io + c]]   # bore, facing in
+    for k, flip in ((0, True), (m - 1, False)):
+        o = k * sides
+        if solid:
+            centre = len(verts)
+            verts.append(list(path[k][0]) if (k == 0 and start_onto is None) or (k == m - 1 and end_onto is None)
+                         else [sum(p[c] for p in (rings_o[k])) / sides for c in range(3)])
+            for i in range(sides):
+                j = (i + 1) % sides
+                faces.append([centre, o + j, o + i] if flip else [centre, o + i, o + j])
+            continue
+        for i in range(sides):
+            j = (i + 1) % sides
+            a, b, c, d = o + i, o + j, io + o + j, io + o + i
+            faces += ([[a, c, b], [a, d, c]] if flip else [[a, b, c], [a, c, d]])
+    return verts, faces
+
+
+def arc_path(start: Sequence[float], direction: Sequence[float], toward: Sequence[float], angle: float, radius: float, steps: int = 8) -> list[tuple[list[float], Point3]]:
+    """Stations along a bend: from ``start`` heading ``direction``, turning by ``angle`` radians toward ``toward`` (any vector not along the direction)
+    on a centre-line radius ``radius``. The first station is the start."""
+    d = unit3(direction)
+    b0 = [toward[c] - d[c] * dot3(toward, d) for c in range(3)]
+    b = unit3(b0)
+    out: list[tuple[list[float], Point3]] = []
+    for i in range(steps + 1):
+        phi = angle * i / steps
+        p = [start[c] + radius * math.sin(phi) * d[c] + radius * (1 - math.cos(phi)) * b[c] for c in range(3)]
+        t = (math.cos(phi) * d[0] + math.sin(phi) * b[0], math.cos(phi) * d[1] + math.sin(phi) * b[1], math.cos(phi) * d[2] + math.sin(phi) * b[2])
+        out.append((p, t))
+    return out
+
+
+def join_meshes(parts: Iterable["Mesh"]) -> tuple["Mesh", list[int]]:
+    """One mesh from several, and how many faces each part contributed (in order), so a picked face can be traced back to its part."""
+    verts: list[list[float]] = []
+    faces: list[list[int]] = []
+    counts: list[int] = []
+    for v, f in parts:
+        base = len(verts)
+        verts += [list(p) for p in v]
+        faces += [[a + base, b + base, c + base] for a, b, c in f]
+        counts.append(len(f))
+    return (verts, faces), counts
+
+
+def mesh_volume(mesh: "Mesh") -> float:
+    verts, faces = mesh
+    total = 0.0
+    for a, b, c in faces:
+        A, B, C = verts[a], verts[b], verts[c]
+        total += A[0] * (B[1] * C[2] - B[2] * C[1]) - A[1] * (B[0] * C[2] - B[2] * C[0]) + A[2] * (B[0] * C[1] - B[1] * C[0])
+    return total / 6.0

@@ -36,13 +36,86 @@ EPS = 1e-6
 MIN_HEIGHT = 0.05                  # m: a wall attached to a roof may not come down to less than this anywhere
 
 
+HOSTED = ("wall", "curtainwall")                 # what can be attached: walls and curtain walls, by the same rules
+
+
 def attachment(meta: Mapping[str, Any]) -> dict[str, Any] | None:
     top = E.m(meta, "top_to")
     return dict(top) if isinstance(top, Mapping) and top.get("kind") in ("roof", "level") else None
 
 
+def base_attachment(meta: Mapping[str, Any]) -> dict[str, Any] | None:
+    base = E.m(meta, "base_to")
+    return dict(base) if isinstance(base, Mapping) and base.get("kind") == "floor" else None
+
+
+# ---------------------------------------------------------------------------------------------------------------------------- the floor below
+def floor_top(project: Any, fid: str) -> float:
+    """The absolute height of a floor's top surface (its level plus its offset: the floor hangs below that)."""
+    fm = E.meta_of(project, fid)
+    return E.level_elevation(project, E.m(fm, "level")) + float(E.m(fm, "offset", 0.0))
+
+
+def inside_floor(project: Any, fid: str, pts: Sequence[tuple[float, float]]) -> bool:
+    ring = [(float(q[0]), float(q[1])) for q in E.m(E.meta_of(project, fid), "boundary")]
+    return all(_inside(ring, x, y) for x, y in pts)
+
+
+def find_floor(project: Any, level: str, pts: Sequence[tuple[float, float]]) -> str | None:
+    """The floor that something on ``level`` with these plan points stands on: a floor of the same level whose outline holds all of them (the highest
+    one if several do). A floor of another level, or one the points only partly lie over, is never chosen."""
+    best: tuple[float, str] | None = None
+    for fid in project.model.query_ids(metadata={f"{E.NS}:category": "floor"}, limit=10_000):
+        if E.m(E.meta_of(project, fid), "level") != level or not inside_floor(project, fid, pts):
+            continue
+        top = floor_top(project, fid)
+        if best is None or top > best[0]:
+            best = (top, fid)
+    return best[1] if best else None
+
+
+def derive_base(project: Any, oid: str, base_to: Mapping[str, Any]) -> float:
+    """The base offset (above the element's level) that puts its base on the top surface of its floor, plus the attachment's own offset."""
+    fid = str(base_to["floor"])
+    if not E.alive(project, fid) or E.category(project, fid) != "floor":
+        raise NotFound("The floor this element stood on no longer exists")
+    meta = E.meta_of(project, oid)
+    return floor_top(project, fid) + float(base_to.get("offset", 0.0)) - E.level_elevation(project, E.m(meta, "level"))
+
+
+def refresh_base(project: Any, oid: str) -> bool:
+    """Put a floor-attached wall's or curtain wall's base back on its floor's top surface. A floor that is gone frees the base (it keeps where it was)."""
+    meta = E.meta_of(project, oid)
+    base_to = base_attachment(meta)
+    if base_to is None:
+        return False
+    try:
+        offset = derive_base(project, oid, base_to)
+    except NotFound:
+        E._attach(project, oid, {"base_to": None})
+        return True
+    if abs(offset - float(E.m(meta, "base_offset", 0.0))) < EPS:
+        return False
+    E._attach(project, oid, {"base_offset": offset})
+    return True
+
+
 def is_attached(project: Any, oid: str) -> bool:
     return attachment(E.meta_of(project, oid)) is not None
+
+
+def auto_base(project: Any, oid: str) -> str | None:
+    """On creation: stand a new wall or curtain wall on the floor under it (same level, its whole line inside the floor), if there is one. Its base offset
+    becomes an offset above that floor's top surface, so with a floor whose top is at the level (as a new floor's is) nothing moves, and with a floor
+    200 mm above its level the base starts 200 mm up; raise or lower the floor and the base goes with it."""
+    meta = E.meta_of(project, oid)
+    fid = find_floor(project, str(E.m(meta, "level")), [tuple(E.m(meta, "start")), tuple(E.m(meta, "end"))])
+    if fid is None:
+        return None
+    given = float(E.m(meta, "base_offset", 0.0))
+    E._attach(project, oid, {"base_to": {"kind": "floor", "floor": fid, "offset": given, "free_offset": given}})
+    refresh_base(project, oid)
+    return fid
 
 
 # ---------------------------------------------------------------------------------------------------------------------------- the roof line
@@ -233,6 +306,8 @@ def derive(project: Any, oid: str, top_to: Mapping[str, Any]) -> tuple[float, li
     if not E.alive(project, roof) or E.m(E.meta_of(project, roof), "category") != "roof":
         raise NotFound("The roof this wall was attached to no longer exists")
     start, end = tuple(E.m(meta, "start")), tuple(E.m(meta, "end"))
+    if E.m(meta, "category") == "curtainwall":
+        return _derive_curtainwall(project, meta, start, end, base, offset, E.meta_of(project, roof))
     pts = _simplified([(s, z - base + offset) for s, z in roof_line(project, start, end, E.meta_of(project, roof))])
     low, high = min(h for _, h in pts), max(h for _, h in pts)
     # The two exposed faces of a wall can meet the underside at different
@@ -259,6 +334,34 @@ def derive(project: Any, oid: str, top_to: Mapping[str, Any]) -> tuple[float, li
     if high - low < EPS:
         return high, None
     return high, [[round(s, 9), round(h, 9)] for s, h in pts]
+
+
+def _derive_curtainwall(project: Any, meta: Mapping[str, Any], start: tuple[float, float], end: tuple[float, float], base: float, offset: float,
+                        roof_meta: Mapping[str, Any]) -> tuple[float, list[list[float]] | None]:
+    """A curtain wall under a roof: its top is the roof's underside along the wall, taken as the lowest of its front face, centre line and back face
+    (so no part of the frame enters the roof), as (distance from the start, height above the base) points with a point wherever a facet edge crosses."""
+    depth = float(E.m(meta, "frame_depth", 0.09))
+    length = math.dist(start, end)
+    if length < 1e-9:
+        raise BadRequest("The curtain wall has no length")
+    c, s = (end[0] - start[0]) / length, (end[1] - start[1]) / length
+    lines = [((start[0] - s * y, start[1] + c * y), (end[0] - s * y, end[1] + c * y)) for y in (-depth / 2, 0.0, depth / 2)]
+    profiles = [roof_line(project, a, b, roof_meta) for a, b in lines]
+    stations = sorted({round(u, 9) for prof in profiles for u, _ in prof} | {0.0, round(length, 9)})
+
+    def along(prof: Sequence[tuple[float, float]], u: float) -> float:
+        for (u0, z0), (u1, z1) in zip(prof, prof[1:]):
+            if u0 - 1e-9 <= u <= u1 + 1e-9:
+                return z0 if u1 - u0 < 1e-12 else z0 + (z1 - z0) * (u - u0) / (u1 - u0)
+        return prof[0][1] if u <= prof[0][0] else prof[-1][1]
+    pts = _simplified([(u, min(along(prof, u) for prof in profiles) - base + offset) for u in stations])
+    low, high = min(h for _, h in pts), max(h for _, h in pts)
+    if low < MIN_HEIGHT:
+        raise BadRequest(f"The roof comes down to {low * 1000:.0f} mm above this curtain wall's base: no frame can stand under it",
+                         hint="Move the roof up, or lower the curtain wall's base")
+    if high - low < EPS:
+        return high, None
+    return high, [[round(u, 9), round(h, 9)] for u, h in pts]
 
 
 def _same(profile: Any, other: Any) -> bool:
@@ -291,31 +394,76 @@ def refresh(project: Any, oid: str) -> bool:
     return True
 
 
-def attached_ids(project: Any) -> list[str]:
-    """Every wall that follows something, read in one pass over the scene without copying any geometry."""
+def attached_ids(project: Any, key: str = "top_to") -> list[str]:
+    """Every wall or curtain wall that follows something (its top: ``top_to``; its base: ``base_to``), read in one pass over the scene without
+    copying any geometry."""
     scene = project.model._model
     with scene._mutation_lock:
-        return [obj["id"] for obj in scene.objects if (obj.get("metadata") or {}).get(f"{E.NS}:top_to")]
+        return [obj["id"] for obj in scene.objects if (obj.get("metadata") or {}).get(f"{E.NS}:{key}")]
 
 
 def reconcile(project: Any) -> list[str]:
-    """After a command: every attached wall follows its roof or level again. Returns the walls that changed."""
-    ids = attached_ids(project)
-    changed = [oid for oid in ids if refresh(project, oid)]
-    for oid in changed:
-        E.regenerate_wall(project, oid)
-    return changed
+    """After a command: every attached wall and curtain wall stands on its floor and follows its roof or level again (the base first: a top attached
+    to a level is measured from it). Returns what changed."""
+    changed = {oid for oid in attached_ids(project, "base_to") if refresh_base(project, oid)}
+    changed |= {oid for oid in attached_ids(project) if refresh(project, oid)}
+    for oid in sorted(changed):
+        E.regenerate(project, oid)
+    return sorted(changed)
 
 
 # -------------------------------------------------------------------------------------------------------------------------------- commands
 def _walls(project: Any, ids: Iterable[str]) -> list[str]:
+    """The walls and curtain walls among ``ids``: the elements that can be attached."""
     out = []
     for oid in ids:
         if not E.alive(project, oid):
             raise NotFound(f"Element {oid} does not exist")
-        if E.m(E.meta_of(project, oid), "category") == "wall":
+        if E.m(E.meta_of(project, oid), "category") in HOSTED:
             out.append(oid)
     return out
+
+
+def attach_base(project: Any, ids: Sequence[str], floor: str | None = None, offset_mm: Any = 0) -> dict[str, Any]:
+    """Stand each wall or curtain wall in ``ids`` on the top surface of a floor (``floor``, or the one floor among ``ids``, or the floor under each
+    one), ``offset_mm`` above it. Its base then follows the floor's top when the floor is raised, lowered or thickened."""
+    ids = list(dict.fromkeys(ids))
+    floors = [i for i in ids if E.alive(project, i) and E.category(project, i) == "floor"]
+    if floor is None and len(floors) == 1:
+        floor = floors[0]
+    if floor is not None and (not E.alive(project, floor) or E.category(project, floor) != "floor"):
+        raise BadRequest(f"{floor} is not a floor")
+    walls = _walls(project, ids)
+    if not walls:
+        raise BadRequest("Select at least one wall or curtain wall to stand on a floor")
+    offset = number(offset_mm, "offset", -100000, 100000) / 1000.0
+    done = []
+    for oid in walls:
+        meta = E.meta_of(project, oid)
+        fid = floor or find_floor(project, str(E.m(meta, "level")), [tuple(E.m(meta, "start")), tuple(E.m(meta, "end"))])
+        if fid is None:
+            raise BadRequest(f"{project.model.get(oid)['name'] or oid} does not stand inside a floor of its level", hint="Select the floor too, or move the wall onto one")
+        prior = base_attachment(meta)
+        E._attach(project, oid, {"base_to": {"kind": "floor", "floor": fid, "offset": offset,
+                                             "free_offset": float(prior["free_offset"]) if prior else float(E.m(meta, "base_offset", 0.0))}})
+        refresh_base(project, oid)
+        refresh(project, oid)
+        E.regenerate(project, oid)
+        done.append(oid)
+    return {"walls": done, "floor": floor}
+
+
+def detach_base(project: Any, ids: Sequence[str]) -> dict[str, Any]:
+    """Free the base of each wall or curtain wall: it keeps the height it stands at now, measured from its level."""
+    freed = []
+    for oid in _walls(project, ids):
+        if base_attachment(E.meta_of(project, oid)) is None:
+            continue
+        E._attach(project, oid, {"base_to": None})
+        freed.append(oid)
+    if not freed:
+        raise BadRequest("None of the selected walls stands on a floor by attachment")
+    return {"walls": freed}
 
 
 def attach_to_roof(project: Any, ids: Sequence[str], roof: str | None = None, offset_mm: Any = 0) -> dict[str, Any]:
@@ -330,7 +478,7 @@ def attach_to_roof(project: Any, ids: Sequence[str], roof: str | None = None, of
         raise BadRequest(f"{roof} is not a roof")
     walls = _walls(project, ids)
     if not walls:
-        raise BadRequest("Select at least one wall to attach to the roof")
+        raise BadRequest("Select at least one wall or curtain wall to attach to the roof")
     offset = number(offset_mm, "offset", -100000, 100000) / 1000.0
     for oid in walls:
         meta = E.meta_of(project, oid)
@@ -340,7 +488,7 @@ def attach_to_roof(project: Any, ids: Sequence[str], roof: str | None = None, of
         derive(project, oid, top_to)                                              # refuses a wall that is not under the roof before anything is written
         E._attach(project, oid, {"top_to": top_to})
         refresh(project, oid)
-        E.regenerate_wall(project, oid)
+        E.regenerate(project, oid)
     return {"walls": walls, "roof": roof}
 
 
@@ -367,7 +515,7 @@ def extend_to_level(project: Any, ids: Sequence[str], level: str | None = None, 
         derive(project, oid, top_to)
         E._attach(project, oid, {"top_to": top_to})
         refresh(project, oid)
-        E.regenerate_wall(project, oid)
+        E.regenerate(project, oid)
     return {"walls": walls, "level": level}
 
 
@@ -381,7 +529,7 @@ def detach(project: Any, ids: Sequence[str], kind: str | None = None) -> dict[st
             continue
         free = float(top_to.get("free_height") or E.m(meta, "height"))
         E._attach(project, oid, {"top_to": None, "top_profile": None, "height": free})
-        E.regenerate_wall(project, oid)
+        E.regenerate(project, oid)
         freed.append(oid)
     if not freed:
         raise BadRequest("None of the selected walls is " + {"roof": "attached to a roof", "level": "extended to a level"}.get(kind or "", "attached to a roof or a level"))

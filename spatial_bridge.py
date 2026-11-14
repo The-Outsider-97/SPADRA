@@ -11,6 +11,7 @@ guessed from boxes: they come from the elements' parameters and are listed separ
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any, Mapping
 
 from ..tools.errors import BadRequest, DependencyMissing
@@ -42,13 +43,16 @@ class SpatialBridge:
 
     def _task(self, payload: Mapping[str, Any]) -> Any:
         agent = HUB.require("spatial")
+        t0 = time.perf_counter()
         try:
             answer = agent.perform_task(dict(payload))
         except Exception as exc:
+            HUB.record("Spatial Agent", str(payload.get("operation")), None, (time.perf_counter() - t0) * 1000, ok=False)
             if type(exc).__module__.startswith("src.agents"):
                 raise BadRequest(str(exc) or type(exc).__name__, details={"error": type(exc).__name__}) from exc
             raise
-        HUB.record("Spatial Agent", str(payload.get("operation")), answer.get("request_id") if isinstance(answer, Mapping) else None)
+        HUB.record("Spatial Agent", str(payload.get("operation")), answer.get("request_id") if isinstance(answer, Mapping) else None, (time.perf_counter() - t0) * 1000,
+                   ok=isinstance(answer, Mapping) and answer.get("status") == "ok")
         if not isinstance(answer, Mapping) or answer.get("status") != "ok":
             raise BadRequest("The Spatial Agent did not return a result", details={"answer": str(answer)[:400]})
         return answer["result"]

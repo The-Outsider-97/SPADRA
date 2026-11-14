@@ -13,6 +13,10 @@ numpy>=1.24           # tested with 2.5.3 : STEM, Simulation, Spatial and Optimi
 scipy>=1.10           # tested with 1.18.1: STEM Agent integrator, Optimization Agent
 psutil>=5.9           # tested with 7.2.2 : resource monitoring imported by the agents
 openpyxl>=3.1         # optional XLSX classification-table import (data/build_nl_sfb.py and classifications.py)
+opencv-python>=4.8    # tested with 5.0.0.93 : raster plans in reconstruct.py (opencv-python-headless is equivalent but is reported as not installed by --check)
+scikit-image>=0.21    # tested with 0.26.0 : stroke thinning in reconstruct.py
+pytesseract>=0.3      # tested with 0.3.13 : printed dimensions in reconstruct.py; also needs the Tesseract program on PATH
+pdfplumber>=0.10      # tested with 0.11.10 : vector PDF plans in reconstruct.py
 #
 # Not on PyPI, part of the SLAI checkout: src/utils (SGEO, SDRW, SLDC, spatial_formats) and src/agents.
 # Optional file exchange (DXF, IFC) is in requirements-interop.txt. SPADRA reports those formats as unavailable without it. There is no PDF writer: sheets print from the browser.
