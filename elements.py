@@ -81,13 +81,16 @@ def color(value: Any) -> str | None:
     return value.upper()
 
 
-def appearance_color(project: Any, meta: Mapping[str, Any]) -> str | None:
+def appearance_color(project: Any, meta: Mapping[str, Any], oid: str | None = None) -> str | None:
     """Instance override takes precedence over a project-level material appearance."""
     material = m(meta, "material")
     if m(meta, "category") == "foundation":                                          # concrete with declared bars is shown as reinforced concrete
         from . import foundations as FD
         material = FD.display_material(meta)
-    return m(meta, "color") or project.manifest.get("material_colors", {}).get(material) or MATERIAL_COLORS.get(material)
+    base = m(meta, "color") or project.manifest.get("material_colors", {}).get(material) or MATERIAL_COLORS.get(material)
+    from . import parametric_properties as PP
+    rule = PP.appearance_rule(project, meta, oid)
+    return rule["top"] if rule and rule["mode"] == "solid" else base
 
 
 def all_ids(doc: Any, **query: Any) -> list[str]:
@@ -2659,11 +2662,33 @@ def _beam_profile_values(meta: Mapping[str, Any], key: str, value: Any) -> dict[
     return {"size": PR.CUSTOM, "dims": PR.validate(family, current)}
 
 
-def set_property(project: Any, oid: str, key: str, value: Any) -> None:
+def set_property(project: Any, oid: str, key: str, value: Any, *, from_formula: bool = False) -> None:
     """Change one parameter, then rebuild. Raises ``BadRequest`` (and the caller rolls everything back) if the result does not fit."""
     meta = meta_of(project, oid)
     cat = m(meta, "category")
     values: dict[str, Any] = {}
+    if not from_formula and isinstance(value, str):
+        from . import parametric_properties as PP
+        # Choice/text edits must not build a full Properties view merely to
+        # discover that they are not formulas. Transitional assembly geometry
+        # (e.g. a door being moved under a roof) may be invalid until the next
+        # edit and its Properties preview is deliberately unavailable then.
+        candidate = value.strip()
+        if candidate.startswith("=") or (PP._UNIT_LITERAL.fullmatch(candidate) and key in ("height", "width", "length", "thickness", "pitch", "slope", "offset", "radius", "diameter", "spacing")):
+            if key in PP._rows(project, oid):
+                PP.set_formula(project, oid, key, value)
+                return
+    if not from_formula:
+        from . import parametric_properties as PP
+        PP.remove_formula(project, oid, key)
+    if key.startswith("material_rule:"):
+        from . import parametric_properties as PP
+        PP.set_material_rule(project, oid, key.split(":", 1)[1], value)
+        return
+    if key.startswith(("material_layer:", "material_def:")):
+        from . import parametric_properties as PP
+        PP.set_scoped_material_rule(project, oid, key, value)
+        return
     if key.startswith("corner_join:"):
         if cat != "wall":
             raise BadRequest("Corner join controls apply only to walls")
@@ -2713,9 +2738,21 @@ def set_property(project: Any, oid: str, key: str, value: Any) -> None:
         else:
             set_roof_end(project, oid, edge, {field: value})
         return
+    if key.startswith("customdef:"):
+        from . import relations as RL
+        RL.update_shared_custom(project, oid, key.split(":", 1)[1], value)
+        return
     if key.startswith("custom:"):
         from . import relations as RL
-        RL.set_custom(project, oid, key[7:], RL.parse_custom(value))
+        if isinstance(value, Mapping) and "rename" in value:
+            RL.rename_custom(project, oid, key[7:], value["rename"])
+        elif isinstance(value, Mapping) and value.get("scope", "instance") != "instance":
+            RL.set_shared_custom(project, oid, key[7:], value.get("value"), str(value.get("type", "text")), str(value["scope"]))
+        elif isinstance(value, Mapping) and "type" in value and "value" in value:
+            RL.set_custom(project, oid, key[7:], value["value"], str(value["type"]))
+        else:
+            types = m(meta, "custom_types") or {}
+            RL.set_custom(project, oid, key[7:], value if key[7:] in types else RL.parse_custom(value))
         return
     if key.startswith("layer:"):
         from . import layers as LY
@@ -3742,11 +3779,27 @@ def part_properties(project: Any, oid: str, part: str) -> dict[str, Any]:
     cat = category(project, oid)
     if cat == "downpipe":
         from . import gutters as GU
-        return GU.component_properties(project, oid, part)
-    if cat == "curtainwall":
+        out = GU.component_properties(project, oid, part)
+    elif cat == "curtainwall":
         from . import curtainwall as CW
-        return CW.component_properties(project, oid, part)
-    raise BadRequest(f"A {cat} has no components to select")
+        out = CW.component_properties(project, oid, part)
+    else:
+        raise BadRequest(f"A {cat} has no components to select")
+    # A picked assembly component still belongs to its parent BIM element. Keep
+    # custom properties visible and editable without creating an unrelated
+    # component-level store or severing the ordinary model.set_property route.
+    from . import relations as RL
+    out.setdefault("groups", []).append(RL.custom_group(project, oid))
+    return _annotate_formulas(out, meta_of(project, oid))
+
+
+def _annotate_formulas(out: dict[str, Any], meta: Mapping[str, Any]) -> dict[str, Any]:
+    formulas = m(meta, "formulas") or {}
+    if formulas:
+        for row in out["top"] + [r for group in out["groups"] for r in group["rows"]]:
+            if row.get("key") in formulas and row.get("type") == "number":
+                row["expression"] = formulas[row["key"]]
+    return out
 
 
 def properties(project: Any, oid: str, relations: bool = False) -> dict[str, Any]:
@@ -3764,6 +3817,10 @@ def properties(project: Any, oid: str, relations: bool = False) -> dict[str, Any
             {"key": "color", "label": "Element color override", "type": "color", "value": m(meta, "color") or "", "text": shared},
             {"key": "material_color", "label": f"Shared {material} color", "type": "color", "value": shared},
         ]})
+    if out.get("kind") == "model" and (material or m(meta, "category") == "curtainwall"):
+        from . import parametric_properties as PP
+        out["groups"].append(PP.material_rule_group(project, meta))
+        out["groups"].extend(PP.scoped_material_groups(project, oid))
     group = LY.rows(project, oid) if out.get("kind") == "model" else None
     if group and len(LY.stack(project, oid)) > 1:                               # with several layers the totals are derived: shown, not edited
         for row in out["top"] + [r for g in out["groups"] for r in g["rows"]]:
@@ -3810,7 +3867,8 @@ def properties(project: Any, oid: str, relations: bool = False) -> dict[str, Any
                 rows.append({"label": "Lowest / highest", "type": "readonly", "value": f"{min(h for _, h in prof):.3f} / {max(h for _, h in prof):.3f} m"})
         at = next((i for i, g in enumerate(out["groups"]) if g["title"] == "Identity"), len(out["groups"]))
         out["groups"].insert(at, {"title": "Top constraint", "rows": rows})
-    return RL.augment(project, oid, out, relations)
+    out = RL.augment(project, oid, out, relations)
+    return _annotate_formulas(out, meta_of(project, oid))
 
 
 # ---------------------------------------------------------------------------------------------------------------------- solid status

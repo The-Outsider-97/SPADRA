@@ -472,6 +472,7 @@ def groups_for(project: Any, oid: str) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------------------------------------------------- exchange
 def exchange(project: Any, ids: Sequence[str] | None = None) -> dict[str, Any]:
     """The BIM data of the elements in an IFC-shaped JSON (entity, property sets with data types, quantity sets, classifications, bSDD references)."""
+    from .relations import effective_custom
     cat = catalog()["sets"]
     calc = calculated(project, ids)
     items = []
@@ -489,6 +490,10 @@ def exchange(project: Any, ids: Sequence[str] | None = None) -> dict[str, Any]:
                                                              "OmniClass Table 21": meta.get("spadra:omniclass_21"), "OmniClass Table 23": meta.get("spadra:omniclass_23")}.items() if v},
                       "classification_edition": meta.get("spadra:classification_edition"),
                       "custom_properties": {k[len("custom:"):]: v for k, v in meta.items() if k.startswith("custom:")},
+                      "effective_custom_properties": effective_custom(project, oid),
+                      "custom_property_types": meta.get("spadra:custom_types") or {},
+                      "parametric_formulas": meta.get("spadra:formulas") or {},
+                      "conditional_material": meta.get("spadra:material_rule") or None,
                       "bsdd": meta.get(BSDD_KEY) or []})
     return {"schema": "spadra.bim_exchange.v1", "revision": project.revision, "catalogue": {"origin": catalog()["origin"], "sets": {k: cat[k]["edition"] for k in cat}},
             "note": "Not an IFC file: SPADRA's IFC adapter has no writer. Plane angles are in degrees, lengths in metres.", "elements": items}

@@ -83,13 +83,23 @@ function rowId(row: PropRow): string {
 function rowEl(store: Store, p: Properties, row: PropRow): HTMLElement {
   const id = rowId(row);
   const label = h("label", { attrs: { for: id }, text: row.label });
+  const rename = p.kind === "model" && (row.key?.startsWith("custom:") || row.key?.startsWith("customdef:")) ? h("button", {
+    class: "iconbtn", type: "button", attrs: { title: `Rename ${row.label}`, "aria-label": `Rename ${row.label}` },
+    on: { click: () => { void (async () => {
+      const oldName = row.key?.startsWith("customdef:") ? row.label.replace(/ \((type|family|project)\)$/, "") : row.label;
+      const next = await promptDialog({ title: "Rename custom property", label: "New name", placeholder: oldName, confirmLabel: "Rename" });
+      if (next !== null && next.trim() && next.trim() !== oldName)
+        await store.run("model.set_property", { id: p.ref["model"], key: row.key, value: { rename: next.trim() } });
+    })(); } },
+  }, glyph("edit")) : null;
+  const fieldLabel = rename ? h("div", { class: "custom-prop-label" }, label, rename) : label;
   const remove = row.removable && row.key ? h("button", { class: "iconbtn remove", type: "button", attrs: { "aria-label": `Remove ${row.label}`, title: `Remove ${row.label}` }, on: { click: () => { void removeRow(store, p, row.key as string); } } }, glyph("close")) : null;
   if (row.type === "link") {
     const target = row.target;
     const body = target
       ? h("button", { id, class: "link-row", type: "button", attrs: { title: `Go to ${row.value}` }, on: { click: () => { void store.follow(target); } } }, h("span", { text: String(row.value) }), glyph("arrow-right"))
       : h("div", { class: "value", text: String(row.value) });
-    return h("div", { class: "prop-row" }, label, body);
+    return h("div", { class: "prop-row" }, fieldLabel, body);
   }
   if (row.type === "readonly" || !row.key) return h("div", { class: "prop-row" }, h("span", { class: "label", text: row.label }), h("div", { class: "value", text: String(row.value) }));
   const key = row.key;
@@ -121,8 +131,10 @@ function rowEl(store: Store, p: Properties, row: PropRow): HTMLElement {
       reflect(value);
       void commit(store, p, key, value, "text");
     });
-    const reset = h("button", { type: "button", class: "iconbtn remove", attrs: { title: `Reset ${row.label}`, "aria-label": `Reset ${row.label}` }, on: { click: () => void commit(store, p, key, "", "text") } }, glyph("close"));
-    return h("div", { class: "prop-row" }, label, h("div", { class: "color-controls" },
+    const reset = h("button", { type: "button", class: "iconbtn remove",
+      attrs: { title: `${row.removable ? "Remove" : "Reset"} ${row.label}`, "aria-label": `${row.removable ? "Remove" : "Reset"} ${row.label}` },
+      on: { click: () => { if (row.removable) void removeRow(store, p, key); else void commit(store, p, key, "", "text"); } } }, glyph("close"));
+    return h("div", { class: "prop-row" }, fieldLabel, h("div", { class: "color-controls" },
       h("div", { class: "color-controls-main" }, picker, hex, reset),
       rgb));
   }
@@ -130,7 +142,7 @@ function rowEl(store: Store, p: Properties, row: PropRow): HTMLElement {
     const input = h("textarea", { id, attrs: { rows: 3, maxlength: 2000, "aria-label": row.label } }) as HTMLTextAreaElement;
     input.value = String(row.value ?? "");
     input.addEventListener("change", () => { void commit(store, p, key, input.value, "multiline"); });
-    return h("div", { class: "prop-row" }, label, input);
+    return h("div", { class: "prop-row" }, fieldLabel, input);
   }
   if (row.type === "sfb") return sfbRow(store, p, row, id, label);
   if (row.type === "catalog") return catalogRow(store, p, row, id, label);
@@ -149,12 +161,14 @@ function rowEl(store: Store, p: Properties, row: PropRow): HTMLElement {
       } else void commit(store, p, key, select.value, "choice");
     } } },
       ...(row.choices ?? []).map((c) => h("option", { value: c.value, text: c.label, selected: c.value === row.value })));
-    return h("div", { class: "prop-row" }, label, remove ? h("div", { class: "with-unit" }, select, remove) : select);
+    return h("div", { class: "prop-row" }, fieldLabel, remove ? h("div", { class: "with-unit" }, select, remove) : select);
   }
-  const input = h("input", { id, type: row.type === "number" ? "number" : "text", value: format(row.value), attrs: { step: "any", ...(row.type === "text" ? { maxlength: p.kind === "sheet" && key.startsWith("note:") ? 500 : 200 } : {}) },
+  const input = h("input", { id, type: "text", value: row.expression !== undefined ? `=${row.expression}` : format(row.value),
+    attrs: { ...(row.type === "number" ? { inputmode: "decimal", title: row.expression !== undefined ? `Calculated: ${format(row.value)} ${row.unit ?? ""}` : "Enter a value or a parametric formula (=expression)" } : {}),
+      ...(row.type === "text" ? { maxlength: key.endsWith(":condition") && key.startsWith("material_") ? 512 : p.kind === "sheet" && key.startsWith("note:") ? 500 : 200 } : {}) },
     on: { change: () => { void commit(store, p, key, input.value, row.type); }, keydown: (e) => { if (e.key === "Enter") input.blur(); } } });
   const field = row.unit ? h("div", { class: "with-unit" }, input, h("span", { class: "unit", text: row.unit }), remove) : remove ? h("div", { class: "with-unit" }, input, remove) : input;
-  return h("div", { class: "prop-row" }, label, field);
+  return h("div", { class: "prop-row" }, fieldLabel, field);
 }
 
 /** An NL-SfB code: type a number or a word (Dutch or English), pick from the list the server searches; the name of the code in force is shown under the field. */
@@ -232,11 +246,24 @@ function addForm(store: Store, p: Properties, kind: "custom" | "note" | "layer" 
     return h("div", { class: "prop-add" }, plus);
   }
   const name = h("input", { type: "text", placeholder: "Name", attrs: { "aria-label": "New property name", maxlength: 40, autocomplete: "off" } });
+  const type = h("select", { attrs: { "aria-label": "Custom property type" } },
+    ...[["text", "Text"], ["integer", "Integer"], ["number", "Number"], ["boolean", "Yes/no"],
+      ["length", "Length (mm)"], ["area", "Area (m²)"], ["volume", "Volume (m³)"],
+      ["angle", "Angle (°)"], ["color", "Color (HEX)"]].map(([v, title]) => h("option", { value: v, text: title })));
   const value = h("input", { type: "text", placeholder: kind === "custom" ? "Value" : "Note text", attrs: { "aria-label": kind === "custom" ? "New property value" : "New note text", maxlength: kind === "custom" ? 200 : 500, autocomplete: "off" } });
+  const scope = h("select", { attrs: { "aria-label": "Custom property scope" } },
+    ...[["instance", "This element"], ["type", "Element type"], ["family", "Family / category"], ["project", "Entire project"]]
+      .map(([v, title]) => h("option", { value: v, text: title })));
   const add = async (): Promise<void> => {
     if (kind === "custom") {
       if (!name.value.trim()) { toast("Give the property a name (a letter first; letters, digits and _).", { kind: "info" }); name.focus(); return; }
-      await commit(store, p, `custom:${name.value.trim()}`, value.value, "text");
+      const entered = value.value.trim();
+      if (!entered && type.value !== "text") { toast("Enter a value for this property type.", { kind: "error" }); value.focus(); return; }
+      const numeric = ["integer", "number", "length", "area", "volume", "angle"].includes(type.value);
+      const raw = numeric ? Number(entered.replace(",", ".")) : type.value === "boolean" ? entered.toLowerCase() : value.value;
+      if (numeric && (entered === "" || !Number.isFinite(raw as number))) { toast("Enter a valid number.", { kind: "error" }); value.focus(); return; }
+      const done = await store.run("model.set_property", { id: p.ref["model"], key: `custom:${name.value.trim()}`, value: { type: type.value, value: raw, scope: scope.value } });
+      if (done) { name.value = ""; value.value = ""; }
     } else {
       if (!value.value.trim()) { toast("Type the note first.", { kind: "info" }); value.focus(); return; }
       await store.run("sheet.add_note", { id: p.ref["sheet"], text: value.value.trim() });
@@ -244,11 +271,11 @@ function addForm(store: Store, p: Properties, kind: "custom" | "note" | "layer" 
   };
   const button = h("button", { class: "tool-inline", type: "button", text: kind === "custom" ? "Add property" : "Add note", on: { click: () => { void add(); } } });
   value.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); void add(); } });
-  return h("div", { class: "prop-add" }, ...(kind === "custom" ? [name] : []), value, button);
+  return h("div", { class: "prop-add" }, ...(kind === "custom" ? [name, type, scope] : []), value, button);
 }
 
 async function removeRow(store: Store, p: Properties, key: string): Promise<void> {
-  if (p.kind === "model" && key.startsWith("custom:")) await store.run("model.set_property", { id: p.ref["model"], key, value: null });
+  if (p.kind === "model" && (key.startsWith("custom:") || key.startsWith("customdef:"))) await store.run("model.set_property", { id: p.ref["model"], key, value: null });
   else if (p.kind === "model" && key.startsWith("layer:")) await store.run("model.remove_layer", { id: p.ref["model"], layer: key.split(":")[1] });
   else if (p.kind === "model" && key.startsWith("panel:")) await store.run("model.remove_panel", { id: p.ref["model"], panel: key.split(":")[1] });
   else if (p.kind === "sheet" && key.startsWith("note:")) await store.run("sheet.remove_note", { id: p.ref["sheet"], note: key.slice(5) });
@@ -271,6 +298,7 @@ export function editCommand(p: Pick<Properties, "kind" | "ref">, key: string, va
   }
   if (p.kind === "view" && ["cut_reference", "cut_offset", "range_top", "range_bottom", "range_depth"].includes(key)) return { op: "view.set_cut_plane", params: { id: ref["view"], key, value } };
   if (p.kind === "view" && key === "name") return { op: "view.rename", params: { id: ref["view"], name: value } };
+  if (p.kind === "view" && (key === "custom_columns" || key === "custom_filters")) return { op: "view.set_schedule", params: { id: ref["view"], key, value } };
   if (p.kind === "view" && (key === "depth" || key === "angle")) return { op: "view.set_section", params: { id: ref["view"], [key]: value } };
   if (p.kind === "view" && (key === "opening_direction" || key === "material_hatching")) return { op: "view.set_option", params: { id: ref["view"], key, value } };
   if (p.kind === "view" && key.startsWith("hatch:")) return { op: "hatch.set", params: { material: key.slice(6), pattern: value } };
@@ -283,8 +311,9 @@ export function editCommand(p: Pick<Properties, "kind" | "ref">, key: string, va
 async function commit(store: Store, p: Properties, key: string, raw: string, type: PropRow["type"]): Promise<void> {
   let value: string | number = raw;
   if (type === "number") {
-    value = Number(raw);
-    if (raw.trim() === "" || !Number.isFinite(value)) { toast("Enter a number.", { kind: "error" }); await store.refresh(); return; }
+    if (raw.trim() === "") { toast("Enter a number or formula.", { kind: "error" }); await store.refresh(); return; }
+    const literal = Number(raw.trim().replace(",", "."));
+    value = Number.isFinite(literal) ? literal : raw.trim();   // non-numeric input is checked by SGEO on the server
   }
   const edit = editCommand(p, key, value);
   if (!edit) { toast(`${key} cannot be edited here.`, { kind: "info" }); await store.refresh(); return; }

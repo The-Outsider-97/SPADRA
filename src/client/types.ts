@@ -147,7 +147,10 @@ export interface ScheduleData {
   totals: Record<string, number>; count: number; note: string;
 }
 
-export interface SceneObject { id: string; name: string; category: string; material: string | null; color?: string | null; layer_colors?: Array<{ count: number; color: string | null }>; ridge_handle?: { point: Pt3; across: Pt; offset_mm: number } | null; vertices: Pt3[]; faces: number[][]; layer_points?: Array<{ side: string; point: Pt3 }>;
+export interface SceneObject { id: string; name: string; category: string; material: string | null; color?: string | null; layer_colors?: Array<{ count: number; color: string | null }>;
+  gradient?: { mode: "gradient"; top: string; bottom: string; transition: "fade" | "abrupt"; position: number; fade_width: number } | null;
+  layer_gradients?: Array<SceneObject["gradient"]> | null;
+  ridge_handle?: { point: Pt3; across: Pt; offset_mm: number } | null; vertices: Pt3[]; faces: number[][]; layer_points?: Array<{ side: string; point: Pt3 }>;
   /** Which component every face belongs to, as runs in face order (downpipe fittings, curtain-wall panels and members): ``part`` is the Properties key. */
   components?: SceneComponentRun[];
   /** Drag handles of swinging door leaves: the leaf's free edge turns about ``hinge``; ``key`` names the curtain-wall field (null for a door in a wall). */
@@ -185,6 +188,8 @@ export interface Choice { value: string; label: string }
 export interface LinkTarget { select?: { model?: string; part?: string; drawing?: string; entity?: string }; open?: OpenRef; dialog?: string }
 export interface PropRow {
   key?: string; label: string; type: "text" | "multiline" | "number" | "choice" | "readonly" | "link" | "sfb" | "catalog" | "color"; value: string | number; unit?: string; choices?: Choice[];
+  /** Server-validated SGEO expression; its calculated numeric value stays in `value`. */
+  expression?: string;
   /** A custom property or a note can be taken away. */
   removable?: boolean; target?: LinkTarget;
   /** An NL-SfB code: the table the picker searches, the name of the code that is set, and the codes usually given to this kind of element. */

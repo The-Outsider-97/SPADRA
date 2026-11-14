@@ -454,6 +454,9 @@ class Project:
             if model_edit:
                 DL.bind(self)                                           # dimensions drawn on wall faces are linked to them before the model changes
             result = handler(self, params)
+            if model_edit:
+                from . import parametric_properties as PP
+                PP.recompute_all(self)                                      # formulas follow geometry changes in the same undoable transaction
             if key.startswith("drawing:"):
                 E.refresh_opening_profiles_for_drawing(self, key.split(":", 1)[1],
                                                        MM_PER[self.manifest["unit"]] / 1000.0)
@@ -679,6 +682,15 @@ class Project:
                 layer_colors = FD.part_colors(self, meta, len(mesh["faces"]))
             if category == "curtainwall":                                      # frame, glazing and door leaves, each in its own colour
                 layer_colors = CW.part_colors(self, meta, len(mesh["faces"]))
+            from . import parametric_properties as PP
+            appearance = PP.appearance_rule(self, meta, oid)
+            scoped_layers = PP.scoped_layer_appearance(self, oid, meta, len(mesh["faces"]), layer_colors)
+            layer_gradients = None
+            if scoped_layers is not None:
+                layer_colors, layer_gradients = scoped_layers
+                appearance = layer_gradients[0] if len(layer_gradients) == 1 else None
+            elif appearance and appearance["mode"] == "solid":
+                layer_colors = [{"count": len(mesh["faces"]), "color": appearance["top"]}]
             ridge = E.roof_ridge(meta) if category == "roof" else None
             ridge_handle = None
             if ridge:
@@ -699,7 +711,9 @@ class Project:
             elif category == "door":
                 extra["door_handles"] = E.door_handles(self, oid)
             objects.append({**extra, "id": oid, "name": obj["name"], "category": category,
-                            "material": meta.get(f"{NS}:material"), "color": E.appearance_color(self, meta), "vertices": verts, "faces": mesh["faces"],
+                            "material": meta.get(f"{NS}:material"), "color": E.appearance_color(self, meta, oid), "vertices": verts, "faces": mesh["faces"],
+                            "gradient": appearance if appearance and appearance["mode"] == "gradient" else None,
+                            "layer_gradients": layer_gradients,
                             "layer_colors": layer_colors,
                             "ridge_handle": ridge_handle,
                             "layer_points": self._layer_points(category, meta, verts, mesh["faces"])})
@@ -768,8 +782,17 @@ class Project:
             if total > max_vertices:
                 raise LimitExceeded(f"The model has more than {max_vertices} vertices to draw", hint="Hide or simplify objects")
             meta = obj["metadata"]
+            from . import parametric_properties as PP
+            appearance = PP.appearance_rule(self, meta, oid)
+            scoped_layers = PP.scoped_layer_appearance(self, oid, meta, len(mesh["faces"]), [])
+            layer_colors, layer_gradients = scoped_layers if scoped_layers is not None else ([], None)
+            if scoped_layers is not None:
+                appearance = layer_gradients[0] if len(layer_gradients) == 1 else None
             objects.append({"id": oid, "name": obj["name"], "category": meta.get(f"{NS}:category", "generic"),
-                            "material": meta.get(f"{NS}:material"), "color": E.appearance_color(self, meta), "vertices": verts, "faces": mesh["faces"]})
+                            "material": meta.get(f"{NS}:material"), "color": E.appearance_color(self, meta, oid),
+                            "gradient": appearance if appearance and appearance["mode"] == "gradient" else None,
+                            "layer_gradients": layer_gradients, "layer_colors": layer_colors,
+                            "vertices": verts, "faces": mesh["faces"]})
         bounds = None
         if objects:
             lo = [min(v[i] for o in objects for v in o["vertices"]) for i in range(3)]
@@ -1261,6 +1284,10 @@ def _view_properties(project: Project, vid: str) -> dict[str, Any]:
     elif kind == "schedule":
         groups.append({"title": "Schedule", "rows": [{"label": "Lists", "type": "readonly", "value": ("instances of one family" if view["category"] == "family" else view["category"] + "s")},
                                                       {"label": "Rows", "type": "readonly", "value": str(D.view_schedule(project, view)["count"])}]})
+        if view["category"] != "family" and not D.SCHEDULES[view["category"]].get("summary"):
+            groups.append({"title": "Custom property columns and filters", "rows": [
+                {"key": "custom_columns", "label": "Column names (comma-separated)", "type": "text", "value": ", ".join(view.get("custom_columns") or [])},
+                {"key": "custom_filters", "label": 'Filters JSON (name, op, value)', "type": "multiline", "value": json.dumps(view.get("custom_filters") or [])}]})
     if kind in ("plan", "section", "elevation"):
         shown = [{"value": "shown", "label": "Shown"}, {"value": "hidden", "label": "Hidden"}]
         groups.append({"title": "Annotation", "rows": [
@@ -2942,6 +2969,32 @@ class _Commands:
         vid = new_id()
         project.manifest["views"].append({"id": vid, "kind": "schedule", "name": name, "category": category})
         return {"id": vid, "name": name}
+
+    @staticmethod
+    @command(_model_target("Schedule custom columns and filters"))
+    def view__set_schedule(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        view = _editable_view(project, p.get("id"))
+        if view["kind"] != "schedule" or view["category"] == "family" or D.SCHEDULES[view["category"]].get("summary"):
+            raise BadRequest("Custom filters apply to category schedules")
+        key = choice_of(p.get("key"), ("custom_columns", "custom_filters"), "schedule setting")
+        raw = p.get("value")
+        if key == "custom_columns":
+            names = [s.strip() for s in str(raw or "").split(",") if s.strip()]
+            if len(names) > 20 or len(set(names)) != len(names) or any(not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,39}", n) for n in names):
+                raise BadRequest("List up to 20 distinct custom property names, separated by commas")
+            view[key] = names
+        else:
+            try:
+                filters = json.loads(raw) if isinstance(raw, str) else raw
+            except (TypeError, ValueError) as exc:
+                raise BadRequest("Filters must be a JSON array of {name, op, value} objects") from exc
+            if not isinstance(filters, list) or len(filters) > 20:
+                raise BadRequest("Filters must be a list of at most 20 rules")
+            for f in filters:
+                if not isinstance(f, dict) or not isinstance(f.get("name"), str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,39}", f["name"]) or f.get("op") not in ("==", "!=", ">", ">=", "<", "<=", "contains") or not isinstance(f.get("value"), (str, int, float, bool)):
+                    raise BadRequest("Each filter needs a custom property name, op (==, !=, >, >=, <, <=, contains), and a scalar value")
+            view[key] = filters
+        return {"id": view["id"], key: view[key]}
 
     @staticmethod
     @command(_model_target("Add family schedule"))

@@ -4,7 +4,7 @@ import { h } from "../../../tools/web/src/dom.js";
 import { glyph } from "../../../tools/web/src/icons.js";
 import { toast } from "../../../tools/web/src/ui.js";
 import { cameraEye, cameraMatrices, centreOf, cross, featureEdges, HOME_VIEW, lookAround, normalise, orbitAbout, rayPlaneZ, rayThrough, rayTriangle, sub, transform, viewerDirection, walk, zoomAt, } from "./math3d.js";
-import { cssColor, rgba, withAlpha } from "./palette.js";
+import { cssColor, rgba, hexRgb01, withAlpha } from "./palette.js";
 import { niceStep, snapToGrid, wallCentreShift } from "./geom2d.js";
 import { addLayerDialog } from "./dialogs.js";
 import { downpipeComponentsDialog } from "./gutters.js";
@@ -154,13 +154,20 @@ export class ModelView {
     }
     setup(gl) {
         this.meshProgram = this.compile(gl, `#version 300 es
-      in vec3 a_pos; in vec3 a_normal; uniform mat4 u_vp; out vec3 v_normal;
-      void main() { v_normal = a_normal; gl_Position = u_vp * vec4(a_pos, 1.0); }`, `#version 300 es
-      precision highp float; in vec3 v_normal; uniform vec3 u_color; uniform vec3 u_tint; uniform float u_tintAmount; uniform float u_alpha; out vec4 o;
+      in vec3 a_pos; in vec3 a_normal; uniform mat4 u_vp; out vec3 v_normal; out float v_height;
+      void main() { v_normal = a_normal; v_height = a_pos.z; gl_Position = u_vp * vec4(a_pos, 1.0); }`, `#version 300 es
+      precision highp float; in vec3 v_normal; in float v_height; uniform vec3 u_color; uniform vec3 u_tint; uniform float u_tintAmount; uniform float u_alpha;
+      uniform float u_gradient; uniform vec3 u_top; uniform vec3 u_bottom; uniform float u_zMin; uniform float u_zMax;
+      uniform float u_boundary; uniform float u_fadeWidth; uniform float u_abrupt; out vec4 o;
       void main() {
         vec3 n = normalize(v_normal); vec3 l = normalize(vec3(-0.45, -0.6, 0.75));
-        float d = abs(dot(n, l)); float sky = 0.5 + 0.5 * abs(n.z);
-        vec3 c = u_color * (0.58 + 0.30 * d + 0.18 * sky); c = mix(c, u_tint, u_tintAmount); o = vec4(c, u_alpha);
+        float d = abs(dot(n, l)); float sky = 0.5 + 0.5 * abs(n.z); vec3 base = u_color;
+        if (u_gradient > 0.5) {
+          float t = clamp((v_height - u_zMin) / max(u_zMax - u_zMin, 0.000001), 0.0, 1.0);
+          float blend = (u_abrupt > 0.5 || u_fadeWidth < 0.00001) ? step(u_boundary, t) : smoothstep(u_boundary - u_fadeWidth * 0.5, u_boundary + u_fadeWidth * 0.5, t);
+          base = mix(u_bottom, u_top, blend);
+        }
+        vec3 c = base * (0.58 + 0.30 * d + 0.18 * sky); c = mix(c, u_tint, u_tintAmount); o = vec4(c, u_alpha);
       }`);
         this.lineProgram = this.compile(gl, `#version 300 es
       in vec3 a_pos; uniform mat4 u_vp; void main() { gl_Position = u_vp * vec4(a_pos, 1.0); }`, `#version 300 es
@@ -204,7 +211,15 @@ export class ModelView {
                 gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(pos), gl.STATIC_DRAW);
                 gl.bindBuffer(gl.ARRAY_BUFFER, edge);
                 gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(edges), gl.STATIC_DRAW);
-                this.drawables.push({ id: o.id, name: o.name, material: o.material, color: o.color ?? null, layerColors: o.layer_colors ?? [], ridgeHandle: o.ridge_handle ?? null, category: o.category, tri, triCount: pos.length / 6, edge, edgeCount: edges.length / 3, verts: o.vertices, faces: o.faces, layerPoints: o.layer_points ?? [], components: o.components ?? [], doorHandles: o.door_handles ?? [] });
+                let zMin = Infinity, zMax = -Infinity;
+                for (const v of o.vertices) {
+                    zMin = Math.min(zMin, v[2]);
+                    zMax = Math.max(zMax, v[2]);
+                }
+                this.drawables.push({ id: o.id, name: o.name, material: o.material, color: o.color ?? null, layerColors: o.layer_colors ?? [],
+                    gradient: o.gradient ?? null, layerGradients: o.layer_gradients ?? null,
+                    zMin: Number.isFinite(zMin) ? zMin : 0, zMax: Number.isFinite(zMax) ? zMax : 1,
+                    ridgeHandle: o.ridge_handle ?? null, category: o.category, tri, triCount: pos.length / 6, edge, edgeCount: edges.length / 3, verts: o.vertices, faces: o.faces, layerPoints: o.layer_points ?? [], components: o.components ?? [], doorHandles: o.door_handles ?? [] });
             }
         }
         this.buildGrid();
@@ -1266,10 +1281,22 @@ export class ModelView {
                 const parts = d.layerColors.length && d.layerColors.reduce((n, x) => n + x.count * 3, 0) === d.triCount
                     ? d.layerColors.map(x => ({ count: x.count * 3, color: x.color })) : [{ count: d.triCount, color: d.color }];
                 let at = 0;
-                for (const part of parts) {
+                for (const [index, part] of parts.entries()) {
+                    const gradient = d.layerGradients?.[index] ?? d.gradient;
+                    gl.uniform1f(gl.getUniformLocation(mesh, "u_gradient"), gradient ? 1 : 0);
+                    if (gradient) {
+                        const top = hexRgb01(gradient.top), bottom = hexRgb01(gradient.bottom);
+                        gl.uniform3f(gl.getUniformLocation(mesh, "u_top"), top[0], top[1], top[2]);
+                        gl.uniform3f(gl.getUniformLocation(mesh, "u_bottom"), bottom[0], bottom[1], bottom[2]);
+                        gl.uniform1f(gl.getUniformLocation(mesh, "u_zMin"), d.zMin);
+                        gl.uniform1f(gl.getUniformLocation(mesh, "u_zMax"), d.zMax);
+                        gl.uniform1f(gl.getUniformLocation(mesh, "u_boundary"), gradient.position / 100);
+                        gl.uniform1f(gl.getUniformLocation(mesh, "u_fadeWidth"), gradient.fade_width / 100);
+                        gl.uniform1f(gl.getUniformLocation(mesh, "u_abrupt"), gradient.transition === "abrupt" ? 1 : 0);
+                    }
                     const hex = part.color && /^#[0-9a-f]{6}$/i.test(part.color) ? part.color : null;
                     const base = voids ? VOID_COLOR : hex
-                        ? [parseInt(hex.slice(1, 3), 16) / 255, parseInt(hex.slice(3, 5), 16) / 255, parseInt(hex.slice(5, 7), 16) / 255]
+                        ? hexRgb01(hex)
                         : MATERIAL_COLOR[d.material ?? ""] ?? FALLBACK_COLOR;
                     gl.uniform3f(gl.getUniformLocation(mesh, "u_color"), base[0], base[1], base[2]);
                     gl.drawArrays(gl.TRIANGLES, at, part.count);
