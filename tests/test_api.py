@@ -209,6 +209,27 @@ class Reports(ServerCase):
 
 
 class ModifierPreview(ServerCase):
+    def test_face_references_and_subdivision_preview_keep_project_unchanged(self):
+        api = self.api
+        api.post("/api/project/new", {"name": "Face preview", "unit": "mm"})
+        level = api.get("/api/project/tree")["levels"][0]["id"]
+        wall = api.cmd("model.add_wall", {"level": level, "start": [0, 0],
+                                         "end": [5000, 0], "height": 3,
+                                         "thickness": 250})["result"]["id"]
+        listing = api.get(f"/api/modifier/faces/{wall}")
+        self.assertEqual(len(listing["faces"]), 6)
+        front = next(fid for fid, info in listing["faces"].items()
+                     if info["axis"] == 1 and info["sign"] == -1)
+        revision = self.app.require().revision
+        preview = api.post("/api/modifier/preview", {"kind": "model", "id": wall,
+                           "operation": "face_subdivide", "face_id": front,
+                           "policy": "exact", "parameters": {"rows": 2, "columns": 3}})
+        self.assertEqual(preview["revision"], revision)
+        self.assertEqual(len(preview["result"]["diagnostics"]["subface_ids"]), 6)
+        self.assertGreater(len(preview["after"]["faces"]), len(preview["before"]["faces"]))
+        self.assertEqual(self.app.require().revision, revision)
+        self.assertFalse(self.app.require().model.modifiers())
+
     def test_host_preview_is_read_only_and_apply_can_create_an_independent_copy(self):
         api = self.api
         api.post("/api/project/new", {"name": "Preview", "unit": "mm"})

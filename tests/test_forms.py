@@ -475,6 +475,53 @@ class NativeModifierCommands(unittest.TestCase):
         return ([min(v[i] for v in obj["vertices"]) for i in range(3)],
                 [max(v[i] for v in obj["vertices"]) for i in range(3)])
 
+    def test_host_preserving_face_subdivision_extrusion_bevel_and_undo(self):
+        level = self.p.manifest["levels"][0]["id"]
+        wall = self.execute("model.add_wall", level=level, start=[0, 0],
+                            end=[5000, 0], height=3, thickness=250)["id"]
+        before = self.p.model.get(wall)
+        front = next(fid for fid, info in self.p.model.face_references(wall).items()
+                     if info["axis"] == 1 and info["sign"] == -1)
+        self.execute("model.modifier", id=wall, operation="face_subdivide", face_id=front,
+                     policy="exact", parameters={"rows": 2, "columns": 3})
+        cells = [fid for fid, info in self.p.model.face_references(wall).items()
+                 if info["parent"] == front]
+        self.assertEqual(len(cells), 6)
+        self.execute("model.modifier", id=wall, operation="face_extrude", face_id=cells[0],
+                     parameters={"depth": .1, "mode": "add", "direction": "normal"})
+        self.execute("model.modifier", id=wall, operation="face_bevel", face_id=cells[0],
+                     parameters={"depth": .03, "width": .05, "edge": "u_min", "mode": "inline"})
+        self.assertEqual(self.p.model.get(wall), before)
+        self.assertEqual(len(self.p.model.modifiers()), 3)
+        self.assertEqual(len(self.p.model.face_references(wall)), 12)
+        with __import__("tempfile").TemporaryDirectory() as tmp:
+            path = __import__("pathlib").Path(tmp) / "face-modifiers.spadra"
+            self.p.save(path)
+            reopened = Project.open(path)
+            self.assertEqual(len(reopened.model.modifiers()), 3)
+            self.assertEqual(len(reopened.model.face_references(wall)), 12)
+        self.p.undo()
+        self.assertEqual(len(self.p.model.modifiers()), 2)
+        self.p.undo()
+        self.p.undo()
+        self.assertFalse(self.p.model.modifiers())
+        self.assertEqual(self.p.model.get(wall), before)
+
+    def test_bim_face_modifier_rejects_extrusion_beyond_host_thickness(self):
+        level = self.p.manifest["levels"][0]["id"]
+        wall = self.execute("model.add_wall", level=level, start=[0, 0],
+                            end=[5000, 0], height=3, thickness=250)["id"]
+        # The wall end face spans 5 m along the wall; BIM limits still use the
+        # wall's 0.25 m construction thickness rather than the end-face width.
+        end = next(fid for fid, info in self.p.model.face_references(wall).items()
+                   if info["axis"] == 0 and info["sign"] == 1)
+        revision = self.p.revision
+        with self.assertRaises(Exception):
+            self.execute("model.modifier", id=wall, operation="face_extrude", face_id=end,
+                         parameters={"depth": .3, "mode": "add", "direction": "normal"})
+        self.assertEqual(self.p.revision, revision)
+        self.assertEqual(self.p.model.modifiers(), [])
+
     def test_exact_analytic_split_changes_view_not_authoritative_sgeo(self):
         source = self.generic_box()
         raw_geometry = self.p.model.get(source)["geometry"]
