@@ -131,16 +131,17 @@ describe("void cutting control in a browser", () => {
     assert.ok(Math.abs(volumeOf(await floor()) - 5.8) < 1e-6, "cut again");
   });
 
-  it("Selected Targets cuts only what is chosen, and a Beam it reaches is reported as not cut", async () => {
+  it("Selected Targets cuts only what is chosen, and a Beam it reaches is cut by the 3D Boolean", async () => {
     await cmd("model.add_beam", { level, start: [500, 1500], end: [5500, 1500], top: 2.5 });
     await page.reload(); await settle();
     await page.getByRole("button", { name: "3D", exact: true }).click(); await settle();
     await page.getByLabel("Search the project").fill("Void"); await settle();
     await page.getByRole("treeitem", { name: "Void", exact: true }).first().click(); await settle();
     await page.getByLabel("Search the project").fill(""); await settle();
-    await page.getByText(/1 cut, 1 not supported/).waitFor();
-    assert.ok((await rowsOf(voidId)).all.some((r) => /^Beam/.test(r.label) && /^Not cut: cutting a structural is not supported/.test(String(r.value))), "the beam is reported, not cut");
-    assert.ok(JSON.stringify(await api("/check")).includes("not supported"), "the model check names the uncut beam");
+    // With the 3D Boolean backend (trimesh + manifold3d) installed the beam is cut as well as the floor; without it the beam would be reported "not supported".
+    await page.getByText(/2 cut, 0 not supported/).waitFor();
+    assert.ok((await rowsOf(voidId)).all.some((r) => /^Beam/.test(r.label) && /^Cut:/.test(String(r.value))), "the beam is cut by the 3D Boolean");
+    assert.ok(!JSON.stringify(await api("/check")).includes("not supported"), "nothing the void reaches is left uncut, so the model check has nothing to name");
     await page.getByLabel("Cutting policy", { exact: true }).selectOption("targets"); await settle();
     const floor = async () => (await ofCategory("floor"))[0];
     assert.ok(Math.abs(volumeOf(await floor()) - 6.0) < 1e-6, "no target is chosen yet");

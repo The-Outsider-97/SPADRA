@@ -133,7 +133,7 @@ export class ModelView {
       this.railButton("home", "Home view", () => { this.home(); }),
       this.railButton("search", "Zoom to selection", () => { this.zoomSelection(); }),
       this.railButton("pan", "Pan (hold the right mouse button, or toggle here)", (b) => { this.panMode = !this.panMode; b.setAttribute("aria-pressed", String(this.panMode)); }),
-      this.orbitButton = this.railButton("orbit", "Orbit around the selected element (turn off to orbit around the point in the middle of the view)", () => { this.store.setOrbitSelection(!this.store.orbitSelection); }),
+      this.orbitButton = this.railButton("orbit", "Orbit around the selected element (turn off to orbit around the point in the middle of the view)", () => { this.store.setOrbitSelection(!this.store.orbitSelection); this.orbitButton?.setAttribute("aria-pressed", String(this.store.orbitSelection)); }),
       this.railButton("fit", "Zoom to fit the whole model", () => { this.fit(); }));
     const unavailable = h("div", { class: "view-unavailable", hidden: !!this.gl, text: "3D view needs WebGL 2, which this browser does not provide. The model, properties and exports still work." });
     this.contextAnchor.style.cssText = "position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;padding:0;border:0";

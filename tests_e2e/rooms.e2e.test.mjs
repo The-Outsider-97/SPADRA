@@ -117,7 +117,7 @@ describe("rooms and columns", () => {
 
   it("changes a room's height in Properties and the volume follows; undo puts it back", async () => {
     const [studio] = (await model("room")).filter((r) => r.name === "Studio");
-    const field = page.getByRole("spinbutton", { name: /Height/ }).first();
+    const field = page.getByRole("textbox", { name: /^Height\b/ }).first();     // Properties number fields are text inputs (they accept =formulas), so their role is textbox
     await field.fill("3.5"); await field.press("Enter"); await settle();
     assert.equal(rowOf(await props(studio.id), "Volume").value, "84.000 m³ (area × height)");
     await page.keyboard.press("Control+z"); await settle();

@@ -167,6 +167,9 @@ describe("walls at an angle in a browser", () => {
     const selected = await canvas.evaluate((el) => el.spadraView.store.selection);
     assert.equal(selected.kind, "model");
     assert.deepEqual(new Set(selected.ids), new Set(d.model.filter((v) => v.category === "wall").map((v) => v.id)));
+    // On a slow frame the second click can land on the length label that the first click's selection brings up and open "Wall length": close it so it cannot
+    // leak into the next test.
+    for (let i = 0; i < 3 && await page.locator("dialog[open]").count(); i++) { await page.keyboard.press("Escape"); await settle(); }
   });
 
   it("requires Enter to commit a dimension; double-click alone cannot finalize", async () => {

@@ -331,7 +331,7 @@ table.schedule tfoot td { font-weight: 700; border-top: 2px solid var(--ink); bo
 
 /* The grid size beside it ("Grid = 10.0 mm"); clicking it sets the spacing. The world axes are red (X) and green (Y), as in 3ds Max. */
 :root { --axis-x: #d9483b; --axis-y: #3aa655; }
-.statusbar .grid-size { color: var(--accent); background: none; border: 0; font: inherit; font-variant-numeric: tabular-nums; cursor: pointer; padding: .1rem .35rem; border-radius: 4px; }
+.statusbar .grid-size { color: var(--accent-ink); background: none; border: 0; font: inherit; font-variant-numeric: tabular-nums; cursor: pointer; padding: .1rem .35rem; border-radius: 4px; }
 .statusbar .grid-size:hover { background: var(--accent-soft); }
 
 /* NL-SfB code rows in Properties: the field with the name of the code under it. */

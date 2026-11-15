@@ -108,7 +108,8 @@ describe("project properties, backups and recovery", () => {
     const first = await api("/project/properties");
     assert.deepEqual(first.backups, []);
     await cmd("model.add_wall", { start: [0, 0], end: [4000, 0], level, thickness: 200, height: 3 });
-    await menu("Save");
+    await page.reload(); await settle();                                                                             // the page learns of the API-made edit: a Save from a stale revision is refused (409) by design
+    await menu("Save"); await settle();
     const second = await api("/project/properties");
     assert.equal(second.backups.length, 1);
     await menu("Project properties…");
