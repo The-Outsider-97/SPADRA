@@ -895,6 +895,16 @@ def verify_sheet_export(app: SpadraApp, req: Request) -> Any:
         return SH.verify_sldc(project, data, req.params["sheet"])
 
 
+@router.route("GET", "/api/modifier/faces/{id}")
+def modifier_faces(app: SpadraApp, req: Request) -> Any:
+    """Expose evaluated stable SGEO face references for the existing Modifier UI."""
+    with app.lock:
+        project = app.require()
+        oid = text(req.params["id"], "element ID", 80)
+        project.model.get(oid)
+        return {"revision": project.revision, "faces": project.model.face_references(oid)}
+
+
 @router.route("POST", "/api/modifier/preview")
 def modifier_preview(app: SpadraApp, req: Request) -> Any:
     """Read-only native modifier preview evaluated on the project's scratch copy.

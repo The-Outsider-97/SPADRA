@@ -307,7 +307,8 @@ export function modifierDialog(store, operation) {
     }
     const is3d = selection.kind === "model";
     const drawingId = selection.kind === "drawing" ? selection.view : null;
-    if ((operation === "weld" || operation === "subdivision" || operation === "split") && !is3d) {
+    const faceOperation = operation === "face_subdivide" || operation === "face_extrude" || operation === "face_bevel";
+    if ((operation === "weld" || operation === "subdivision" || operation === "split" || faceOperation) && !is3d) {
         toast(`${operation} is available for SGEO geometry only.`, { kind: "info" });
         return;
     }
@@ -327,6 +328,16 @@ export function modifierDialog(store, operation) {
         return field;
     };
     const source = selection.ids[0];
+    const faceSelect = faceOperation ? choice("Face / subface", [["", "Loading selectable faces…"]]) : null;
+    const rows = operation === "face_subdivide" ? number("Rows", "2", "1") : null;
+    const columns = operation === "face_subdivide" ? number("Columns", "3", "1") : null;
+    const faceDepth = operation === "face_extrude" || operation === "face_bevel" ? number("Depth (m)", "0.05") : null;
+    const faceMode = operation === "face_extrude" ? choice("Extrusion method", [["add", "Add material"], ["recess", "Recess / remove material"]]) : null;
+    const faceDirection = operation === "face_extrude" ? choice("Orientation relative to face", [["normal", "Outward normal"], ["reverse", "Reverse normal"]]) : null;
+    const faceWidth = operation === "face_bevel" ? number("Inline chamfer width (m)", "0.05") : null;
+    const faceEdge = operation === "face_bevel" ? choice("Face boundary to bevel", [["u_min", "U start"], ["u_max", "U end"], ["v_min", "V start"], ["v_max", "V end"]]) : null;
+    if (faceMode && faceDirection)
+        faceMode.addEventListener("change", () => { faceDirection.value = faceMode.value === "recess" ? "reverse" : "normal"; });
     let operand = selection.ids[1] ?? "";
     let mode = null;
     if (operation === "boolean") {
@@ -353,16 +364,18 @@ export function modifierDialog(store, operation) {
         ? choice("Evaluation policy", [["tolerance_controlled", "Validated tolerance-controlled"], ["exact", "Exact (only when supported)"], ["display_only", "Display-grade approximation"]]) : null;
     if (policy)
         policy.value = defaultPolicy;
-    const note = h("p", { class: "muted", text: is3d
-            ? operation === "weld" || operation === "subdivision"
-                ? "Mesh baking requires independent geometry. Family instances can instead use non-destructive modifiers, or a separate editable copy."
-                : "Generic parametric family instances keep their family link and formulas under native modifiers. BIM hosts require a separate editable copy to preserve native constraints."
-            : "A native SDRW evaluation is committed as drawing geometry and can be undone." });
+    const note = h("p", { class: "muted", text: faceOperation
+            ? "Non-destructive SGEO face modifier. Works on analytic boxes and recognized inclined box prisms; trimmed/curved topology is refused. The BIM element retains its identity and native parameters."
+            : is3d
+                ? operation === "weld" || operation === "subdivision"
+                    ? "Mesh baking requires independent geometry. Family instances can instead use non-destructive modifiers, or a separate editable copy."
+                    : "Generic parametric family instances keep their family link and formulas under native modifiers. BIM hosts require a separate editable copy to preserve native constraints."
+                : "A native SDRW evaluation is committed as drawing geometry and can be undone." });
     box.append(note);
     const independentCopy = is3d ? h("input", { type: "checkbox", attrs: {
             "aria-label": "Create independent editable copy"
         } }) : null;
-    if (independentCopy)
+    if (independentCopy && !faceOperation)
         box.append(labelled("Create independent editable copy (original BIM element and family remain unchanged)", independentCopy));
     const visual = s("svg", { attrs: { viewBox: "0 0 300 200", role: "img", "aria-label": "Computed modifier geometry preview" },
         css: { width: "100%", height: "200px", border: "1px solid var(--hairline)", background: "var(--surface)", borderRadius: "10px" } });
@@ -445,6 +458,15 @@ export function modifierDialog(store, operation) {
             case "subdivision":
                 parameters = { max_edge: finite(maxEdge) };
                 break;
+            case "face_subdivide":
+                parameters = { rows: finite(rows), columns: finite(columns) };
+                break;
+            case "face_extrude":
+                parameters = { depth: finite(faceDepth), mode: faceMode?.value, direction: faceDirection?.value };
+                break;
+            case "face_bevel":
+                parameters = { depth: finite(faceDepth), width: finite(faceWidth), edge: faceEdge?.value, mode: "inline" };
+                break;
             case "bend":
                 parameters = { axis: axis?.value, start: finite(start), end: finite(end),
                     angle: finite(angle) * Math.PI / 180, segments: finite(segmentCount) };
@@ -457,7 +479,9 @@ export function modifierDialog(store, operation) {
         const values = Object.values(parameters).flatMap(v => Array.isArray(v) ? v : [v]);
         if (values.some(v => typeof v === "number" && !Number.isFinite(v)))
             return null;
-        return { operation, id: source, ...(operand ? { operand } : {}), parameters,
+        if (faceOperation && !faceSelect?.value)
+            return null;
+        return { operation, id: source, ...(faceSelect ? { face_id: faceSelect.value } : {}), ...(operand ? { operand } : {}), parameters,
             ...(policy ? { policy: policy.value } : {}),
             ...(independentCopy?.checked ? { independent_copy: true } : {}),
             ...(drawingId ? { drawing: drawingId } : {}) };
@@ -543,7 +567,24 @@ export function modifierDialog(store, operation) {
                     return true;
                 } }],
     });
-    void updatePreview();
+    if (faceSelect) {
+        void store.api.get(`/modifier/faces/${encodeURIComponent(source)}`).then((data) => {
+            if (data.revision !== store.project?.revision)
+                throw new Error("The project changed; reopen the modifier dialog.");
+            const entries = Object.entries(data.faces);
+            faceSelect.replaceChildren(...entries.map(([id, face]) => h("option", { value: id,
+                text: face.parent ? `Subface ${id.slice(0, 8)} (parent ${face.parent.slice(0, 8)})` :
+                    `${["X", "Y", "Z"][face.axis] ?? "?"}${face.sign > 0 ? "+" : "−"} face · thickness ${face.physical_thickness.toFixed(3)} m` })));
+            if (!entries.length) {
+                faceSelect.append(h("option", { value: "", text: "No compatible planar faces available" }));
+                status.textContent = "This element does not have recognized box/affine-box face topology.";
+            }
+            else
+                void updatePreview();
+        }).catch((error) => { status.textContent = `Could not load face references: ${error instanceof Error ? error.message : String(error)}`; });
+    }
+    else
+        void updatePreview();
     void handle.result.then(() => { serial++; if (timeout)
         clearTimeout(timeout); });
 }

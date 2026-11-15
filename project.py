@@ -2246,8 +2246,10 @@ class _Commands:
         reserved for independent non-family objects.
         """
         operation = choice_of(p.get("operation"),
-                              ("boolean", "chamfer", "bend", "split", "weld", "subdivision"),
+                              ("boolean", "chamfer", "bend", "split", "weld", "subdivision",
+                               "face_subdivide", "face_extrude", "face_bevel"),
                               "modifier")
+        face_operation = operation in {"face_subdivide", "face_extrude", "face_bevel"}
         oid = text(p.get("id"), "id", 80)
         source = project.model.get(oid)
         meta = source.get("metadata", {})
@@ -2257,7 +2259,7 @@ class _Commands:
         # Family instances have native, parameter-generated SGEO geometry.
         # They do not lose their family link when a modifier DAG is layered
         # over that geometry; only destructive baking would break that link.
-        if cat not in (None, "generic", "extrusion", "sweep") and not p.get("independent_copy", False):
+        if cat not in (None, "generic", "extrusion", "sweep") and not face_operation and not p.get("independent_copy", False):
             raise BadRequest("This BIM host has construction or attachment semantics",
                              hint="Edit its native parameters or enable 'Create independent editable copy' to apply modifiers without changing the BIM family or host.")
         if source.get("geometry") is None:
@@ -2266,6 +2268,8 @@ class _Commands:
         independent_copy = p.get("independent_copy", False)
         if type(independent_copy) is not bool:
             raise BadRequest("Independent copy must be true or false")
+        if face_operation and independent_copy:
+            raise BadRequest("Face modifiers keep their BIM host; an independent copy would invalidate the selected face reference")
         if independent_copy:
             # Explicit, reversible conversion in this same Project transaction.
             # The original BIM object/family and its host relationships are NOT
@@ -2294,6 +2298,24 @@ class _Commands:
         parameters = p.get("parameters")
         if not isinstance(parameters, dict):
             raise BadRequest("Modifier parameters must be an object")
+        target_subelement = None
+        if face_operation:
+            face_id = text(p.get("face_id"), "face ID", 80)
+            faces = project.model.face_references(oid)
+            face = faces.get(face_id)
+            if face is None:
+                raise BadRequest("The selected face is missing or its topology is unsupported",
+                                 hint="Select a current planar face from the face list. Arbitrary trimmed/curved meshes are not yet supported.")
+            target_subelement = {"kind": "face", "id": face_id}
+            if operation != "face_subdivide":
+                # Do not trust a client-supplied thickness limit. The kernel
+                # independently checks the local physical face thickness.
+                limit = float(face["physical_thickness"])
+                if cat in {"wall", "floor", "roof"}:
+                    nominal = E.m(meta, "thickness")
+                    if isinstance(nominal, (int, float)) and nominal > 0:
+                        limit = min(limit, float(nominal))
+                parameters = {**parameters, "thickness_limit": limit}
         if operation in ("weld", "subdivision"):
             from src.utils.spatial_formats.sgeo.meshing import weld_vertices
             from src.utils.spatial_formats.sgeo.modifier_ops import _subdivide_conforming
@@ -2332,7 +2354,8 @@ class _Commands:
             evaluation_policy["absolute"] = 1e-6
         mid = project.model.add_modifier(oid, kind="sgeo." + operation,
                                          operands=operands, parameters=parameters,
-                                         evaluation_policy=evaluation_policy)
+                                         evaluation_policy=evaluation_policy,
+                                         target_subelement=target_subelement)
         result = next(item for item in project.model.evaluate_modifiers() if item["modifier_id"] == mid)
         if result["status"] != "ok" or not result["result"] or result["result"].get("geometry") is None:
             raise BadRequest("The modifier produced empty geometry; no change was committed")

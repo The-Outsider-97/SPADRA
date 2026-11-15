@@ -436,7 +436,8 @@ export class Shell {
         const onDrawing = kind === "drawing" && !store.drawing?.projection;
         const modelPick = kind === "3d" && models.length === 1;
         const twoPicked = kind === "3d" ? models.length >= 2 : onDrawing && drawings.length >= 2;
-        const choose = (op: "boolean" | "chamfer" | "weld" | "subdivision" | "bend" | "split") => () => modifierDialog(store, op);
+        const choose = (op: "boolean" | "chamfer" | "weld" | "subdivision" | "bend" | "split" |
+          "face_subdivide" | "face_extrude" | "face_bevel") => () => modifierDialog(store, op);
         return [
           [T("boolean", "Boolean", "boolean", !!store.project && twoPicked, { run: choose("boolean"),
             note: "Select source then operand; Union, Subtract or Intersection through the native SGEO/SDRW evaluator" }),
@@ -449,6 +450,12 @@ export class Shell {
              note: "Weld exact or near-coincident vertices of an independent triangle mesh" }),
            T("subdivision", "Subdivision", "subdivision", modelPick, { run: choose("subdivision"),
              note: "Conforming adaptive edge splitting on an independent mesh" })],
+          [T("subdivide-face", "Subdivide Face", "subdivision", modelPick, { run: choose("face_subdivide"),
+             note: "Split a selectable planar face into persistent rows × columns for later modifiers" }),
+           T("extrude-face", "Extrude Face", "extrude", modelPick, { run: choose("face_extrude"),
+             note: "Add or recess material from a selected face, constrained by actual host thickness" }),
+           T("bevel-face", "Bevel Face", "chamfer", modelPick, { run: choose("face_bevel"),
+             note: "Inline straight chamfer along one edge of a selected face or subface" })],
           [T("bend", "Bend", "bend", modelPick || (onDrawing && drawings.length === 1), { run: choose("bend"),
              note: "Controlled nonlinear deformation around an axis and span" })],
           [T("array", "Array", "array", !!store.project, { run: () => arrayDialog(store),
