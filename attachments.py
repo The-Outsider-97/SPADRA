@@ -191,25 +191,37 @@ def roof_surface(project: Any, oid: str, frame: Mapping[str, Any] | None = None,
     cx, cy = fr["mid"]
     co, si = math.cos(fr["angle"]), math.sin(fr["angle"])
     base, offset = float(fr["base"]), float(target.get("offset", 0.0))
-    reach = float(fr["thickness"]) / 2 + 1e-6
+    lean = math.radians(float(fr.get("lean_angle", 0.0)))
+    sec, tan = 1 / math.cos(lean), math.tan(lean)
+    reach = float(fr["thickness"]) * sec / 2 + 1e-6
 
     def height(x: float, y: float) -> float:
-        wx, wy = cx + co * x - si * y, cy + si * x + co * y
-        located = [(i, plane) for i, (ring, plane) in enumerate(facets) if _inside(ring, wx, wy)]
-        if not located:
-            nearest = min(((_distance_to_outline(ring, wx, wy), i, plane) for i, (ring, plane) in enumerate(facets)), key=lambda q: (q[0], q[1]))
-            if nearest[0] > reach:
-                raise BadRequest("A face of the wall extends beyond the roof footprint; the roof cannot provide a continuous attachment",
-                                 hint="Increase the roof overhang, move the wall under the roof, or choose another attachment face")
-            plane = nearest[2]
-        else:
-            plane = located[0][1]
-        return plane[0] * wx + plane[1] * wy + plane[2] - base + offset
+        candidates = []
+        for i, (ring, plane) in enumerate(facets):
+            a, b, c = plane
+            across = -a * si + b * co
+            denominator = 1 - across * tan
+            if abs(denominator) < 1e-9:
+                continue                                     # nearly parallel inclined wall/roof: no finite intersection
+            z = (a * (cx + co * x - si * y * sec) + b * (cy + si * x + co * y * sec) + c - base + offset) / denominator
+            wx, wy = cx + co * x - si * (y * sec + z * tan), cy + si * x + co * (y * sec + z * tan)
+            distance = _distance_to_outline(ring, wx, wy)
+            candidates.append((distance, i, z))
+            if distance < 1e-7:
+                return z
+        if not candidates:
+            raise BadRequest("This inclined wall is parallel to the roof underside; a finite attachment is impossible")
+        distance, _, z = min(candidates)
+        if distance > reach:
+            raise BadRequest("A face of the wall extends beyond the roof footprint; the roof cannot provide a continuous attachment",
+                             hint="Increase the roof overhang, move the wall under the roof, or choose another attachment face")
+        return z
 
     return height
 
 
-def roof_breaks(project: Any, oid: str, faces: Sequence[float], frame: Mapping[str, Any] | None = None) -> list[float]:
+def roof_breaks(project: Any, oid: str, faces: Sequence[float], frame: Mapping[str, Any] | None = None,
+                top_to: Mapping[str, Any] | None = None) -> list[float]:
     """Roof facet boundary locations along given material-layer faces, in wall-local metres.
 
     Splitting the top mesh at the crossings on both faces exposes any oblique
@@ -217,7 +229,7 @@ def roof_breaks(project: Any, oid: str, faces: Sequence[float], frame: Mapping[s
     one plane. This shares the same roof facets as the height evaluator.
     """
     meta = E.meta_of(project, oid)
-    target = attachment(meta)
+    target = top_to or attachment(meta)
     if not target or target["kind"] != "roof":
         return []
     roof_id = str(target["roof"])
@@ -230,12 +242,67 @@ def roof_breaks(project: Any, oid: str, faces: Sequence[float], frame: Mapping[s
     start, end = fr["start"], fr["end"]
     c, s = math.cos(fr["angle"]), math.sin(fr["angle"])
     facets = E.roof_facets(project, E.meta_of(project, roof_id))
+    lean = math.radians(float(fr.get("lean_angle", 0.0)))
+    sec, tangent = 1 / math.cos(lean), math.tan(lean)
+    cx, cy = fr["mid"]
+    base, offset = fr["base"], float(target.get("offset", 0.0))
     out: set[float] = set()
     for y in faces:
-        a, b = (start[0] - s * y, start[1] + c * y), (end[0] - s * y, end[1] + c * y)
-        for ring, _ in facets:
+        for ring, (pa, pb, pc) in facets:
+            if abs(lean) < 1e-12:
+                a, b = (start[0] - s * y, start[1] + c * y), (end[0] - s * y, end[1] + c * y)
+            else:
+                denom = 1 - (-pa * s + pb * c) * tangent
+                if abs(denom) < 1e-9:
+                    continue
+                def point(x: float) -> tuple[float, float]:
+                    z = (pa * (cx + c * x - s * y * sec) + pb * (cy + s * x + c * y * sec) + pc - base + offset) / denom
+                    effective = y * sec + z * tangent
+                    return cx + c * x - s * effective, cy + s * x + c * effective
+                a, b = point(-length / 2), point(length / 2)
             out.update(round(t * length - length / 2, 9) for t in _crossings(ring, a, b) if 1e-9 < t < 1 - 1e-9)
     return sorted(out)
+
+
+def roof_width_breaks(project: Any, oid: str, frame: Mapping[str, Any] | None = None,
+                      top_to: Mapping[str, Any] | None = None) -> list[float]:
+    """Roof-facet boundaries across the *width* of an inclined wall.
+
+    A ridge parallel to a wall cannot be discovered by longitudinal cuts.
+    Project roof-facet edges through the inverse wall-lean map at their true
+    underside elevation; the resulting transverse stations let SGEO split
+    the top cap exactly where its roof plane changes.
+    """
+    meta = E.meta_of(project, oid)
+    target = top_to or attachment(meta)
+    if not target or target["kind"] != "roof" or not E.alive(project, str(target["roof"])):
+        return []
+    fr = E.wall_frame(project, oid) if frame is None else frame
+    lean = math.radians(float(fr.get("lean_angle", 0.0)))
+    co, si = math.cos(fr["angle"]), math.sin(fr["angle"])
+    cx, cy = fr["mid"]
+    half_l, half_w = fr["length"] / 2, fr["thickness"] / 2
+    sec, tangent = 1 / math.cos(lean), math.tan(lean)
+    base, offset = fr["base"], float(target.get("offset", 0.0))
+    found: set[float] = set()
+    for ring, (a, b, c) in E.roof_facets(project, E.meta_of(project, str(target["roof"]))):
+        local: list[tuple[float, float]] = []
+        for wx, wy in ring:
+            dx, dy = wx - cx, wy - cy
+            z = a * wx + b * wy + c - base + offset
+            local.append((co * dx + si * dy, (-si * dx + co * dy - z * tangent) / sec))
+        for (x0, y0), (x1, y1) in zip(local, (*local[1:], local[0])):
+            if -half_w + 1e-8 < y0 < half_w - 1e-8 and -half_l - 1e-8 <= x0 <= half_l + 1e-8:
+                found.add(round(y0, 10))
+            for along in (-half_l, 0.0, half_l):
+                if abs(x1 - x0) < 1e-12:
+                    continue
+                t = (along - x0) / (x1 - x0)
+                if 0 <= t <= 1:
+                    y = y0 + t * (y1 - y0)
+                    if -half_w + 1e-8 < y < half_w - 1e-8:
+                        found.add(round(y, 10))
+    return sorted(found)
 
 
 def roof_line(project: Any, start: tuple[float, float], end: tuple[float, float], roof_meta: Mapping[str, Any]) -> list[tuple[float, float]]:
@@ -308,25 +375,34 @@ def derive(project: Any, oid: str, top_to: Mapping[str, Any]) -> tuple[float, li
     start, end = tuple(E.m(meta, "start")), tuple(E.m(meta, "end"))
     if E.m(meta, "category") == "curtainwall":
         return _derive_curtainwall(project, meta, start, end, base, offset, E.meta_of(project, roof))
-    pts = _simplified([(s, z - base + offset) for s, z in roof_line(project, start, end, E.meta_of(project, roof))])
-    low, high = min(h for _, h in pts), max(h for _, h in pts)
-    # The two exposed faces of a wall can meet the underside at different
-    # heights. Centre-line extrema alone leave a wedge of gap or penetration.
     fr = E.wall_frame(project, oid)
     surface = roof_surface(project, oid, fr, top_to)
     if surface is None:
         raise BadRequest("The roof attachment target is unavailable")
+    if abs(fr.get("lean_angle", 0.0)) > 1e-12:
+        # An inclined wall's top trace lives at its *intersection* with the
+        # roof, not above its unshifted plan reference line.
+        stations = [0.0, fr["length"], *(q + fr["length"] / 2 for q in roof_breaks(project, oid, (0.0,), fr, top_to))]
+        pts = _simplified([(s, surface(s - fr["length"] / 2, 0.0)) for s in sorted(set(stations))])
+    else:
+        pts = _simplified([(s, z - base + offset) for s, z in roof_line(project, start, end, E.meta_of(project, roof))])
+    low, high = min(h for _, h in pts), max(h for _, h in pts)
+    # The two exposed faces of a wall can meet the underside at different
+    # heights. Centre-line extrema alone leave a wedge of gap or penetration.
     length, half = fr["length"], fr["thickness"] / 2
     facets = E.roof_facets(project, E.meta_of(project, roof))
     co, si = math.cos(fr["angle"]), math.sin(fr["angle"])
     for y in (-half, half):
-        a = (start[0] - si * y, start[1] + co * y)
-        b = (end[0] - si * y, end[1] + co * y)
-        positions = {0.0, 1.0}
-        for ring, _ in facets:
-            positions.update(_crossings(ring, a, b))
-        for t in positions:
-            h = surface(length * (t - 0.5), y)
+        if abs(fr.get("lean_angle", 0.0)) > 1e-12:
+            positions = {-length / 2, length / 2, *roof_breaks(project, oid, (y,), fr, top_to)}
+        else:
+            a = (start[0] - si * y, start[1] + co * y)
+            b = (end[0] - si * y, end[1] + co * y)
+            positions = {-length / 2, length / 2}
+            for ring, _ in facets:
+                positions.update(length * (t - .5) for t in _crossings(ring, a, b))
+        for x in positions:
+            h = surface(x, y)
             low, high = min(low, h), max(high, h)
     if low < MIN_HEIGHT:
         raise BadRequest(f"The roof comes down to {low + base - offset:.3f} m under this wall, which is {max(low, 0.0) * 1000:.0f} mm above its base: no wall can reach it",
@@ -467,19 +543,31 @@ def detach_base(project: Any, ids: Sequence[str]) -> dict[str, Any]:
 
 
 def attach_to_roof(project: Any, ids: Sequence[str], roof: str | None = None, offset_mm: Any = 0) -> dict[str, Any]:
-    """Attach the top of each wall in ``ids`` to a roof. ``roof`` may be left out when the ids hold exactly one roof."""
+    """Attach one or more walls, resolving a roof automatically when unambiguous."""
     ids = list(dict.fromkeys(ids))
     roofs = [i for i in ids if E.alive(project, i) and E.m(E.meta_of(project, i), "category") == "roof"]
-    if roof is None:
-        if len(roofs) != 1:
-            raise BadRequest("Select the walls and one roof to attach them to" if not roofs else "More than one roof is selected: say which one the walls attach to")
-        roof = roofs[0]
-    elif not E.alive(project, roof) or E.m(E.meta_of(project, roof), "category") != "roof":
-        raise BadRequest(f"{roof} is not a roof")
     walls = _walls(project, ids)
     if not walls:
         raise BadRequest("Select at least one wall or curtain wall to attach to the roof")
     offset = number(offset_mm, "offset", -100000, 100000) / 1000.0
+    if roof is None:
+        if len(roofs) > 1:
+            raise BadRequest("More than one roof is selected: choose the roof to attach to")
+        if len(roofs) == 1:
+            roof = roofs[0]
+        else:
+            candidates = []
+            for rid in project.model.query_ids(metadata={f"{E.NS}:category": "roof"}, limit=10000):
+                if all(_can_attach_to_roof(project, oid, rid, offset) for oid in walls):
+                    candidates.append(rid)
+            if not candidates:
+                raise BadRequest("No roof above the selected walls provides a valid attachment surface",
+                                 hint="Draw a roof over the walls or select a roof explicitly")
+            if len(candidates) > 1:
+                raise BadRequest("Several roofs can cover these walls; select the intended roof explicitly")
+            roof = candidates[0]
+    elif not E.alive(project, roof) or E.m(E.meta_of(project, roof), "category") != "roof":
+        raise BadRequest(f"{roof} is not a roof")
     for oid in walls:
         meta = E.meta_of(project, oid)
         prior = attachment(meta)
@@ -490,6 +578,18 @@ def attach_to_roof(project: Any, ids: Sequence[str], roof: str | None = None, of
         refresh(project, oid)
         E.regenerate(project, oid)
     return {"walls": walls, "roof": roof}
+
+
+def _can_attach_to_roof(project: Any, wall: str, roof: str, offset: float) -> bool:
+    """A read-only candidate check; no speculative geometry edits or cut stacks."""
+    try:
+        meta = E.meta_of(project, wall)
+        prior = attachment(meta)
+        free = float(prior["free_height"]) if prior and prior.get("free_height") else float(E.m(meta, "height"))
+        derive(project, wall, {"kind": "roof", "roof": roof, "offset": offset, "free_height": free})
+        return True
+    except (BadRequest, NotFound):
+        return False
 
 
 def extend_to_level(project: Any, ids: Sequence[str], level: str | None = None, offset_mm: Any = 0) -> dict[str, Any]:

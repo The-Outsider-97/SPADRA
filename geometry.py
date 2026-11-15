@@ -522,7 +522,7 @@ def _top_at(top: Sequence[tuple[float, float]], x: float) -> float:
 def wall_mesh(length: float, thickness: float, height: float, openings: Sequence[tuple[float, float, float, float]],
               ends: WallEnds = SQUARE_ENDS, top: Sequence[tuple[float, float]] | None = None,
               top_surface: Callable[[float, float], float] | None = None,
-              top_breaks: Sequence[float] = ()) -> Mesh:
+              top_breaks: Sequence[float] = (), top_y_breaks: Sequence[float] = ()) -> Mesh:
     """A wall as a closed mesh, centred on the origin (x along the wall, y through it, z up), with rectangular openings cut through.
     Each opening is (x0, x1, z0, z1) in the same local frame. The result is the exact boundary of the box minus the openings.
     ``ends`` slants the two end faces for a joint: ((start +y face, start -y face), (end +y face, end -y face)), each the distance that
@@ -545,8 +545,32 @@ def wall_mesh(length: float, thickness: float, height: float, openings: Sequence
     # separate x partition would split an oblique roof crease in the wrong place.
     kinks = [min(hx, max(-hx, q[0])) for q in top] if top and top_surface is None else []
     kinks += [min(hx, max(-hx, float(x))) for x in top_breaks]
-    xs = sorted({-hx, hx, *(min(hx, max(-hx, v)) for o in openings for v in (o[0], o[1])), *kinks})
-    zs = sorted({-hz, hz, *(min(hz, max(-hz, v)) for o in openings for v in (o[2], o[3]))})
+    def stations(values: Sequence[float]) -> list[float]:
+        """Merge numerically indistinguishable cuts before making triangles.
+
+        Clipping against multiple roof planes can produce stations separated by
+        floating-point noise. Their zero-area strips were previously passed to
+        SGEO, whose topology validator correctly rejects them. Retain the
+        outermost exact endpoints while folding interior stations to a single
+        representative within a 1 nm model-space tolerance.
+        """
+        ordered = sorted(values)
+        merged = [ordered[0]]
+        for v_ in ordered[1:]:
+            if v_ - merged[-1] > 1e-9:
+                merged.append(v_)
+            elif v_ == ordered[-1]:
+                merged[-1] = v_                 # never move the wall's exact far end or top inward
+        return merged
+    xs = stations([-hx, hx, *(min(hx, max(-hx, v)) for o in openings for v in (o[0], o[1])), *kinks])
+    zs = stations([-hz, hz, *(min(hz, max(-hz, v)) for o in openings for v in (o[2], o[3]))])
+    # Roof ridges parallel to the wall run through its thickness without
+    # crossing an x station. Subdivide the transverse roof cap and matching
+    # end/bottom faces at those exact facet boundaries, including y=0 for
+    # older attachment meshes. Every face shares the same stations so the
+    # result remains a closed manifold without T-junctions.
+    ys = stations([-hy, hy, *(min(hy, max(-hy, y)) for y in (0.0, *top_y_breaks))]) if top_surface is not None else [-hy, hy]
+    y_ranges = list(zip(ys, ys[1:]))
     if top:
         floor_ = min(_top_at(top, x) for x in xs)
         if top_surface is not None:
@@ -584,30 +608,21 @@ def wall_mesh(length: float, thickness: float, height: float, openings: Sequence
         q = [a, b, c, d][::-1] if flip else [a, b, c, d]
         faces.extend(([q[0], q[1], q[2]], [q[0], q[2], q[3]]))
 
-    def roof_end(a: int, b: int, c: int, middle: int, e: int, flip: bool) -> None:
-        """A top midpoint keeps the end face conforming to the divided roof cap."""
-        tris = [[a, b, middle], [b, c, middle], [a, middle, e]]
-        faces.extend([list(reversed(t)) if flip else t for t in tris])
-
     for i, k in sorted(occupied):
         x0, x1, z0, z1 = xs[i], xs[i + 1], zs[k], zs[k + 1]
         roof_cap = top_surface is not None and abs(z1 - zs[-1]) < EPS and (i, k + 1) not in occupied
         quad(v(x0, -hy, z0), v(x1, -hy, z0), v(x1, -hy, z1), v(x0, -hy, z1), False)           # face towards -y
         quad(v(x0, hy, z0), v(x1, hy, z0), v(x1, hy, z1), v(x0, hy, z1), True)                # face towards +y
         if (i - 1, k) not in occupied:
-            if roof_cap:
-                roof_end(v(x0, -hy, z0), v(x0, hy, z0), v(x0, hy, z1), v(x0, 0.0, z1), v(x0, -hy, z1), True)
-            else:
-                quad(v(x0, -hy, z0), v(x0, hy, z0), v(x0, hy, z1), v(x0, -hy, z1), True)      # face towards -x
+            for ya, yb in y_ranges:
+                quad(v(x0, ya, z0), v(x0, yb, z0), v(x0, yb, z1), v(x0, ya, z1), True)      # face towards -x
         if (i + 1, k) not in occupied:
-            if roof_cap:
-                roof_end(v(x1, -hy, z0), v(x1, hy, z0), v(x1, hy, z1), v(x1, 0.0, z1), v(x1, -hy, z1), False)
-            else:
-                quad(v(x1, -hy, z0), v(x1, hy, z0), v(x1, hy, z1), v(x1, -hy, z1), False)    # face towards +x
+            for ya, yb in y_ranges:
+                quad(v(x1, ya, z0), v(x1, yb, z0), v(x1, yb, z1), v(x1, ya, z1), False)   # face towards +x
         if (i, k - 1) not in occupied:
-            quad(v(x0, -hy, z0), v(x1, -hy, z0), v(x1, hy, z0), v(x0, hy, z0), True)          # face towards -z
+            for ya, yb in y_ranges:
+                quad(v(x0, ya, z0), v(x1, ya, z0), v(x1, yb, z0), v(x0, yb, z0), True)    # face towards -z
         if (i, k + 1) not in occupied:
-            y_ranges = ((-hy, 0.0), (0.0, hy)) if roof_cap else ((-hy, hy),)
             for ya, yb in y_ranges:
                 before = len(faces)
                 corners = (v(x0, ya, z1), v(x1, ya, z1), v(x1, yb, z1), v(x0, yb, z1))

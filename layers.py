@@ -384,10 +384,14 @@ def wall_mesh(project: Any, oid: str, frame: Mapping[str, Any], every: Sequence[
             surface_i = (lambda x, y: top_surface(x + cx, y + y_left - t / 2) + top - height / 2 - cz) if top_surface is not None else None
             if surface_i is not None:
                 from . import attachments as AT
-                breaks = [x - cx for x in AT.roof_breaks(project, oid, (y_left, (y_left + y_right) / 2, y_right), frame)]
+                width_breaks = [y - (y_left - t / 2) for y in AT.roof_width_breaks(project, oid, frame)
+                                if y_right + 1e-9 < y < y_left - 1e-9]
+                breaks = [x - cx for x in AT.roof_breaks(project, oid, (y_left, (y_left + y_right) / 2, y_right,
+                                                                          *(y + y_left - t / 2 for y in width_breaks)), frame)]
             else:
                 breaks = []
-            v, f = G.wall_mesh(len_i, t, h_i, local, ends, top_i, surface_i, breaks)
+                width_breaks = []
+            v, f = G.wall_mesh(len_i, t, h_i, local, ends, top_i, surface_i, breaks, width_breaks)
         except G.GeometryError as exc:
             raise BadRequest(f"Layer '{lay['name']}': {exc}") from exc
         base = len(verts)

@@ -754,7 +754,7 @@ def add_foundation(project: Any, p: Mapping[str, Any], to_m: float) -> str:
     support = [text(s, "support", 80) for s in (p.get("support") or [])] if kind in ("poer", "strook", "funderingsbalk") else []
     if p.get("support") and kind in AREAS:
         raise BadRequest("A raft or slab does not stand on a single wall or column")
-    values: dict[str, Any] = {"category": "foundation", "kind": kind, "type": KINDS[kind]["type"], "material": E._choice(p.get("material", "Concrete"), MATERIALS, "material"),
+    values: dict[str, Any] = {"category": "foundation", "kind": kind, "type": KINDS[kind]["type"], "material": E._choice(p.get("material", E.default_material(project, "foundation")), MATERIALS, "material"),
                               "support": support, "cover": number(p.get("cover", COVER_DEFAULT * 1000), "cover (mm)", 10, 150) / 1000.0,
                               "floors": E._choice(p.get("floors", "adjust"), FLOOR_POLICIES, "floors")}
     if support:

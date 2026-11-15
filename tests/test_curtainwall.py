@@ -59,6 +59,13 @@ class Case(unittest.TestCase):
 
 
 class Spacing(Case):
+    def test_frame_default_uses_project_material_without_overriding_explicit_choice(self):
+        self.p.manifest["default_materials"] = {"curtainwall": "Steel"}
+        derived = self.wall()
+        self.assertEqual(self.spec(derived)["frame_material"], "Steel")
+        chosen = self.wall(start=[0, 4000], end=[6000, 4000], frame_material="Aluminium")
+        self.assertEqual(self.spec(chosen)["frame_material"], "Aluminium")
+
     def test_centre_to_centre_puts_the_remainder_where_align_says(self):
         self.assertEqual(CW.bays(5950, "centre", 1200, "start"), [1200, 1200, 1200, 1200, 1150])
         self.assertEqual(CW.bays(5950, "centre", 1200, "end"), [1150, 1200, 1200, 1200, 1200])
@@ -630,6 +637,54 @@ class Creation(Case):
         lib = self.p.curtainwall_profiles()
         self.assertEqual(lib["manufacturer"], "Stabalux")
         self.assertTrue(all("PDF page" in p["provenance"] for p in lib["profiles"]))
+
+
+class DoorThresholdOnFloor(Case):
+    def test_floor_level_door_works_with_all_join_styles(self):
+        self.cmd("model.add_floor", level=self.level,
+                 points=[[-500, -1500], [6500, -1500], [6500, 1500], [-500, 1500]])
+        for join in CW.JOINS:
+            wall = self.wall(join=join, start=[0, 0], end=[6000, 0])
+            before = sum(m["length"] for m in self.members(wall) if m["id"] == "h:bottom")
+            self.cmd("model.curtainwall_panel", id=wall, col=1, row=0, field="type", value="Door")
+            after = sum(m["length"] for m in self.members(wall) if m["id"] == "h:bottom")
+            self.assertAlmostEqual(before - after, 1.15, msg=join)
+            self.assertGreater(self.volume(wall), 0)
+
+    def test_floor_dependent_threshold_survives_save_and_reopen(self):
+        wall = self.wall(join="transoms")
+        self.cmd("model.curtainwall_panel", id=wall, col=1, row=0, field="type", value="Door")
+        floor = self.cmd("model.add_floor", level=self.level,
+                         points=[[-500, -1500], [6500, -1500], [6500, 1500], [-500, 1500]])["id"]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "threshold.spadra"
+            self.p.save(path)
+            reopened = Project.open(path)
+            self.assertEqual(E.m(E.meta_of(reopened, wall), "built_threshold"), [1])
+            self.assertAlmostEqual(sum(m["length"] for m in CW.members(reopened, E.meta_of(reopened, wall))
+                                       if m["id"] == "h:bottom"), 4.85)
+            reopened.execute("model.set_property", {"id": floor, "key": "offset", "value": 200})
+            self.assertEqual(E.m(E.meta_of(reopened, wall), "built_threshold"), [])
+
+    def test_auto_bottom_frame_is_segmented_only_when_floor_supports_door(self):
+        wall = self.wall(join="transoms")
+        self.cmd("model.curtainwall_panel", id=wall, col=1, row=0, field="type", value="Door")
+        before = sum(m["length"] for m in self.members(wall) if m["id"] == "h:bottom")
+        self.assertAlmostEqual(min(v[2] for d in self.members(wall, "door") for v in d["mesh"][0]), 0.05 + CW.GAP)
+        floor = self.cmd("model.add_floor", level=self.level, points=[[-500, -1500], [6500, -1500], [6500, 1500], [-500, 1500]])["id"]
+        after = sum(m["length"] for m in self.members(wall) if m["id"] == "h:bottom")
+        self.assertAlmostEqual(before - after, 1.15, places=6)
+        self.assertAlmostEqual(min(v[2] for d in self.members(wall, "door") for v in d["mesh"][0]), CW.GAP)
+        self.assertEqual(self.meta(wall)["spadra:built_threshold"], [1])
+        self.cmd("model.set_property", id=floor, key="offset", value=200)
+        self.assertEqual(self.meta(wall)["spadra:built_threshold"], [])
+        self.cmd("model.set_property", id=floor, key="offset", value=0)
+        self.assertEqual(self.meta(wall)["spadra:built_threshold"], [1])
+        self.cmd("model.curtainwall_panel", id=wall, col=1, row=0, field="threshold", value="keep")
+        self.assertAlmostEqual(sum(m["length"] for m in self.members(wall) if m["id"] == "h:bottom"), before)
+        self.cmd("model.curtainwall_panel", id=wall, col=1, row=0, field="threshold", value="auto")
+        self.cmd("model.curtainwall_panel", id=wall, col=1, row=0, field="type", value="Window")
+        self.assertAlmostEqual(sum(m["length"] for m in self.members(wall) if m["id"] == "h:bottom"), before)
 
 
 if __name__ == "__main__":

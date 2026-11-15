@@ -18,7 +18,7 @@ from typing import Any, Mapping, NamedTuple
 
 from ..tools.errors import BadRequest, NotFound
 from ..tools.validation import number, text
-from src.utils.spatial_formats.common.errors import SpatialFormatError # type: ignore
+from src.utils.spatial_formats.common.errors import SpatialFormatError
 
 from . import geometry as G
 from . import sfb as SF
@@ -101,7 +101,7 @@ def appearance_color(project: Any, meta: Mapping[str, Any], oid: str | None = No
         from . import foundations as FD
         material = FD.display_material(meta)
     base = m(meta, "color") or project.manifest.get("material_colors", {}).get(material) or MATERIAL_COLORS.get(material)
-    from . import parametric_properties as PP # type: ignore
+    from . import parametric_properties as PP
     rule = PP.appearance_rule(project, meta, oid)
     return rule["top"] if rule and rule["mode"] == "solid" else base
 
@@ -173,6 +173,7 @@ def wall_frame(project: Any, oid: str) -> dict[str, Any]:
     length = math.dist(start, end)
     stored = m(meta, "ends") or G.SQUARE_ENDS
     return {"start": start, "end": end, "length": length, "angle": math.atan2(end[1] - start[1], end[0] - start[0]),
+            "lean_angle": float(m(meta, "lean_angle", 0.0)) if m(meta, "lean_enabled", False) else 0.0,
             "mid": ((start[0] + end[0]) / 2, (start[1] + end[1]) / 2), "thickness": float(m(meta, "thickness")), "height": float(m(meta, "height")),
             "base": level_elevation(project, m(meta, "level")) + float(m(meta, "base_offset", 0.0)), "meta": meta,
             "top": [(float(a), float(b)) for a, b in (m(meta, "top_profile") or ())],
@@ -784,16 +785,33 @@ def _build_wall(project: Any, oid: str, table: Mapping[str, _WallRow]) -> None:
     from . import layers as LY
     LY.prune(project, oid)                                                      # openings that are gone are forgotten by the layers that named them
     roof_surface = AT.roof_surface(project, oid, f)                            # each wall face has its own underside height
+    def leaned(mesh: G.Mesh) -> G.Mesh:
+        """Incline the authoritative solid about its base reference plane.
+
+        The vertical coordinate is retained as the wall's height; scaling the
+        transverse coordinate by sec(theta) keeps thickness measured normal to
+        the inclined face. This affine map also carries cuts and layer shells.
+        """
+        theta = math.radians(f["lean_angle"])
+        if abs(theta) < 1e-12:
+            return mesh
+        sec = 1.0 / math.cos(theta)
+        tan = math.tan(theta)
+        return ([[x, y * sec + (z + height / 2) * tan, z] for x, y, z in mesh[0]], mesh[1])
     try:
         if LY.is_layered(meta_of(project, oid)):                                # one shell per layer, each with the openings it inherits
-            _set_mesh(project, oid, LY.wall_mesh(project, oid, f, every, top_surface=roof_surface),
+            _set_mesh(project, oid, leaned(LY.wall_mesh(project, oid, f, every, top_surface=roof_surface)),
                       _rot(f["angle"], f["mid"][0], f["mid"][1], f["base"] + height / 2))
         elif every or f["ends"] != G.SQUARE_ENDS or f["top"]:
             local = [(x0 - length / 2, x1 - length / 2, z0 - height / 2, z1 - height / 2) for x0, x1, z0, z1, _ in every]
             top = [(s_ - length / 2, h_ - height / 2) for s_, h_ in f["top"]] or None
             surface = (lambda x, y: roof_surface(x, y) - height / 2) if roof_surface is not None else None
-            breaks = AT.roof_breaks(project, oid, (-f["thickness"] / 2, 0.0, f["thickness"] / 2), f) if surface is not None else ()
-            _set_mesh(project, oid, G.wall_mesh(length, f["thickness"], height, local, f["ends"], top, surface, breaks),
+            width_breaks = AT.roof_width_breaks(project, oid, f) if surface is not None else ()
+            breaks = AT.roof_breaks(project, oid, (-f["thickness"] / 2, 0.0, f["thickness"] / 2, *width_breaks), f) if surface is not None else ()
+            _set_mesh(project, oid, leaned(G.wall_mesh(length, f["thickness"], height, local, f["ends"], top, surface, breaks, width_breaks)),
+                      _rot(f["angle"], f["mid"][0], f["mid"][1], f["base"] + height / 2))
+        elif abs(f["lean_angle"]) > 1e-12:
+            _set_mesh(project, oid, leaned(G.wall_mesh(length, f["thickness"], height, (), f["ends"])),
                       _rot(f["angle"], f["mid"][0], f["mid"][1], f["base"] + height / 2))
         else:
             project.model.set_geometry(oid, {"kind": "box", "center": [0.0, 0.0, 0.0], "size": [length, f["thickness"], height]})
@@ -802,6 +820,22 @@ def _build_wall(project: Any, oid: str, table: Mapping[str, _WallRow]) -> None:
         raise BadRequest(str(exc)) from exc
     for hid in (s[4] for s in spans):
         _place_opening(project, hid, f)
+        if abs(f["lean_angle"]) > 1e-12:
+            # The hosted leaf and its opening undergo the same affine map.
+            # Compose with the leaf's existing hinge transform rather than
+            # replacing its orientation or converting it to a generic solid.
+            theta = math.radians(f["lean_angle"])
+            nx, ny = -math.sin(f["angle"]), math.cos(f["angle"])
+            a = 1.0 / math.cos(theta) - 1.0
+            t = math.tan(theta)
+            mx, my, base = f["mid"][0], f["mid"][1], f["base"]
+            d = nx * mx + ny * my
+            warp = [1 + a * nx * nx, a * nx * ny, nx * t, -nx * (a * d + t * base),
+                    a * ny * nx, 1 + a * ny * ny, ny * t, -ny * (a * d + t * base),
+                    0, 0, 1, 0, 0, 0, 0, 1]
+            old = project.model.get(hid)["transform"]
+            project.model.set_transform(hid, [sum(warp[4 * row + i] * old[4 * i + col] for i in range(4))
+                                              for row in range(4) for col in range(4)])
         profile = opening_profile(project, hid)
         if profile:
             regenerate_opening_profile(project, profile)
@@ -922,8 +956,7 @@ def _section_prism(section: list[list[float]], begin: float, end: float, side: s
                    opening: Mapping[str, Any]) -> G.Mesh:
     """Extrude an SDRW cross-section along one jamb/head/sill, mapping to wall-local XYZ."""
     x0, x1, z0, z1 = opening_span(opening)
-    profile: list[tuple[float, float]] = [(float(x), float(y)) for x, y in section]
-    verts, faces = G.prism(profile, begin, end)
+    verts, faces = G.prism([tuple(q) for q in section], begin, end)
     if side == "left":
         mapped = [[x0 + s, y, t] for s, y, t in verts]
     elif side == "right":
@@ -1321,7 +1354,7 @@ def add_floor(project: Any, p: Mapping[str, Any], to_m: float) -> str:
     level = project.level(text(p.get("level"), "level", 80))
     boundary = _boundary(p.get("points"), to_m, "floor")
     thickness = number(p.get("thickness", 200), "thickness", 10, 5000) / 1000.0
-    material = _choice(p.get("material", "Concrete"), MATERIALS, "material")
+    material = _choice(p.get("material", default_material(project, "floor")), MATERIALS, "material")
     oid = project.model.add_box(width=1.0, depth=1.0, height=1.0, name=text(p.get("name") or "Floor", "name", 80))
     _attach(project, oid, {"category": "floor", "type": "Generic Floor", "level": level["id"], "boundary": boundary, "thickness": thickness, "offset": 0.0, "material": material})
     regenerate_floor(project, oid)
@@ -1333,7 +1366,7 @@ def _rectangle(boundary: list[list[float]]) -> tuple[tuple[float, float], tuple[
     """(centre, long-axis unit vector, short-axis unit vector, long length, short length) of a rectangular outline, else an error."""
     if len(boundary) != 4:
         raise BadRequest("A pitched roof needs a four-corner rectangular outline")
-    p: list[tuple[float, float]] = [(float(q[0]), float(q[1])) for q in boundary]
+    p = [tuple(q) for q in boundary]
     e = [G.sub(p[(i + 1) % 4], p[i]) for i in range(4)]
     if any(abs(G.dot(e[i], e[(i + 1) % 4])) > 1e-6 * G.norm(e[i]) * G.norm(e[(i + 1) % 4]) for i in range(4)) or abs(G.norm(e[0]) - G.norm(e[2])) > 1e-6 * G.norm(e[0]):
         raise BadRequest("A pitched roof needs a rectangular outline (right-angled corners)")
@@ -1553,7 +1586,7 @@ def normalise_roof_end(p: Mapping[str, Any], current: Mapping[str, Any] | None =
         cfg["bearing"] = _choice(p["bearing"], ("top", "face"), "bearing condition")
     elif "face" in p:
         # Older roof-end callers use "face" for the bearing condition.
-        # The canonical "bearing" key always takes precedence if both exist.
+        # The canonical "bearing" key takes precedence when both are present.
         cfg["bearing"] = _choice(p["face"], ("top", "face"), "bearing condition")
     if "layers" in p:
         cfg["layers"] = _choice(p["layers"], ROOF_END_LAYERS, "layer behaviour")
@@ -1868,9 +1901,7 @@ def roof_window_holes(project: Any, roof_id: str, roof: Mapping[str, Any], cuts:
     holes = [roof_window_frame(project, roof, meta_of(project, wid), cuts) | {"id": wid} for wid in roof_windows(project, roof_id)]
     for i, p in enumerate(holes):
         for q in holes[i + 1:]:
-            p_s0, p_s1, p_t0, p_t1 = (float(p[key]) for key in ("s0", "s1", "t0", "t1"))
-            q_s0, q_s1, q_t0, q_t1 = (float(q[key]) for key in ("s0", "s1", "t0", "t1"))
-            if p_s0 < q_s1 + ROOF_WINDOW_MARGIN and q_s0 < p_s1 + ROOF_WINDOW_MARGIN and p_t0 < q_t1 + ROOF_WINDOW_MARGIN and q_t0 < p_t1 + ROOF_WINDOW_MARGIN:
+            if p["s0"] < q["s1"] + ROOF_WINDOW_MARGIN and q["s0"] < p["s1"] + ROOF_WINDOW_MARGIN and p["t0"] < q["t1"] + ROOF_WINDOW_MARGIN and q["t0"] < p["t1"] + ROOF_WINDOW_MARGIN:
                 raise BadRequest(f"Two roof windows ({project.model.get(p['id'])['name']} and {project.model.get(q['id'])['name']}) would overlap or touch")
     return holes
 
@@ -2070,7 +2101,7 @@ def add_roof(project: Any, p: Mapping[str, Any], to_m: float) -> str:
     boundary = _boundary(p.get("points"), to_m, "roof")
     thickness = number(p.get("thickness", 200), "thickness", 10, 5000) / 1000.0
     pitch = number(p.get("pitch", 30), "pitch", 1, 80)
-    material = _choice(p.get("material", "Timber"), MATERIALS, "material")
+    material = _choice(p.get("material", default_material(project, "roof")), MATERIALS, "material")
     if kind != "flat":
         _rectangle(boundary)
     ridge_offset = number(p.get("ridge_offset", 0.0), "ridge offset (mm)", -1e6, 1e6) / 1000.0 if kind == "gable" else 0.0
@@ -2128,12 +2159,12 @@ def add_beam(project: Any, p: Mapping[str, Any], to_m: float) -> str:
     family = p.get("profile", "rect")
     values: dict[str, Any] = {"category": "structural", "type": "Beam", "level": level["id"], "start": pts[0], "end": pts[1], "top": number(p.get("top", 3.0), "top", 0.1, 500)}
     if family == "rect":
-        material = _choice(p.get("material", "Steel"), BEAM_MATERIALS, "material")
+        material = _choice(p.get("material", default_material(project, "beam")), BEAM_MATERIALS, "material")
         values.update(width=number(p.get("width", 200), "width", 10, 5000) / 1000.0, depth=number(p.get("depth", 400), "depth", 10, 5000) / 1000.0, material=material, profile="rect")
     else:
         from . import profiles as PR
         PR.check_family(family)
-        material = _choice(p.get("material", "Steel"), BEAM_MATERIALS, "material")
+        material = _choice(p.get("material", default_material(project, "beam")), BEAM_MATERIALS, "material")
         if material != "Steel":
             raise BadRequest("Rolled and tube profiles are steel: choose the Steel material, or a rectangular beam")
         size = str(p.get("size") or PR.default_size(family))
@@ -2541,7 +2572,7 @@ def add_column(project: Any, p: Mapping[str, Any], to_m: float) -> str:
     if not isinstance(q, (list, tuple)) or len(q) != 2:
         raise BadRequest("point must be [x, y]")
     point = [float(number(q[0], "x", -1e9, 1e9)) * to_m, float(number(q[1], "y", -1e9, 1e9)) * to_m]
-    material = _choice(p.get("material", "Concrete"), BEAM_MATERIALS, "material")
+    material = _choice(p.get("material", default_material(project, "structural")), BEAM_MATERIALS, "material")
     base = number(p.get("base", 0.0), "base", -100, 500)
     top = number(p.get("top", 3.0), "top", -100, 500)
     oid = project.model.add_box(width=1.0, depth=1.0, height=1.0, name=text(p.get("name") or "Column", "name", 80))
@@ -2688,7 +2719,7 @@ def set_property(project: Any, oid: str, key: str, value: Any, *, from_formula: 
     cat = m(meta, "category")
     values: dict[str, Any] = {}
     if not from_formula and isinstance(value, str):
-        from . import parametric_properties as PP # type: ignore
+        from . import parametric_properties as PP
         # Choice/text edits must not build a full Properties view merely to
         # discover that they are not formulas. Transitional assembly geometry
         # (e.g. a door being moved under a roof) may be invalid until the next
@@ -2699,14 +2730,14 @@ def set_property(project: Any, oid: str, key: str, value: Any, *, from_formula: 
                 PP.set_formula(project, oid, key, value)
                 return
     if not from_formula:
-        from . import parametric_properties as PP # type: ignore
+        from . import parametric_properties as PP
         PP.remove_formula(project, oid, key)
     if key.startswith("material_rule:"):
-        from . import parametric_properties as PP # type: ignore
+        from . import parametric_properties as PP
         PP.set_material_rule(project, oid, key.split(":", 1)[1], value)
         return
     if key.startswith(("material_layer:", "material_def:")):
-        from . import parametric_properties as PP # type: ignore
+        from . import parametric_properties as PP
         PP.set_scoped_material_rule(project, oid, key, value)
         return
     if key.startswith("corner_join:"):
@@ -2802,6 +2833,14 @@ def set_property(project: Any, oid: str, key: str, value: Any, *, from_formula: 
             if AT.is_attached(project, oid):
                 raise BadRequest("This wall's height follows what it is attached to", hint="Detach it from the roof or level first")
             values["height"] = number(value, "height", 0.01, 500)
+        elif key == "lean_angle":
+            values["lean_angle"] = number(value, "lean angle", -89, 89)
+            values["lean_enabled"] = True
+        elif key == "lean_enabled":
+            values["lean_enabled"] = value in (True, 1, "true", "1", "on")
+        elif key == "lean_direction":
+            direction = _choice(value, ("left", "right"), "lean direction")
+            values["lean_angle"] = abs(float(m(meta, "lean_angle", 0.0))) * (1 if direction == "left" else -1)
         elif key == "thickness":
             values["thickness"] = _mm(value, "thickness", 1, 5000)
         elif key == "base_offset":
@@ -3321,15 +3360,17 @@ def _rect(a: tuple[float, float], angle: float, x0: float, x1: float, half: floa
     return [[(p0[0] + nx) * f, (p0[1] + ny) * f], [(p1[0] + nx) * f, (p1[1] + ny) * f], [(p1[0] - nx) * f, (p1[1] - ny) * f], [(p0[0] - nx) * f, (p0[1] - ny) * f]]
 
 
-def _wall_piece(fr: Mapping[str, Any], x0: float, x1: float, f: float) -> list[list[float]]:
-    """The footprint of the stretch x0..x1 of a wall, with the slanted end faces of its joints where the stretch reaches an end."""
+def _wall_piece(fr: Mapping[str, Any], x0: float, x1: float, f: float, cut_height: float = 0.0) -> list[list[float]]:
+    """The wall's actual horizontal cross section at a cut height above its base."""
     (sl, sr), (el, er) = fr["ends"]
     half, length = fr["thickness"] / 2, fr["length"]
     c, s = math.cos(fr["angle"]), math.sin(fr["angle"])
     at_start, at_end = x0 <= 1e-9, x1 >= length - 1e-9
     corners = [(x0 - sl if at_start else x0, half), (x1 + el if at_end else x1, half),             # +y face: start, end
                (x1 + er if at_end else x1, -half), (x0 - sr if at_start else x0, -half)]             # -y face: end, start
-    return [[(fr["start"][0] + c * x - s * y) * f, (fr["start"][1] + s * x + c * y) * f] for x, y in corners]
+    theta = math.radians(float(fr.get("lean_angle", 0.0)))
+    return [[(fr["start"][0] + c * x - s * (y / math.cos(theta) + cut_height * math.tan(theta))) * f,
+             (fr["start"][1] + s * x + c * (y / math.cos(theta) + cut_height * math.tan(theta))) * f] for x, y in corners]
 
 
 def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | None = None, show_opening: bool = True, show_hatching: bool = True,
@@ -3452,7 +3493,7 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
             first = True
             for x0, x1 in cuts + [(fr["length"], fr["length"])]:
                 if x0 - cursor > 1e-9:
-                    piece = {"id": oid, "category": "wall", "name": obj["name"], "polygon": _wall_piece(fr, cursor, x0, f), "axis": axis,
+                    piece = {"id": oid, "category": "wall", "name": obj["name"], "polygon": _wall_piece(fr, cursor, x0, f, local_height), "axis": axis,
                              "reference": reference, "joins": list(m(meta, "joins") or ())}
                     if corner_joins:
                         piece["corner_joins"] = corner_joins
@@ -3839,7 +3880,7 @@ def properties(project: Any, oid: str, relations: bool = False) -> dict[str, Any
             {"key": "material_color", "label": f"Shared {material} color", "type": "color", "value": shared},
         ]})
     if out.get("kind") == "model" and (material or m(meta, "category") == "curtainwall"):
-        from . import parametric_properties as PP # type: ignore
+        from . import parametric_properties as PP
         out["groups"].append(PP.material_rule_group(project, meta))
         out["groups"].extend(PP.scoped_material_groups(project, oid))
     group = LY.rows(project, oid) if out.get("kind") == "model" else None
@@ -3922,7 +3963,7 @@ def solid_status(project: Any, oid: str) -> Solid:
         kind = geometry.get("kind")
         try:
             if kind == "mesh":
-                from src.utils.spatial_formats.sgeo.analysis import analyze_mesh # type: ignore
+                from src.utils.spatial_formats.sgeo.analysis import analyze_mesh
                 if not analyze_mesh(geometry).is_closed_oriented_surface:
                     raise _OpenSurface()
             result = Solid("solid", float(project.model.volume(oid, unit="m")), "")
@@ -4014,6 +4055,11 @@ def _properties(project: Any, oid: str) -> dict[str, Any]:
                 {"key": "end_x", "label": "End X", "type": "number", "unit": "mm", "value": round(end[0] * 1000, 6)},
                 {"key": "end_y", "label": "End Y", "type": "number", "unit": "mm", "value": round(end[1] * 1000, 6)},
                 {"key": "angle", "label": "Angle", "type": "number", "unit": "°", "value": round(math.degrees(fr["angle"]), 6)},
+                {"key": "lean_enabled", "label": "Lean", "type": "choice", "value": bool(m(meta, "lean_enabled", False)),
+                 "choices": [{"value": False, "label": "Off"}, {"value": True, "label": "On"}]},
+                {"key": "lean_angle", "label": "Lean angle (+ left / − right)", "type": "number", "unit": "°", "value": float(m(meta, "lean_angle", 0.0))},
+                {"key": "lean_direction", "label": "Lean direction", "type": "choice", "value": "left" if float(m(meta, "lean_angle", 0.0)) >= 0 else "right",
+                 "choices": [{"value": "left", "label": "Left of path"}, {"value": "right", "label": "Right of path"}]},
                 {"label": "Area", "type": "readonly", "value": f"{(sum((b[0] - a[0]) * (a[1] + b[1]) / 2 for a, b in zip(fr['top'], fr['top'][1:])) if fr['top'] else fr['length'] * fr['height']) - open_area:.3f} m²"},
                 volume]},
             {"title": "Placement", "rows": [
@@ -4372,21 +4418,18 @@ def check(project: Any) -> list[dict[str, str]]:
 
 
 def _issues_for(project: Any, ids: set[str]) -> list[dict[str, str]]:
-    """Project-wide consistency rules, restricted to the requested elements.
-
-    Reuse the authoritative check so scoped diagnostics cannot drift from it.
-    """
+    """Scope the authoritative whole-project consistency check to selected model elements."""
     return [finding for finding in check(project) if finding["ref"] in ids]
 
 
 def check_level(project: Any, level_id: str) -> list[dict[str, str]]:
-    """Model findings for elements assigned to this level, including deleted levels."""
+    """Consistency findings for model elements assigned to a level."""
     ids = {oid for oid in element_ids(project) if m(meta_of(project, oid), "level") == level_id}
     return _issues_for(project, ids)
 
 
 def check_roof(project: Any, roof_id: str) -> list[dict[str, str]]:
-    """Model findings for a roof and any windows hosted by it."""
+    """Consistency findings for a roof and its hosted roof windows."""
     ids = {roof_id}
     ids.update(oid for oid in element_ids(project) if
                m(meta_of(project, oid), "category") == "roof_window" and m(meta_of(project, oid), "host") == roof_id)
@@ -4394,7 +4437,7 @@ def check_roof(project: Any, roof_id: str) -> list[dict[str, str]]:
 
 
 def check_wall(project: Any, wall_id: str) -> list[dict[str, str]]:
-    """Model findings for a wall and its hosted doors and windows."""
+    """Consistency findings for a wall and its hosted doors and windows."""
     ids = {wall_id}
     ids.update(oid for oid in element_ids(project) if
                m(meta_of(project, oid), "category") in OPENINGS and m(meta_of(project, oid), "host") == wall_id)
@@ -4402,60 +4445,51 @@ def check_wall(project: Any, wall_id: str) -> list[dict[str, str]]:
 
 
 def check_opening(project: Any, opening_id: str) -> list[dict[str, str]]:
-    """Model findings for one door or window."""
     meta_of(project, opening_id)
     return _issues_for(project, {opening_id})
 
 
 def check_opening_profile(project: Any, profile_id: str) -> list[dict[str, str]]:
-    """Model findings for one door or window opening profile."""
     meta_of(project, profile_id)
     return _issues_for(project, {profile_id})
 
 
 def check_room(project: Any, room_id: str) -> list[dict[str, str]]:
-    """Model findings for one room."""
+    """Find room boundary and enclosure findings using the existing validation rules."""
     meta_of(project, room_id)
     return _issues_for(project, {room_id})
 
 
 def check_structural(project: Any, structural_id: str) -> list[dict[str, str]]:
-    """Model findings for one beam or column."""
     meta_of(project, structural_id)
     return _issues_for(project, {structural_id})
 
 
 def check_gutter(project: Any, gutter_id: str) -> list[dict[str, str]]:
-    """Model findings for one gutter."""
     meta_of(project, gutter_id)
     return _issues_for(project, {gutter_id})
 
 
 def check_drain(project: Any, drain_id: str) -> list[dict[str, str]]:
-    """Model findings for one drain."""
     meta_of(project, drain_id)
     return _issues_for(project, {drain_id})
 
 
 def check_foundation(project: Any, foundation_id: str) -> list[dict[str, str]]:
-    """Model findings for one foundation."""
     meta_of(project, foundation_id)
     return _issues_for(project, {foundation_id})
 
 
 def check_curtainwall(project: Any, curtainwall_id: str) -> list[dict[str, str]]:
-    """Model findings for one curtain wall."""
     meta_of(project, curtainwall_id)
     return _issues_for(project, {curtainwall_id})
 
 
 def check_stair(project: Any, stair_id: str) -> list[dict[str, str]]:
-    """Model findings for one stair."""
     meta_of(project, stair_id)
     return _issues_for(project, {stair_id})
 
 
 def check_generic(project: Any, generic_id: str) -> list[dict[str, str]]:
-    """Model findings for one generic element."""
     meta_of(project, generic_id)
     return _issues_for(project, {generic_id})

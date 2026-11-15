@@ -750,7 +750,7 @@ def plan_gutters(project: Any, p: Mapping[str, Any]) -> dict[str, Any]:
         thickness = number(p.get("thickness", THICKNESS_DEFAULT), "thickness", 0.2, 20) / 1000.0
         fall = number(p.get("fall", FALL_DEFAULT), "fall", 0, 200) / 1000.0
         fall_to = p.get("fall_to")
-        material = E._choice(p.get("material", "Zinc"), GUTTER_MATERIALS, "material")
+        material = E._choice(p.get("material", E.default_material(project, "gutter")), GUTTER_MATERIALS, "material")
         rainfall = number(p.get("rainfall", RAINFALL_DEFAULT), "rainfall", 0.001, 1.0)
         gap = number(p.get("gap", 0.0), "gap", 0, 500) / 1000.0
         drop = number(p.get("drop", RIM_DROP * 1000.0), "drop", 0, 500) / 1000.0
@@ -1286,7 +1286,9 @@ def add_downpipe(project: Any, p: Mapping[str, Any], to_m: float) -> str:
     bottom = number(p["bottom"], "bottom", -1000, 1000) if p.get("bottom") is not None else min(levels) + DISCHARGE_ABOVE_LOWEST_LEVEL
     oid = project.model.add_box(width=1.0, depth=1.0, height=1.0, name=text(p.get("name") or "Downpipe", "name", 80))
     E._attach(project, oid, {"category": "downpipe", "type": "Round Downpipe", "level": E.m(g["meta"], "level"), "gutter": gid, "offset": offset,
-                             "diameter": diameter, "bottom": bottom, "wall": PIPE_WALL / 1000.0, "material": E.m(g["meta"], "material", "Zinc"),
+                             "diameter": diameter, "bottom": bottom, "wall": PIPE_WALL / 1000.0,
+                             "material": E._choice(p.get("material") or (project.manifest.get("default_materials") or {}).get("downpipe")
+                                                   or E.m(g["meta"], "material") or E.default_material(project, "downpipe"), GUTTER_MATERIALS, "material"),
                              "components": [{"id": "c1", "kind": "pipe", "auto": True}]})
     try:
         regenerate_downpipe(project, oid)

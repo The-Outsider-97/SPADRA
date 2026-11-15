@@ -1,7 +1,7 @@
 /** The application shell: title bar, menu tabs, ribbon, document tabs, panels, status bar and the model-check toast. */
 import { h, replace } from "../../../tools/web/src/dom.js";
 import { glyph } from "../../../tools/web/src/icons.js";
-import { promptDialog, saveBlob, toast } from "../../../tools/web/src/ui.js";
+import { openDialog, promptDialog, saveBlob, toast } from "../../../tools/web/src/ui.js";
 import { openMenu } from "./menus.js";
 import { Browser, iconFor } from "./browser.js";
 import { beamAnalysisDialog } from "./engineering.js";
@@ -120,11 +120,19 @@ export class Shell {
         window.addEventListener("beforeunload", (e) => { if (store.project?.dirty) {
             e.preventDefault();
         } });
+        store.startAutosave();
         this.render();
     }
     // ---------------------------------------------------------------------------------------------------------- commands
     async save() { if (store.project && (await store.save()))
         toast("Project saved.", { kind: "ok", timeoutMs: 2500 }); }
+    autosaveDialog() {
+        const intervals = [0, 5, 10, 15, 30, 60];
+        const select = h("select", { attrs: { "aria-label": "Autosave interval" } }, ...intervals.map((minutes) => h("option", { value: String(minutes), text: minutes ? `Every ${minutes} minutes` : "Off", selected: minutes === store.autosaveMinutes })));
+        openDialog({ title: "Automatic saving", size: "narrow", body: h("div", {}, h("label", { text: "Save changes automatically", attrs: { for: "spadra-autosave-setting" } }), select, h("p", { class: "note", text: "SPADRA only saves when there are changes, using the existing project backups. The setting is remembered on this device." })),
+            actions: [{ label: "Apply", kind: "primary", run: () => { store.setAutosaveMinutes(Number(select.value)); return true; } }] });
+        select.id = "spadra-autosave-setting";
+    }
     async saveAs() {
         if (!store.project)
             return;
@@ -414,6 +422,7 @@ export class Shell {
             { label: "Open project…", icon: "folder", run: () => { void openProjectDialog(store); } },
             { label: "Save", icon: "save", disabled: !has, run: () => { void this.save(); } },
             { label: "Save As…", icon: "save", disabled: !has, run: () => { void this.saveAs(); } },
+            { label: `Autosave: ${store.autosaveMinutes ? `${store.autosaveMinutes} min` : "Off"}…`, icon: "clock", run: () => this.autosaveDialog() },
             { label: "Close project", icon: "close", disabled: !has, run: () => { void this.closeProject(); } },
             "separator",
             { label: "Keyboard shortcuts…", icon: "info", run: () => shortcutsDialog(keymap, () => this.render()) },
@@ -660,7 +669,7 @@ export class Shell {
     renderTitle() {
         const p = store.project;
         const switcher = h("button", { class: "project-switch", type: "button", attrs: { "aria-label": "Project menu" }, on: { click: () => this.fileMenu(switcher) } }, h("span", { text: p?.name ?? "No project" }), glyph("chevron-down"));
-        replace(this.title, h("div", { class: "brand" }, h("img", { attrs: { src: "/assets/img/spadra_main.png", alt: "" } }), h("span", { text: "SPADRA" })), switcher, p ? h("div", { class: "save-state", data: { dirty: String(p.dirty) }, attrs: { title: p.path ? `Saved to ${p.path}` : "Not saved yet" } }, glyph("cloud"), h("span", { text: p.dirty ? "Unsaved changes" : p.path ? "Saved" : "Not saved" })) : null, h("div", { class: "spacer" }));
+        replace(this.title, h("div", { class: "brand" }, h("img", { attrs: { src: "/assets/img/spadra_main.png", alt: "" } }), h("span", { text: "SPADRA" })), switcher, p ? h("div", { class: "save-state", data: { dirty: String(p.dirty) }, attrs: { title: p.path ? `Saved to ${p.path}${p.last_saved ? ` · Last saved ${new Date(p.last_saved).toLocaleString()}` : ""}` : "Not saved yet" } }, glyph("cloud"), h("span", { text: p.dirty ? "Unsaved changes" : p.path ? "Saved" : "Not saved" })) : null, h("div", { class: "spacer" }));
     }
     renderMenubar() {
         replace(this.menubar, MENUS.map((m) => {

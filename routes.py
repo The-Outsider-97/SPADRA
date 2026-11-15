@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..tools.errors import BadRequest, NotFound
+from ..tools.errors import BadRequest, Conflict, NotFound
 from ..tools.server import Request, Response, Router, created, file_response
 from ..tools.validation import boolean, choice, integer, text
 from .app import SpadraApp
@@ -51,6 +51,11 @@ def project_open(app: SpadraApp, req: Request) -> Any:
 def project_save(app: SpadraApp, req: Request) -> Any:
     body = req.json()
     with app.lock:
+        expected = integer(body["expected_revision"], "expected_revision", 0, 2**31) if body.get("expected_revision") is not None else None
+        current = app.require()
+        if expected is not None and current.revision != expected:
+            raise Conflict(f"The project changed (now revision {current.revision}; save requested for {expected})",
+                           hint="Refresh the project before saving the latest state")
         result = app.save_project(text(body["path"], "path", 1024) if body.get("path") else None,
                                   text(body["name"], "name", 80) if body.get("name") else None,
                                   save_as=boolean(body.get("save_as", False), "save_as"))

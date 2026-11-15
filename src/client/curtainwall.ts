@@ -67,7 +67,7 @@ export async function curtainWallDialog(store: Store, from: { start?: Pt; end?: 
   const vMode = sel(MODES, "centre"), hMode = sel(MODES, "centre");
   const vValue = num("1200", "any", "0"), hValue = num("2100", "any", "0");
   const vAlign = sel(ALIGNS, "start"), hAlign = sel(ALIGNS, "start");
-  const material = strs(FRAME_MATERIALS, "Aluminium");
+  const material = strs(FRAME_MATERIALS, store.project.default_materials.curtainwall ?? "Aluminium");
   const profile = h("select", {});
   const fwidth = num("50", "1", "10"), fdepth = num("90", "1", "10"), radius = num("0", "0.5", "0");
   const join = sel(JOINS, "mullions");
@@ -101,7 +101,7 @@ export async function curtainWallDialog(store: Store, from: { start?: Pt; end?: 
     source.textContent = p ? p.provenance : "Custom size entered by hand: it carries no catalogue source.";
   };
   const defaults: Record<string, string> = { Aluminium: "stabalux-al5090", Steel: "stabalux-sr5090-2", Timber: "stabalux-h-60" };
-  fillProfiles(defaults.Aluminium);
+  fillProfiles(defaults[material.value]);
   applyProfile();
   modeHints();
 

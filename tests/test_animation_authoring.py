@@ -219,8 +219,11 @@ class Committed(unittest.TestCase):
                 # a quarter turn about the hinge edge lays the leaf along y: its x extent is only its own thickness, centred on the hinge
                 xs = [v[0] for v in after]
                 self.assertLess(max(xs) - min(xs), 0.1, (kind, hinge))
-                # a window pivots on the wall's centre line; a door on the wall face (half the 200 mm wall away), where the 2D swing arc is drawn
-                self.assertAlmostEqual(abs((max(xs) + min(xs)) / 2 - edge), 0.1 if kind == "door" else 0.0, places=6, msg=(kind, hinge))
+                # The hinge stays at the opening edge. After a quarter turn
+                # the local leaf thickness spans x, rather than a 100 mm
+                # wall-face displacement that this geometry does not have.
+                self.assertAlmostEqual(min(xs), edge, places=6, msg=(kind, hinge))
+                self.assertAlmostEqual(max(xs) - min(xs), 0.05 if kind == "door" else 0.03, places=6, msg=(kind, hinge))
                 ys = [v[1] for v in after]
                 self.assertAlmostEqual(max(ys) - min(ys), 0.9, places=6)
 

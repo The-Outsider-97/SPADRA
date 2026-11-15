@@ -79,6 +79,9 @@ export async function gutterDialog(store) {
     const fall = number("3", "0.5", "0");
     const fallTo = h("select", {}, ...FALLS.map(([v, l]) => h("option", { value: v, text: l })));
     const material = h("select", {}, ...MATERIALS.map((m) => h("option", { value: m, text: m })));
+    const defaultGutterMaterial = store.project.default_materials.gutter;
+    if (defaultGutterMaterial && MATERIALS.includes(defaultGutterMaterial))
+        material.value = defaultGutterMaterial;
     const gap = number("0", "5", "0"), drop = number("20", "5", "0");
     const extStart = number("0", "10"), extEnd = number("0", "10");
     const endKinds = () => h("select", {}, h("option", { value: "cap", text: "Closed with a stop end" }), h("option", { value: "open", text: "Open" }));
