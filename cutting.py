@@ -37,13 +37,19 @@ def settings(meta: Mapping[str, Any]) -> dict[str, Any]:
     """A void's cutting settings. A void made before they existed cuts everything it can."""
     enabled = E.m(meta, "cut_enabled")
     return {"enabled": True if enabled is None else bool(enabled), "policy": E.m(meta, "cut_policy") or "automatic",
-            "targets": list(E.m(meta, "cut_targets") or []), "host": E.m(meta, "cut_host") or None}
+            "targets": list(E.m(meta, "cut_targets") or []), "host": E.m(meta, "cut_host") or None,
+            "excluded": list(E.m(meta, "cut_excluded") or []),
+            "excluded_categories": list(E.m(meta, "cut_excluded_categories") or [])}
 
 
-def applies(v: Mapping[str, Any], oid: str) -> tuple[bool, str]:
+def applies(v: Mapping[str, Any], oid: str, category: str | None = None) -> tuple[bool, str]:
     """Whether the void acts on this element, and if not, why."""
     if not v["enabled"]:
         return False, "Cut Intersecting Geometry is disabled on this void"
+    if oid in v.get("excluded", ()):
+        return False, "this element is explicitly excluded from the void cut"
+    if category in v.get("excluded_categories", ()):
+        return False, f"the {category} category is explicitly excluded from the void cut"
     policy = v["policy"]
     if policy == "automatic":
         return True, ""
@@ -84,6 +90,26 @@ def set_property(project: Any, vid: str, meta: Mapping[str, Any], key: str, valu
         if oid not in now["targets"]:
             raise BadRequest(f"{oid} is not a target of this void")
         return {"cut_targets": [t for t in now["targets"] if t != oid]}
+    if key == "exclude_add":
+        oid = _element(project, value, "excluded element")
+        if oid == vid:
+            raise BadRequest("A void cannot exclude itself")
+        return {"cut_excluded": [*now["excluded"], oid] if oid not in now["excluded"] else now["excluded"]}
+    if key == "exclude_remove":
+        oid = text(value, "excluded element", 80)
+        if oid not in now["excluded"]:
+            raise BadRequest(f"{oid} is not excluded from this void")
+        return {"cut_excluded": [t for t in now["excluded"] if t != oid]}
+    if key in ("exclude_category_add", "exclude_category_remove"):
+        cat = text(value, "excluded category", 80)
+        if key == "exclude_category_add":
+            categories = {E.category(project, i) for i in E.element_ids(project)} - set(NEVER_HIT)
+            if cat not in categories:
+                raise BadRequest(f"'{cat}' is not an eligible category in this project")
+            return {"cut_excluded_categories": [*now["excluded_categories"], cat] if cat not in now["excluded_categories"] else now["excluded_categories"]}
+        if cat not in now["excluded_categories"]:
+            raise BadRequest(f"'{cat}' is not excluded from this void")
+        return {"cut_excluded_categories": [c for c in now["excluded_categories"] if c != cat]}
     if key == "host":
         if value in (None, ""):
             return {"cut_host": None}
@@ -104,6 +130,18 @@ def creation_values(project: Any, p: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(p["targets"], list):
             raise BadRequest("targets must be a list of element ids")
         out["cut_targets"] = list(dict.fromkeys(_element(project, t, "target") for t in p["targets"]))
+    if p.get("excluded") is not None:
+        if not isinstance(p["excluded"], list):
+            raise BadRequest("excluded must be a list of element ids")
+        out["cut_excluded"] = list(dict.fromkeys(_element(project, t, "excluded element") for t in p["excluded"]))
+    if p.get("excluded_categories") is not None:
+        if not isinstance(p["excluded_categories"], list):
+            raise BadRequest("excluded_categories must be a list of category names")
+        cats = {E.category(project, i) for i in E.element_ids(project)} - set(NEVER_HIT)
+        names = [text(t, "excluded category", 80) for t in p["excluded_categories"]]
+        if any(c not in cats for c in names):
+            raise BadRequest("excluded_categories contains an unsupported category")
+        out["cut_excluded_categories"] = list(dict.fromkeys(names))
     return out
 
 
@@ -276,7 +314,7 @@ def classify(project: Any, vid: str) -> list[dict[str, Any]]:
         if cat in NEVER_HIT or oid == vid:
             continue
         name = project.model.get(oid)["name"] or str(cat).title()
-        yes, why = applies(v, oid)
+        yes, why = applies(v, oid, cat)
         if cat in CUTTABLE:
             try:
                 _, notes, cuts = FX._cuts(project, oid, [v], policy=False)
@@ -301,8 +339,8 @@ def classify(project: Any, vid: str) -> list[dict[str, Any]]:
 
 
 def stale(project: Any, v: Mapping[str, Any]) -> list[str]:
-    """Selected targets or a host that no longer exist."""
-    ids = [*v["targets"], *([v["host"]] if v["host"] else [])]
+    """Selected targets, excluded elements or a host that no longer exist."""
+    ids = [*v["targets"], *v.get("excluded", []), *([v["host"]] if v["host"] else [])]
     return [i for i in ids if not E.alive(project, i)]
 
 

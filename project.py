@@ -960,7 +960,8 @@ class Project:
         if not E.alive(self, void) or E.category(self, void) != "void":
             raise NotFound(f"Void {void} does not exist")
         v = next(x for x in FX.voids(self) if x["id"] == void)
-        return {"void": void, "settings": {"enabled": v["enabled"], "policy": v["policy"], "targets": v["targets"], "host": v["host"]},
+        return {"void": void, "settings": {"enabled": v["enabled"], "policy": v["policy"], "targets": v["targets"], "host": v["host"],
+                                              "excluded": v["excluded"], "excluded_categories": v["excluded_categories"]},
                 "elements": CU.classify(self, void), "missing": CU.stale(self, v)}
 
     def preview_roof_end(self, params: Mapping[str, Any]) -> dict[str, Any]:

@@ -1058,7 +1058,7 @@ export class ModelView {
       }
     };
     paintSolids(false);
-    if (this.drawables.some((d) => d.category === "void")) {                       // a void is drawn see-through, over the solids it cuts
+    if (!this.clean && this.drawables.some((d) => d.category === "void")) {        // construction cutters appear only while editing, never in snapshots or exported frames
       gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false);
       paintSolids(true);
       gl.depthMask(true); gl.disable(gl.BLEND);
@@ -1068,6 +1068,7 @@ export class ModelView {
     gl.useProgram(line);
     gl.enableVertexAttribArray(aPos);
     for (const d of this.drawables) {
+      if (this.clean && d.category === "void") continue;
       const c = ids.has(d.id) ? select : ink;
       gl.uniform4f(uColor, c[0], c[1], c[2], 1);
       gl.bindBuffer(gl.ARRAY_BUFFER, d.edge);

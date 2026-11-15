@@ -63,13 +63,15 @@ class Switch(Case):
     def test_a_void_made_before_the_settings_existed_cuts_everything_it_can(self):
         f = self.floor()
         v = self.void()
-        self.assertEqual(CU.settings(self.meta(v)), {"enabled": True, "policy": "automatic", "targets": [], "host": None})
+        self.assertEqual(CU.settings(self.meta(v)), {"enabled": True, "policy": "automatic", "targets": [], "host": None,
+                                                     "excluded": [], "excluded_categories": []})
         self.assertAlmostEqual(self.vol(f), 5.8, places=9)
 
     def test_the_settings_can_be_given_when_the_void_is_made(self):
         f = self.floor()
         v = self.void(cut_policy="targets", targets=[f])
-        self.assertEqual(CU.settings(self.meta(v)), {"enabled": True, "policy": "targets", "targets": [f], "host": None})
+        self.assertEqual(CU.settings(self.meta(v)), {"enabled": True, "policy": "targets", "targets": [f], "host": None,
+                                                     "excluded": [], "excluded_categories": []})
         self.assertAlmostEqual(self.vol(f), 5.8, places=9)
         off = self.void([[3000, 1000], [4000, 1000], [4000, 2000], [3000, 2000]], cut_enabled=False)
         self.assertAlmostEqual(self.vol(f), 5.8, places=9)                         # the second void is made off
@@ -143,9 +145,61 @@ class Policies(Case):
         with tempfile.TemporaryDirectory() as tmp:
             self.p.save(Path(tmp) / "c.spadra")
             q = Project.open(Path(tmp) / "c.spadra")
-            self.assertEqual(CU.settings(q.model.get(v)["metadata"]), {"enabled": True, "policy": "targets", "targets": [self.a], "host": None})
+            self.assertEqual(CU.settings(q.model.get(v)["metadata"]), {"enabled": True, "policy": "targets", "targets": [self.a], "host": None,
+                                                                      "excluded": [], "excluded_categories": []})
             self.assertAlmostEqual(q.model.volume(self.a, unit="m"), 2.95, places=9)
             self.assertAlmostEqual(q.model.volume(self.b, unit="m"), 3.0, places=9)
+
+
+class Exclusions(Case):
+    def test_excluding_one_intersected_floor_preserves_the_other(self):
+        a = self.floor(0, 3000)
+        b = self.floor(3000, 3000)
+        v = self.void([[2500, 1000], [3500, 1000], [3500, 2000], [2500, 2000]])
+        # The default policy reaches both floors; each receives a notch.
+        before = [self.vol(a), self.vol(b)]
+        self.assertLess(before[0], 3.0)
+        self.assertLess(before[1], 3.0)
+        self.set(v, "exclude_add", a)
+        self.assertAlmostEqual(self.vol(a), 3.0)
+        self.assertAlmostEqual(self.vol(b), before[1])
+        rows = {r["id"]: r for r in CU.classify(self.p, v)}
+        self.assertEqual(rows[a]["state"], "excluded")
+        self.assertEqual(rows[b]["state"], "cut")
+        self.set(v, "exclude_remove", a)
+        self.assertAlmostEqual(self.vol(a), before[0])
+        self.p.undo()
+        self.assertAlmostEqual(self.vol(a), 3.0)
+
+    def test_category_exclusion_applies_to_new_elements_and_can_be_removed(self):
+        a = self.floor()
+        v = self.void()
+        self.assertAlmostEqual(self.vol(a), 5.8)
+        self.set(v, "exclude_category_add", "floor")
+        self.assertAlmostEqual(self.vol(a), 6.0)
+        b = self.floor(8000)
+        self.assertAlmostEqual(self.vol(b), 6.0)
+        self.set(v, "exclude_category_remove", "floor")
+        self.assertAlmostEqual(self.vol(a), 5.8)
+        self.assertAlmostEqual(self.vol(b), 6.0)  # outside the void
+
+    def test_exclusions_are_persistent_and_validated(self):
+        a = self.floor()
+        v = self.void(excluded=[a], excluded_categories=["floor"])
+        self.assertAlmostEqual(self.vol(a), 6.0)
+        self.assertEqual(CU.settings(self.meta(v))["excluded"], [a])
+        for key, value in (("exclude_add", "unknown"), ("exclude_add", v),
+                           ("exclude_remove", "unknown"), ("exclude_category_add", "unknown"),
+                           ("exclude_category_remove", "roof")):
+            with self.assertRaises(Exception, msg=key):
+                self.set(v, key, value)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "void-exclusions.spadra"
+            self.p.save(path)
+            reopened = Project.open(path)
+            self.assertEqual(CU.settings(reopened.model.get(v)["metadata"])["excluded"], [a])
+            self.assertEqual(CU.settings(reopened.model.get(v)["metadata"])["excluded_categories"], ["floor"])
+            self.assertAlmostEqual(reopened.model.volume(a, unit="m"), 6.0)
 
 
 class Classification(Case):

@@ -1,6 +1,6 @@
 {
  "format": 1,
- "built": "2026-11-15T11:52:16+00:00",
+ "built": "2026-11-15T13:11:41+00:00",
  "files": {
   "SPADRA/src/client/agents_ui.ts": "e63795bb2c41d32e4241d17fede3a63daee05ac2d86df6b6ae288c06402a39b1",
   "SPADRA/src/client/animation_export.ts": "42457bbe2f09d4ef8419360a7cbdc274fc61e84f778b5fb0b4ce68b3f9f5c998",
@@ -41,7 +41,7 @@
   "SPADRA/src/client/timeline.ts": "8f9304e610e878d082bef4f9e9d0a7c586a043f86ab70dfa97ce5b3af64c2941",
   "SPADRA/src/client/types.ts": "ea322c36e2e967725cbb805ae469c8edbb72245b239b56de1d42bef24e71fc1f",
   "SPADRA/src/client/view2d.ts": "0c70301e28fc044802e8575c8fda6ab3cd73bd7282c3e2dfa7e29f1f275ef5c8",
-  "SPADRA/src/client/view3d.ts": "85bf42e4c13e68e0eb0e23b3663620f4fcee1f1dc7cf823ccf723469737fd2e2",
+  "SPADRA/src/client/view3d.ts": "487640e00298666bc9454660e45f6b845bb4387d528ec139c83c549cf249fac2",
   "SPADRA/src/client/zip.ts": "cbb77e1cd42d4c31cd6f1348e50c2cb395c311e567ff21c65034ac78af4190bc",
   "SPADRA/tsconfig.build.json": "02849ba3aef67e236135e698148d7e24f6ea4bb21dc86b4243b3f9e7806faf93",
   "tools/tsconfig.json": "309bf1ceb2061eb8d4891b77e21fc980b7a58dcc1c73600ba632c7e5520cf354",

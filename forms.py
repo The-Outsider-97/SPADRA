@@ -266,11 +266,11 @@ def _cuts(project: Any, oid: str, vs: Sequence[Mapping[str, Any]], policy: bool 
     """(what the voids cut in this element as comparable numbers, notes for voids that touch it but cut nothing, the cuts themselves). For a wall the numbers
     are its opening spans; for a floor or extrusion they are ``[holes, new outline or []]`` and the cuts are a ``SlabCut``. Only the voids whose
     cutting settings apply to this element are considered, unless ``policy`` is false (the classification asks what a void *would* do)."""
-    if policy:
-        vs = [v for v in vs if CU.applies(v, oid)[0]]
     obj = project.model.get(oid)
     meta, label = obj["metadata"], obj["name"] or str(E.m(obj["metadata"], "category")).title()
     cat = E.m(meta, "category")
+    if policy:
+        vs = [v for v in vs if CU.applies(v, oid, cat)[0]]
     if cat == "wall":
         spans, notes = wall_spans(vs, E.wall_frame(project, oid), label)
         return [_round(s[:4]) for s in spans], notes, spans
@@ -741,7 +741,8 @@ def set_property(project: Any, oid: str, meta: Mapping[str, Any], key: str, valu
         return {"level": project.level(text(value, "level", 80))["id"]}
     if key == "base":
         return {"base": number(value, "base", -500, 500)}
-    if cat == "void" and key in ("cut_enabled", "cut_policy", "target_add", "target_remove", "host"):
+    if cat == "void" and key in ("cut_enabled", "cut_policy", "target_add", "target_remove", "host",
+                                 "exclude_add", "exclude_remove", "exclude_category_add", "exclude_category_remove"):
         return CU.set_property(project, oid, meta, key, value)
     if key == "form" and cat in ("extrusion", "void"):
         make_void(project, oid, value == "Void") if (value == "Void") != (cat == "void") else None
@@ -832,6 +833,23 @@ def _cutting_rows(project: Any, vid: str, meta: Mapping[str, Any]) -> list[dict[
                          "choices": [{"value": "", "label": "Choose a target…"}, *({"value": t, "label": project.model.get(t)["name"] if E.alive(project, t) else f"{t} (deleted)"} for t in s["targets"])]})
     elif s["policy"] == "hosted":
         rows.append({"key": "host", "label": "Host element", "type": "choice", "value": s["host"] or "", "choices": [{"value": "", "label": "None chosen"}, *_target_choices(project, vid)]})
+    rows.append({"label": "Excluded elements", "type": "readonly", "value": ", ".join(
+        project.model.get(t)["name"] if E.alive(project, t) else f"{t} (deleted)" for t in s["excluded"]) or "none"})
+    rows.append({"key": "exclude_add", "label": "Exclude element", "type": "choice", "value": "",
+                 "choices": [{"value": "", "label": "Choose an element…"}, *_target_choices(project, vid, s["excluded"])]})
+    if s["excluded"]:
+        rows.append({"key": "exclude_remove", "label": "Restore element cuts", "type": "choice", "value": "",
+                     "choices": [{"value": "", "label": "Choose an element…"}] + [
+                         {"value": t, "label": project.model.get(t)["name"] if E.alive(project, t) else f"{t} (deleted)"} for t in s["excluded"]]})
+    rows.append({"label": "Excluded categories", "type": "readonly", "value": ", ".join(s["excluded_categories"]) or "none"})
+    categories = sorted({E.category(project, i) for i in E.element_ids(project)} - set(CU.NEVER_HIT))
+    rows.append({"key": "exclude_category_add", "label": "Exclude category", "type": "choice", "value": "",
+                 "choices": [{"value": "", "label": "Choose a category…"}] + [
+                     {"value": c, "label": c.title()} for c in categories if c not in s["excluded_categories"]]})
+    if s["excluded_categories"]:
+        rows.append({"key": "exclude_category_remove", "label": "Restore category cuts", "type": "choice", "value": "",
+                     "choices": [{"value": "", "label": "Choose a category…"}] + [
+                         {"value": c, "label": c.title()} for c in s["excluded_categories"]]})
     return rows
 
 
