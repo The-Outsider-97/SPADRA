@@ -685,7 +685,7 @@ class Project:
             if total > max_vertices:
                 raise LimitExceeded(f"The model has more than {max_vertices} vertices to draw", hint="Hide or simplify objects")
             meta = obj["metadata"]
-            category = meta.get(f"{NS}:category", "generic")
+            category = "void" if E.m(meta, "void_mode") else meta.get(f"{NS}:category", "generic")
             counts = E.m(meta, "layer_faces") or []
             layers = LY.stack(self, oid) if counts and category in LY.LAYERED else []
             layer_colors = ([{"count": int(n), "color": E.m(meta, "color") or lay.get("color") or
@@ -960,7 +960,8 @@ class Project:
         if not E.alive(self, void) or E.category(self, void) != "void":
             raise NotFound(f"Void {void} does not exist")
         v = next(x for x in FX.voids(self) if x["id"] == void)
-        return {"void": void, "settings": {"enabled": v["enabled"], "policy": v["policy"], "targets": v["targets"], "host": v["host"]},
+        return {"void": void, "settings": {"enabled": v["enabled"], "policy": v["policy"], "targets": v["targets"], "host": v["host"],
+                                              "excluded": v["excluded"], "excluded_categories": v["excluded_categories"]},
                 "elements": CU.classify(self, void), "missing": CU.stale(self, v)}
 
     def preview_roof_end(self, params: Mapping[str, Any]) -> dict[str, Any]:

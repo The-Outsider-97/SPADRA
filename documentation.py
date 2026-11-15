@@ -358,7 +358,7 @@ def project_view(project: Any, view: Mapping[str, Any], f: float) -> dict[str, A
         obj = project.model.get(oid)
         meta = obj["metadata"]
         category = str(E.m(meta, "category", "generic"))
-        if category == "void":
+        if category == "void" or E.m(meta, "void_mode"):
             continue                                                         # a void is not drawn in a section or elevation: it is not part of the building
         verts, faces = world_mesh(project, oid, matrices)
         if not faces:
@@ -595,7 +595,7 @@ def _summary(project: Any, category: str) -> dict[str, Any]:
         columns = 0
         for oid in E.element_ids(project):
             meta = project.model.get(oid)["metadata"]
-            cat = str(E.m(meta, "category", "generic"))
+            cat = "void" if E.m(meta, "void_mode") else str(E.m(meta, "category", "generic"))
             counts[cat] = counts.get(cat, 0) + 1
             columns += cat == "structural" and E.is_column(meta)
         for cat in sorted(counts, key=lambda c: COUNT_AS.get(c, c)):
@@ -671,7 +671,7 @@ def schedule_data(project: Any, category: str) -> dict[str, Any]:
     for oid in E.element_ids(project):
         obj = project.model.get(oid)
         meta = obj["metadata"]
-        if E.m(meta, "category") != category:
+        if E.m(meta, "category") != category or E.m(meta, "void_mode"):
             continue
         name = obj["name"] or SCHEDULES[category]["noun"]
         solid_volume = E.solid_status(project, oid).volume

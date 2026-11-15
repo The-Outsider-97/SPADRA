@@ -3287,6 +3287,9 @@ def remove(project: Any, oid: str) -> None:
     """Delete an element. A wall takes its doors and windows with it; a door or window leaves its wall whole again."""
     meta = meta_of(project, oid)
     cat = m(meta, "category")
+    if cat == "void" or m(meta, "void_mode"):
+        from . import forms as FX
+        FX.detach_boolean_void(project, oid)
     if cat == "array":
         from . import arrays as AY
         AY.remove(project, oid)
@@ -3962,11 +3965,21 @@ def solid_status(project: Any, oid: str) -> Solid:
     else:
         kind = geometry.get("kind")
         try:
-            if kind == "mesh":
-                from src.utils.spatial_formats.sgeo.analysis import analyze_mesh
-                if not analyze_mesh(geometry).is_closed_oriented_surface:
+            from src.utils.spatial_formats.sgeo.analysis import analyze_mesh
+            from . import documentation as D
+            evaluated = D.evaluated_meshes(project).get(oid)
+            if evaluated is not None:
+                # Non-destructive SGEO modifiers must affect BIM quantities as
+                # well as their 3D/section display meshes. The source item is
+                # intentionally retained for editing and undo/redo.
+                measured = analyze_mesh({"kind": "mesh", "vertices": evaluated["vertices"], "faces": evaluated["faces"]})
+                if not measured.is_closed_oriented_surface or measured.signed_volume is None:
                     raise _OpenSurface()
-            result = Solid("solid", float(project.model.volume(oid, unit="m")), "")
+                result = Solid("solid", abs(measured.signed_volume), "")
+            else:
+                if kind == "mesh" and not analyze_mesh(geometry).is_closed_oriented_surface:
+                    raise _OpenSurface()
+                result = Solid("solid", float(project.model.volume(oid, unit="m")), "")
         except _OpenSurface:
             result = Solid("surface", None, "Open surface: it encloses no volume")
         except SpatialFormatError as exc:
@@ -3999,7 +4012,7 @@ def _properties(project: Any, oid: str) -> dict[str, Any]:
     out: dict[str, Any] = {"ref": {"model": oid}, "title": obj["name"] or cat.title(), "category": cat, "kind": "model", "groups": [], "top": []}
     name_row = {"key": "name", "label": "Name", "type": "text", "value": obj["name"]}
     mm = lambda v: f"{v * 1000:,.0f} mm"                                                    # noqa: E731
-    volume = volume_row(project, oid) if cat not in ("room", "void") else {}                # a room has no solid; a void's volume is not a quantity
+    volume = volume_row(project, oid) if cat not in ("room", "void") and not m(meta, "void_mode") else {}  # cutters are not billable solids
     if cat in ("stair", "generic", "grid", "gutter", "downpipe", "drain", "flashing", "foundation", "curtainwall", "array", *FORMS):
         if cat == "array":
             from . import arrays as AY

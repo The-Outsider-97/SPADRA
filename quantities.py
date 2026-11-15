@@ -132,7 +132,8 @@ def take_off(project: Any, ids: Sequence[str] | None, densities: Mapping[str, An
     precedence over the engine's value. Reads the model; changes nothing."""
     from .project import all_ids
     everything = all_ids(project.model, has_geometry=True)
-    cutters = {i for i in everything if E.m(project.model.get(i)["metadata"], "category") == "void"}          # a void removes material: it has no quantities
+    cutters = {i for i in everything if E.m(project.model.get(i)["metadata"], "category") == "void" or
+               E.m(project.model.get(i)["metadata"], "void_mode")}          # construction cutters have no quantities
     if ids is not None and cutters & set(ids):
         raise BadRequest("A void removes material and has no quantities", details={"ids": sorted(cutters & set(ids))[:10]})
     everything = [i for i in everything if i not in cutters]

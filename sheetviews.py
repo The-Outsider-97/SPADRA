@@ -104,7 +104,7 @@ def model_view(project: Any, azimuth: float, elevation: float, f: float) -> dict
         obj = project.model.get(oid)
         meta = obj["metadata"]
         category = str(E.m(meta, "category", "generic"))
-        if category == "void":
+        if category == "void" or E.m(meta, "void_mode"):
             continue
         verts, tris = D.world_mesh(project, oid, matrices)
         if not tris:

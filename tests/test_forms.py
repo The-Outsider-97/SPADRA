@@ -1,5 +1,4 @@
-"""Extrusions, voids, sweeps and arrays: the shapes are exact (volumes are the ones the dimensions give), a void cuts only what can be cut exactly and
-says so about the rest, and every one of them is one undoable change that follows later edits."""
+"""Extrusions, voids, sweeps and arrays: exact source forms, reversible void Boolean cuts and undoable edits."""
 from __future__ import annotations
 
 import importlib.util
@@ -8,6 +7,7 @@ import unittest
 
 from .. import elements as E
 from .. import forms as FX
+from .. import cutting as CU
 from .. import geometry as G
 from ..project import Project
 from ...tools.errors import BadRequest
@@ -148,13 +148,15 @@ class Voids(Base):
         self.assertEqual(len(E.meta_of(self.p, e)["spadra:cut_outline"]), 8)
         self.assertEqual(FX.report(self.p, v)["cuts"], ["Extrusion"])
 
-    def test_a_void_that_would_split_the_floor_in_two_cuts_nothing_and_says_why(self):
+    def test_a_void_that_splits_a_floor_uses_a_reversible_3d_boolean(self):
         f = self.floor()
         v = self.void([[2000, -100], [3000, -100], [3000, 5100], [2000, 5100]])
-        self.assertAlmostEqual(self.vol(f), 6.0, places=9)
+        self.assertAlmostEqual(self.vol(f), 6.0, places=9)                       # authoritative pre-modifier source remains intact
         self.assertEqual(FX.report(self.p, v)["cuts"], [])
         self.assertTrue(any("separate pieces" in n for n in FX.report(self.p, v)["notes"]))
-        self.assertTrue(any("separate pieces" in m for m in self.issues()))
+        self.assertEqual(CU.classify(self.p, v)[0]["state"], "cut")
+        self.assertLess(E.solid_status(self.p, f).volume, 6.0)                  # the evaluated BIM solid is actually cut
+        self.assertFalse(any("separate pieces" in m for m in self.issues()))
 
     def test_a_second_void_that_would_split_it_is_left_out_and_the_first_still_cuts(self):
         f = self.floor()

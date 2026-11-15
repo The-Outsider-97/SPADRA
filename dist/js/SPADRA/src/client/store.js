@@ -86,7 +86,7 @@ export class Store {
     /** One roof creation specification shared by plan and 3D modeling tools. */
     roofOptions = { kind: "flat", pitch: 30, thickness: 200 };
     /** What the Extrude, Void and Sweep tools make: depth and base in metres above the level, the sweep's profile in millimetres. */
-    formOptions = { depth: 1, base: 0, voidDepth: 4, voidBase: -0.5, sweepWidth: 200, sweepHeight: 200, sweepShape: "rectangle", sweepBase: 0,
+    formOptions = { depth: 1, base: 0, voidDepth: 4, voidBase: -0.5, sweepWidth: 200, sweepHeight: 200, sweepShape: "rectangle", sweepBase: 0, sweepVoid: false,
         sweepPolygon: null, sweepPivot: "center", sweepAngle: 0, sweepOffset: [0, 0, 0], sweepMirror: false, sweepRadius: 0 };
     selection = null;
     properties = null;

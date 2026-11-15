@@ -3,22 +3,22 @@
 * **Extrusion** (``extrusion``): a plan outline ``profile`` stood up from ``base`` (metres above its level) for ``depth`` metres, in a material.
 * **Void** (``void``): the same shape, but it removes material instead of adding it. "Make void" turns an extrusion into a void and back.
 * **Sweep** (``sweep``): a cross-section (``section``: points ``(u, v)``, ``u`` to the left of the path, ``v`` up from ``base``) carried along a
-  ``path`` drawn in plan at one height. Corners are mitred.
+  ``path`` drawn in plan at one height. Corners are mitred. A sweep may be an additive solid or a persistent swept void.
 
-What a void cuts is exactly what can be computed exactly, and nothing is guessed:
+Two complementary non-destructive cutting strategies share one policy:
 
 * a **floor** or a solid **extrusion** is cut by every void that spans its full thickness: a void wholly inside its outline makes a hole, one that crosses
   or lies along its edge takes a notch out of the outline, and voids that overlap each other act as their union (``planar``, an exact polygon boolean). The solid
   is then an exact B-rep with holes, tessellated by SGEO. A void that would split it into separate pieces, leave nothing of it, or touch another outline at
-  a single point is not cut, and the reason is given;
+  a single point is not accepted by the planar path and may be handled by a solid Boolean instead;
 * a **wall** gets a rectangular opening when the void is a rectangle whose sides run along and across the wall, passes through the whole
   thickness and overlaps the wall (it can start at the ground, reach the top or cut the wall in two);
-* any other overlap (a pocket that stops half-way through, a void that would split an element in two, one at an angle to a wall, a roof, a beam ...) cuts
-  nothing. The Properties panel and the model check say which voids cut nothing and why.
+* complex intersections (pockets, splits, roofs, beams, inclined walls, and swept cutters) use SLAI's existing SGEO 3D Boolean evaluator. Its numerical
+  approximation and manifold/backend limitations remain explicit; failed evaluations are reported, never presented as successful cuts.
 
 Which elements a void acts on is controlled per void (``cutting``): the "Cut Intersecting Geometry" switch and a policy (Automatic, Selected Targets,
-Hosted Objects, Disabled). Nothing is written into the cut element: it is rebuilt from the void's parameters, so turning a void off or deleting it
-gives the element back whole. ``cutting.classify`` says, for every element a void meets, whether it is cut, not supported (and why) or left alone.
+Hosted Objects, Disabled), plus element/category exclusions. Source solids remain intact; reversible generated Boolean modifiers carry the general cuts.
+Turning a void off or deleting it restores the original solid. ``cutting.classify`` reports successful, unsupported and excluded intersections.
 
 Voids that overlap each other in the same floor or extrusion act as their union. Voids that overlap in a wall each cut their own opening, and the wall is
 cut by the union of those openings.
@@ -96,7 +96,9 @@ def _round(values: Any, digits: int = 5) -> Any:
 
 # ------------------------------------------------------------------------------------------------------------------------ voids
 def void_ids(project: Any) -> list[str]:
-    return list(project.model.query_ids(metadata={f"{E.NS}:category": "void"}, limit=10_000))
+    ids = list(project.model.query_ids(metadata={f"{E.NS}:category": "void"}, limit=10_000))
+    ids.extend(project.model.query_ids(metadata={f"{E.NS}:void_mode": True}, limit=10_000))
+    return list(dict.fromkeys(ids))
 
 
 def z_range(project: Any, meta: Mapping[str, Any]) -> tuple[float, float]:
@@ -105,11 +107,14 @@ def z_range(project: Any, meta: Mapping[str, Any]) -> tuple[float, float]:
 
 
 def voids(project: Any) -> list[dict[str, Any]]:
-    """Every void with its outline (metres) and its height range (absolute z)."""
+    """Persistent prism and swept cutters, with their policy and exclusion settings."""
     out = []
     for vid in void_ids(project):
         obj = project.model.get(vid)
         meta = obj["metadata"]
+        if E.m(meta, "category") == "sweep":
+            out.append({"id": vid, "name": obj["name"] or "Void Sweep", "swept": True, **CU.settings(meta)})
+            continue
         z0, z1 = z_range(project, meta)
         out.append({"id": vid, "name": obj["name"] or "Void", "poly": [(float(q[0]), float(q[1])) for q in E.m(meta, "profile")], "z0": z0, "z1": z1, **CU.settings(meta)})
     from . import gutters as GU
@@ -266,11 +271,12 @@ def _cuts(project: Any, oid: str, vs: Sequence[Mapping[str, Any]], policy: bool 
     """(what the voids cut in this element as comparable numbers, notes for voids that touch it but cut nothing, the cuts themselves). For a wall the numbers
     are its opening spans; for a floor or extrusion they are ``[holes, new outline or []]`` and the cuts are a ``SlabCut``. Only the voids whose
     cutting settings apply to this element are considered, unless ``policy`` is false (the classification asks what a void *would* do)."""
-    if policy:
-        vs = [v for v in vs if CU.applies(v, oid)[0]]
     obj = project.model.get(oid)
     meta, label = obj["metadata"], obj["name"] or str(E.m(obj["metadata"], "category")).title()
     cat = E.m(meta, "category")
+    vs = [v for v in vs if not v.get("swept")]
+    if policy:
+        vs = [v for v in vs if CU.applies(v, oid, cat)[0]]
     if cat == "wall":
         spans, notes = wall_spans(vs, E.wall_frame(project, oid), label)
         return [_round(s[:4]) for s in spans], notes, spans
@@ -326,18 +332,76 @@ def reconcile(project: Any) -> int:
     rebuilt = follow_fixed(project)                                            # sweeps fixed to an element move with it
     vs = voids(project)
     flagged = set(project.model.query_ids(metadata={f"{E.NS}:cutflag": True}, limit=10_000))
-    if not vs and not flagged:
-        return rebuilt
-    for oid in (_targets(project) if vs else sorted(flagged)):
-        sig = _cuts(project, oid, vs)[0]
-        if sig != _stored(E.meta_of(project, oid)):
-            E.regenerate(project, oid)
-            rebuilt += 1
+    if vs or flagged:
+        for oid in (_targets(project) if vs else sorted(flagged)):
+            sig = _cuts(project, oid, vs)[0]
+            if sig != _stored(E.meta_of(project, oid)):
+                E.regenerate(project, oid)
+                rebuilt += 1
+    rebuilt += _reconcile_boolean_voids(project, vs)
     return rebuilt
 
 
+def _reconcile_boolean_voids(project: Any, vs: Sequence[Mapping[str, Any]]) -> int:
+    """Keep general 3D cuts as reversible SGEO Boolean modifiers on semantic BIM solids.
+
+    The exact polygon/wall opening path remains preferred. Unsupported cuts
+    (pockets, oblique intersections, roofs, beams, etc.) use SLAI's existing
+    manifold evaluator without replacing the source geometry. A cutter's ID is
+    recorded on the target so moving/removing the cutter can restore it.
+    """
+    active = [v for v in vs if E.alive(project, v["id"]) and
+              (E.category(project, v["id"]) == "void" or v.get("swept"))]
+    updated = 0
+    for oid in E.element_ids(project):
+        cat = E.category(project, oid)
+        if cat in CU.NEVER_HIT or E.m(E.meta_of(project, oid), "void_mode") or not project.model.get(oid).get("geometry"):
+            continue
+        meta = E.meta_of(project, oid)
+        existing = dict(E.m(meta, "void_boolean_modifiers") or {})
+        desired: set[str] = set()
+        if active:
+            # Check the unmodified source mesh. Testing evaluated geometry
+            # would make a successful cut appear to stop intersecting its void.
+            covered: set[str] = set()
+            if cat in CU.CUTTABLE:
+                covered = cut_ids(_cuts(project, oid, active)[2])
+            for v in active:
+                if v["id"] not in covered and CU.applies(v, oid, cat)[0] and CU.touches(project, oid, v):
+                    desired.add(v["id"])
+        known_modifiers = {m["id"] for m in project.model.modifiers()}
+        for vid, mid in list(existing.items()):
+            if vid not in desired or mid not in known_modifiers:
+                if mid in known_modifiers:
+                    project.model.remove_modifier(mid)
+                    updated += 1
+                del existing[vid]
+        for vid in sorted(desired - set(existing)):
+            mid = project.model.add_modifier(
+                oid, kind="sgeo.boolean", operands=[vid], parameters={"operation": "subtract"},
+                evaluation_policy={"mode": "tolerance_controlled", "absolute": 1e-6})
+            existing[vid] = mid
+            updated += 1
+        if existing != (E.m(meta, "void_boolean_modifiers") or {}):
+            E._attach(project, oid, {"void_boolean_modifiers": existing})
+    return updated
+
+
+def detach_boolean_void(project: Any, vid: str) -> None:
+    """Remove generated operand references before deleting the cutter itself."""
+    for oid in E.element_ids(project):
+        meta = E.meta_of(project, oid)
+        modifiers = dict(E.m(meta, "void_boolean_modifiers") or {})
+        if vid not in modifiers:
+            continue
+        mid = modifiers.pop(vid)
+        if any(m["id"] == mid for m in project.model.modifiers()):
+            project.model.remove_modifier(mid)
+        E._attach(project, oid, {"void_boolean_modifiers": modifiers})
+
+
 def report(project: Any, vid: str) -> dict[str, Any]:
-    """What one void cuts (names of elements) and the reasons it leaves other elements it touches alone. Read-only."""
+    """Legacy exact-planar cut report; use ``cutting.classify`` for actual 3D Boolean results too."""
     vs = voids(project)
     cut: list[str] = []
     notes: list[str] = []
@@ -691,8 +755,11 @@ def add_sweep(project: Any, p: Mapping[str, Any], to_m: float) -> str:
     level = project.level(text(p.get("level"), "level", 80))
     closed = boolean(p["closed"], "closed") if p.get("closed") is not None else False
     path = _path(p.get("points"), to_m, closed)
-    values: dict[str, Any] = {"category": "sweep", "type": "Sweep", "level": level["id"], "path": path, "closed": closed,
+    is_void = boolean(p["void"], "void") if p.get("void") is not None else False
+    values: dict[str, Any] = {"category": "sweep", "type": "Void Sweep" if is_void else "Sweep", "void_mode": is_void, "level": level["id"], "path": path, "closed": closed,
                               "base": number(p.get("base", 0.0), "base", -500, 500), "material": E._choice(p.get("material", "Concrete"), E.MATERIALS, "material")}
+    if is_void:
+        values.update(CU.creation_values(project, p))
     if p.get("profile") == "user":
         values["profile_source"] = _user_source(p, to_m)
         values["section"] = _clean_section(user_section(values["profile_source"]))
@@ -704,7 +771,7 @@ def add_sweep(project: Any, p: Mapping[str, Any], to_m: float) -> str:
         shape = E._choice(p.get("shape", "rectangle"), SHAPES, "shape")
         width, height = number(p.get("width", 200), "width", 1, 50000) / 1000.0, number(p.get("height", 200), "height", 1, 50000) / 1000.0
         values.update(shape=shape, width=width, height=height, section=section_polygon(shape, width, height))
-    oid = project.model.add_box(width=1.0, depth=1.0, height=1.0, name=text(p.get("name") or "Sweep", "name", 80))
+    oid = project.model.add_box(width=1.0, depth=1.0, height=1.0, name=text(p.get("name") or ("Void Sweep" if is_void else "Sweep"), "name", 80))
     E._attach(project, oid, values)
     regenerate_sweep(project, oid)
     if p.get("fixed_to"):
@@ -741,8 +808,16 @@ def set_property(project: Any, oid: str, meta: Mapping[str, Any], key: str, valu
         return {"level": project.level(text(value, "level", 80))["id"]}
     if key == "base":
         return {"base": number(value, "base", -500, 500)}
-    if cat == "void" and key in ("cut_enabled", "cut_policy", "target_add", "target_remove", "host"):
+    if (cat == "void" or (cat == "sweep" and E.m(meta, "void_mode"))) and key in ("cut_enabled", "cut_policy", "target_add", "target_remove", "host",
+                                 "exclude_add", "exclude_remove", "exclude_category_add", "exclude_category_remove"):
         return CU.set_property(project, oid, meta, key, value)
+    if cat == "sweep" and key == "sweep_mode":
+        is_void = value == "Void"
+        if value not in ("Solid", "Void"):
+            raise BadRequest("Sweep mode must be Solid or Void")
+        if bool(E.m(meta, "void_mode")) != is_void:
+            E._attach(project, oid, {"void_mode": is_void, "type": "Void Sweep" if is_void else "Sweep"})
+        return None
     if key == "form" and cat in ("extrusion", "void"):
         make_void(project, oid, value == "Void") if (value == "Void") != (cat == "void") else None
         return None
@@ -795,7 +870,7 @@ def plan_item(project: Any, oid: str, f: float) -> dict[str, Any]:
         lo, hi = min(u for u, _ in section), max(u for u, _ in section)
         left = [(fr["p"][0] + fr["m"][0] * hi * fr["scale"], fr["p"][1] + fr["m"][1] * hi * fr["scale"]) for fr in frames]
         right = [(fr["p"][0] + fr["m"][0] * lo * fr["scale"], fr["p"][1] + fr["m"][1] * lo * fr["scale"]) for fr in frames]
-        item: dict[str, Any] = {"id": oid, "category": "sweep", "name": obj["name"], "path": [[q[0] * f, q[1] * f] for q in path], "closed": closed}
+        item: dict[str, Any] = {"id": oid, "category": "void" if E.m(meta, "void_mode") else "sweep", "name": obj["name"], "path": [[q[0] * f, q[1] * f] for q in path], "closed": closed}
         if closed:
             outer, inner = (left, right) if abs(G.signed_area(left)) >= abs(G.signed_area(right)) else (right, left)
             item["polygon"] = [[q[0] * f, q[1] * f] for q in outer]
@@ -815,7 +890,8 @@ def plan_item(project: Any, oid: str, f: float) -> dict[str, Any]:
 
 def _target_choices(project: Any, vid: str, exclude: Sequence[str] = ()) -> list[dict[str, Any]]:
     return [{"value": o, "label": f"{project.model.get(o)['name'] or str(E.category(project, o)).title()} ({E.category(project, o)})"}
-            for o in E.element_ids(project) if o != vid and o not in exclude and E.category(project, o) not in CU.NEVER_HIT]
+            for o in E.element_ids(project) if o != vid and o not in exclude and E.category(project, o) not in CU.NEVER_HIT
+            and not E.m(E.meta_of(project, o), "void_mode")]
 
 
 def _cutting_rows(project: Any, vid: str, meta: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -832,6 +908,23 @@ def _cutting_rows(project: Any, vid: str, meta: Mapping[str, Any]) -> list[dict[
                          "choices": [{"value": "", "label": "Choose a target…"}, *({"value": t, "label": project.model.get(t)["name"] if E.alive(project, t) else f"{t} (deleted)"} for t in s["targets"])]})
     elif s["policy"] == "hosted":
         rows.append({"key": "host", "label": "Host element", "type": "choice", "value": s["host"] or "", "choices": [{"value": "", "label": "None chosen"}, *_target_choices(project, vid)]})
+    rows.append({"label": "Excluded elements", "type": "readonly", "value": ", ".join(
+        project.model.get(t)["name"] if E.alive(project, t) else f"{t} (deleted)" for t in s["excluded"]) or "none"})
+    rows.append({"key": "exclude_add", "label": "Exclude element", "type": "choice", "value": "",
+                 "choices": [{"value": "", "label": "Choose an element…"}, *_target_choices(project, vid, s["excluded"])]})
+    if s["excluded"]:
+        rows.append({"key": "exclude_remove", "label": "Restore element cuts", "type": "choice", "value": "",
+                     "choices": [{"value": "", "label": "Choose an element…"}] + [
+                         {"value": t, "label": project.model.get(t)["name"] if E.alive(project, t) else f"{t} (deleted)"} for t in s["excluded"]]})
+    rows.append({"label": "Excluded categories", "type": "readonly", "value": ", ".join(s["excluded_categories"]) or "none"})
+    categories = CU.eligible_categories(project)
+    rows.append({"key": "exclude_category_add", "label": "Exclude category", "type": "choice", "value": "",
+                 "choices": [{"value": "", "label": "Choose a category…"}] + [
+                     {"value": c, "label": c.title()} for c in categories if c not in s["excluded_categories"]]})
+    if s["excluded_categories"]:
+        rows.append({"key": "exclude_category_remove", "label": "Restore category cuts", "type": "choice", "value": "",
+                     "choices": [{"value": "", "label": "Choose a category…"}] + [
+                         {"value": c, "label": c.title()} for c in s["excluded_categories"]]})
     return rows
 
 
@@ -874,7 +967,11 @@ def properties(project: Any, oid: str, out: dict[str, Any], volume: Mapping[str,
     path = [tuple(q) for q in E.m(meta, "path")]
     closed = bool(E.m(meta, "closed", False))
     length = G.chain_length(path, closed)
-    out["top"].append({"key": "material", "label": "Material", "type": "choice", "value": E.m(meta, "material"), "choices": E._choices(E.MATERIALS)})
+    swept_void = bool(E.m(meta, "void_mode"))
+    out["top"].append({"key": "sweep_mode", "label": "Solid / Void", "type": "choice", "value": "Void" if swept_void else "Solid",
+                       "choices": [{"value": "Solid", "label": "Solid"}, {"value": "Void", "label": "Void"}]})
+    if not swept_void:
+        out["top"].append({"key": "material", "label": "Material", "type": "choice", "value": E.m(meta, "material"), "choices": E._choices(E.MATERIALS)})
     rows: list[dict[str, Any]] = [{"label": "Path length", "type": "readonly", "value": f"{length:.3f} m"}, {"label": "Path", "type": "readonly", "value": "closed" if closed else "open"}]
     if E.m(meta, "shape"):
         rows[:0] = [{"key": "shape", "label": "Profile", "type": "choice", "value": E.m(meta, "shape"), "choices": [{"value": s, "label": s.title()} for s in SHAPES]},
@@ -888,7 +985,8 @@ def properties(project: Any, oid: str, out: dict[str, Any], volume: Mapping[str,
                     {"key": "angle", "label": "Angle", "type": "number", "unit": "°", "value": float(source.get("angle", 0.0))},
                     {"key": "mirror", "label": "Mirror", "type": "choice", "value": "Yes" if source.get("mirror") else "No", "choices": [{"value": "No", "label": "No"}, {"value": "Yes", "label": "Yes"}]},
                     {"key": "radius", "label": "Corner radius", "type": "number", "unit": "mm", "value": round(float(source.get("radius", 0.0)) * 1000, 6)}]
-    rows.append(volume)
+    if not swept_void:
+        rows.append(volume)
     constraints = [{"key": "base", "label": "Base above level", "type": "number", "unit": "m", "value": float(E.m(meta, "base", 0.0))}]
     if source:
         constraints += [{"key": f"offset_{a}", "label": f"Offset {a.upper()}", "type": "number", "unit": "mm", "value": round(float(E.m(meta, f"offset_{a}", 0.0)) * 1000, 6)} for a in "xyz"]
@@ -897,6 +995,9 @@ def properties(project: Any, oid: str, out: dict[str, Any], volume: Mapping[str,
                             "choices": [{"value": "", "label": "Nothing"}] + [{"value": i, "label": project.model.get(i)["name"] or str(E.m(project.model.get(i)["metadata"], "category")).title()}
                                                                                 for i in E.element_ids(project) if i != oid and E.m(project.model.get(i)["metadata"], "category") not in ("door", "window")]})
     out["groups"] = [{"title": "Geometry", "rows": rows}, {"title": "Constraints", "rows": constraints}]
+    if swept_void:
+        out["groups"].extend([{"title": "Cutting", "rows": _cutting_rows(project, oid, meta)},
+                              {"title": "Diagnostics", "rows": _diagnostic_rows(project, oid)}])
 
 
 def check(project: Any, oid: str, label: str) -> list[dict[str, str]]:
@@ -912,7 +1013,7 @@ def check(project: Any, oid: str, label: str) -> list[dict[str, str]]:
             raise BadRequest("The outline crosses itself")
     except BadRequest as exc:
         return [E.issue("error", oid, f"{label}: {exc.message}", "parameters")]
-    if cat == "void":
+    if cat == "void" or (cat == "sweep" and E.m(meta, "void_mode")):
         s = CU.settings(meta)
         rows = CU.classify(project, oid)
         out += [E.issue("warning", oid, f"{label}: {r['name']} is reached but not cut: {r['reason']}", "geometry") for r in rows if r["state"] == "unsupported"]

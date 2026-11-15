@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
 
 from applications.SPADRA import cutting as CU
 from applications.SPADRA import elements as E
 from applications.SPADRA import forms as FX
+from applications.SPADRA import documentation as D
+from applications.SPADRA import interop as IO
 from applications.SPADRA.project import NS, Project
 from applications.tools.errors import BadRequest
+from src.utils.spatial_formats.sgeo.analysis import analyze_mesh
 
 SQUARE = [[1000, 1000], [2000, 1000], [2000, 2000], [1000, 2000]]
 RECT = [[0, 0], [10000, 0], [10000, 6000], [0, 6000]]
@@ -63,13 +67,15 @@ class Switch(Case):
     def test_a_void_made_before_the_settings_existed_cuts_everything_it_can(self):
         f = self.floor()
         v = self.void()
-        self.assertEqual(CU.settings(self.meta(v)), {"enabled": True, "policy": "automatic", "targets": [], "host": None})
+        self.assertEqual(CU.settings(self.meta(v)), {"enabled": True, "policy": "automatic", "targets": [], "host": None,
+                                                     "excluded": [], "excluded_categories": []})
         self.assertAlmostEqual(self.vol(f), 5.8, places=9)
 
     def test_the_settings_can_be_given_when_the_void_is_made(self):
         f = self.floor()
         v = self.void(cut_policy="targets", targets=[f])
-        self.assertEqual(CU.settings(self.meta(v)), {"enabled": True, "policy": "targets", "targets": [f], "host": None})
+        self.assertEqual(CU.settings(self.meta(v)), {"enabled": True, "policy": "targets", "targets": [f], "host": None,
+                                                     "excluded": [], "excluded_categories": []})
         self.assertAlmostEqual(self.vol(f), 5.8, places=9)
         off = self.void([[3000, 1000], [4000, 1000], [4000, 2000], [3000, 2000]], cut_enabled=False)
         self.assertAlmostEqual(self.vol(f), 5.8, places=9)                         # the second void is made off
@@ -143,9 +149,167 @@ class Policies(Case):
         with tempfile.TemporaryDirectory() as tmp:
             self.p.save(Path(tmp) / "c.spadra")
             q = Project.open(Path(tmp) / "c.spadra")
-            self.assertEqual(CU.settings(q.model.get(v)["metadata"]), {"enabled": True, "policy": "targets", "targets": [self.a], "host": None})
+            self.assertEqual(CU.settings(q.model.get(v)["metadata"]), {"enabled": True, "policy": "targets", "targets": [self.a], "host": None,
+                                                                      "excluded": [], "excluded_categories": []})
             self.assertAlmostEqual(q.model.volume(self.a, unit="m"), 2.95, places=9)
             self.assertAlmostEqual(q.model.volume(self.b, unit="m"), 3.0, places=9)
+
+
+class Exclusions(Case):
+    def test_category_rule_can_precede_creation_of_any_element_in_that_category(self):
+        cutter = self.void(excluded_categories=["floor"])
+        floor = self.floor()
+        self.assertAlmostEqual(self.vol(floor), 6.0)
+        self.assertEqual({r["id"]: r for r in CU.classify(self.p, cutter)}[floor]["state"], "excluded")
+        self.set(cutter, "exclude_category_remove", "floor")
+        self.assertAlmostEqual(self.vol(floor), 5.8)
+
+    def test_excluding_one_intersected_floor_preserves_the_other(self):
+        a = self.floor(0, 3000)
+        b = self.floor(3000, 3000)
+        v = self.void([[2500, 1000], [3500, 1000], [3500, 2000], [2500, 2000]])
+        # The default policy reaches both floors; each receives a notch.
+        before = [self.vol(a), self.vol(b)]
+        self.assertLess(before[0], 3.0)
+        self.assertLess(before[1], 3.0)
+        self.set(v, "exclude_add", a)
+        self.assertAlmostEqual(self.vol(a), 3.0)
+        self.assertAlmostEqual(self.vol(b), before[1])
+        rows = {r["id"]: r for r in CU.classify(self.p, v)}
+        self.assertEqual(rows[a]["state"], "excluded")
+        self.assertEqual(rows[b]["state"], "cut")
+        self.set(v, "exclude_remove", a)
+        self.assertAlmostEqual(self.vol(a), before[0])
+        self.p.undo()
+        self.assertAlmostEqual(self.vol(a), 3.0)
+
+    def test_category_exclusion_applies_to_new_elements_and_can_be_removed(self):
+        a = self.floor()
+        v = self.void()
+        self.assertAlmostEqual(self.vol(a), 5.8)
+        self.set(v, "exclude_category_add", "floor")
+        self.assertAlmostEqual(self.vol(a), 6.0)
+        b = self.floor(8000)
+        self.assertAlmostEqual(self.vol(b), 6.0)
+        self.set(v, "exclude_category_remove", "floor")
+        self.assertAlmostEqual(self.vol(a), 5.8)
+        self.assertAlmostEqual(self.vol(b), 6.0)  # outside the void
+
+    def test_exclusions_are_persistent_and_validated(self):
+        a = self.floor()
+        v = self.void(excluded=[a], excluded_categories=["floor"])
+        self.assertAlmostEqual(self.vol(a), 6.0)
+        self.assertEqual(CU.settings(self.meta(v))["excluded"], [a])
+        for key, value in (("exclude_add", "unknown"), ("exclude_add", v),
+                           ("exclude_remove", "unknown"), ("exclude_category_add", "unknown"),
+                           ("exclude_category_remove", "roof")):
+            with self.assertRaises(Exception, msg=key):
+                self.set(v, key, value)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "void-exclusions.spadra"
+            self.p.save(path)
+            reopened = Project.open(path)
+            self.assertEqual(CU.settings(reopened.model.get(v)["metadata"])["excluded"], [a])
+            self.assertEqual(CU.settings(reopened.model.get(v)["metadata"])["excluded_categories"], ["floor"])
+            self.assertAlmostEqual(reopened.model.volume(a, unit="m"), 6.0)
+
+
+class BooleanVoidRegression(Case):
+    """The source BIM mesh stays editable while a reversible 3D Boolean changes the resulting solid."""
+
+    def test_one_void_cuts_a_floor_and_a_beam_and_restores_the_beam_when_excluded(self):
+        floor = self.floor()
+        beam = self.run_("model.add_beam", level=self.l1, start=[500, 1500], end=[5500, 1500], top=2.5)["id"]
+        original = E.solid_status(self.p, beam).volume
+        self.assertIsNotNone(original)
+        cutter = self.void()
+        rows = {r["id"]: r for r in CU.classify(self.p, cutter)}
+        self.assertEqual(rows[floor]["state"], "cut")
+        self.assertEqual((rows[beam]["state"], rows[beam]["kind"]), ("cut", "boolean"))
+        mesh = D.evaluated_meshes(self.p)[beam]
+        diagnosis = analyze_mesh({"kind": "mesh", "vertices": mesh["vertices"], "faces": mesh["faces"]})
+        self.assertTrue(diagnosis.is_closed_oriented_surface)
+        self.assertLess(E.solid_status(self.p, beam).volume, original)
+        self.set(cutter, "exclude_add", beam)
+        self.assertNotIn(beam, D.evaluated_meshes(self.p))
+        self.assertAlmostEqual(E.solid_status(self.p, beam).volume, original)
+        self.p.undo()
+        self.assertLess(E.solid_status(self.p, beam).volume, original)
+        self.run_("model.delete", id=cutter)
+        self.assertNotIn(beam, D.evaluated_meshes(self.p))
+        self.assertAlmostEqual(E.solid_status(self.p, beam).volume, original)
+
+    def test_a_roof_boolean_cut_survives_reopening_without_baking_the_source(self):
+        roof = self.run_("model.add_roof", level=self.roof_level, points=RECT, roof="gable", pitch=30, thickness=200)["id"]
+        original = E.solid_status(self.p, roof).volume
+        cutter = self.run_("model.add_extrusion", level=self.roof_level,
+                            points=[[4000, 2800], [4400, 2800], [4400, 3200], [4000, 3200]],
+                            void=True, base=1.2, depth=1.0)["id"]
+        self.assertEqual({r["id"]: r for r in CU.classify(self.p, cutter)}[roof]["state"], "cut")
+        self.assertLess(E.solid_status(self.p, roof).volume, original)
+        source = self.p.model.get(roof)["geometry"]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "void-through-roof.spadra"
+            self.p.save(path)
+            reopened = Project.open(path)
+            self.assertEqual(reopened.model.get(roof)["geometry"], source)
+            self.assertLess(E.solid_status(reopened, roof).volume, original)
+            self.assertEqual(CU.classify(reopened, cutter)[0]["state"], "cut")
+
+
+class SweptVoidRegression(Case):
+    def test_newly_created_elements_are_cut_and_moving_the_sweep_restores_them(self):
+        cutter = self.run_("model.add_sweep", level=self.l1, points=[[500, 1500], [5500, 1500]],
+                           shape="rectangle", width=400, height=700, base=1.0, void=True)["id"]
+        wall = self.run_("model.add_wall", level=self.l1, start=[0, 1500], end=[6000, 1500], thickness=200, height=3)["id"]
+        raw = self.p.model.volume(wall, unit="m")
+        self.assertLess(E.solid_status(self.p, wall).volume, raw)
+        self.run_("model.move", id=cutter, dx=0.0, dy=5.0, dz=0.0)
+        self.assertAlmostEqual(E.solid_status(self.p, wall).volume, raw)
+        self.run_("model.move", id=cutter, dx=0.0, dy=-5.0, dz=0.0)
+        self.assertLess(E.solid_status(self.p, wall).volume, raw)
+
+    def test_a_swept_cutter_is_a_persistent_boolean_with_exclusions_and_hidden_scene_category(self):
+        wall = self.run_("model.add_wall", level=self.l1, start=[0, 1500], end=[6000, 1500], thickness=200, height=3)["id"]
+        before = E.solid_status(self.p, wall).volume
+        cutter = self.run_("model.add_sweep", level=self.l1, points=[[500, 1500], [5500, 1500]],
+                           shape="rectangle", width=400, height=700, base=1.0, void=True)["id"]
+        self.assertEqual(E.category(self.p, cutter), "sweep")
+        rows = {r["id"]: r for r in CU.classify(self.p, cutter)}
+        self.assertEqual((rows[wall]["state"], rows[wall]["kind"]), ("cut", "boolean"))
+        self.assertLess(E.solid_status(self.p, wall).volume, before)
+        self.assertEqual(next(o for o in self.p.scene_data()["objects"] if o["id"] == cutter)["category"], "void")
+        self.set(cutter, "exclude_add", wall)
+        self.assertAlmostEqual(E.solid_status(self.p, wall).volume, before)
+        self.set(cutter, "exclude_remove", wall)
+        self.assertLess(E.solid_status(self.p, wall).volume, before)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "void-sweep.spadra"
+            self.p.save(path)
+            reopened = Project.open(path)
+            self.assertLess(E.solid_status(reopened, wall).volume, before)
+            self.assertEqual(CU.classify(reopened, cutter)[0]["state"], "cut")
+        self.set(cutter, "sweep_mode", "Solid")
+        self.assertAlmostEqual(E.solid_status(self.p, wall).volume, before)
+        self.set(cutter, "sweep_mode", "Void")
+        self.assertLess(E.solid_status(self.p, wall).volume, before)
+        self.run_("model.delete", id=cutter)
+        self.assertAlmostEqual(E.solid_status(self.p, wall).volume, before)
+
+    def test_presentation_exports_contain_the_cut_not_the_sweep_construction_solid(self):
+        import trimesh
+        wall = self.run_("model.add_wall", level=self.l1, start=[0, 1500], end=[6000, 1500], thickness=200, height=3)["id"]
+        cutter = self.run_("model.add_sweep", level=self.l1, points=[[500, 1500], [5500, 1500]],
+                           shape="rectangle", width=400, height=700, base=1.0, void=True)["id"]
+        expected = E.solid_status(self.p, wall).volume
+        self.assertTrue(expected > 0)
+        for fmt in ("stl", "obj", "glb"):
+            with self.subTest(fmt=fmt):
+                content, _ = IO.export_model(self.p, fmt)
+                self.assertTrue(content)
+                exported = trimesh.load(BytesIO(content), file_type=fmt, force="scene")
+                self.assertAlmostEqual(sum(abs(g.volume) for g in exported.geometry.values()), expected, places=5)
+        self.assertEqual(E.category(self.p, cutter), "sweep")
 
 
 class Classification(Case):
@@ -162,23 +326,21 @@ class Classification(Case):
         niche_wall = self.run_("model.add_wall", level=self.l1, start=[0, 3500], end=[6000, 3500], thickness=200, height=3)["id"]
         niche = self.void([[1000, 3450], [2000, 3450], [2000, 3550], [1000, 3550]], base=0.0, depth=2.0)                # inside the wall: stops short of its faces
         row = {r["id"]: r for r in CU.classify(self.p, niche)}[niche_wall]
-        self.assertEqual(row["state"], "unsupported")
-        self.assertIn("stops short", row["reason"])
-        self.assertEqual(rows[beam]["state"], "unsupported")
-        self.assertIn("not supported", rows[beam]["reason"])
+        self.assertEqual((row["state"], row["kind"]), ("cut", "boolean"))
+        self.assertEqual(rows[beam]["state"], "cut")
+        self.assertEqual(rows[beam]["kind"], "boolean")
         self.assertNotIn(roof, rows)                                                    # 6 m below the roof: not reached
         self.assertAlmostEqual(self.vol(f), 5.8, places=9)
-        self.assertGreater(self.vol(beam), 0)                                          # the beam is left whole: nothing is faked
+        self.assertGreater(self.vol(beam), 0)
 
-    def test_a_void_across_a_floors_edge_is_classified_as_a_notch_and_one_that_would_split_it_as_unsupported(self):
+    def test_a_void_across_a_floors_edge_is_a_notch_and_one_can_split_the_floor(self):
         f = self.floor()
         notch = self.void([[-500, 1000], [500, 1000], [500, 2000], [-500, 2000]], base=-0.5, depth=4.0)
         row = {r["id"]: r for r in CU.classify(self.p, notch)}[f]
         self.assertEqual((row["state"], row["kind"]), ("cut", "notch"))
         splitter = self.void([[2000, -100], [3000, -100], [3000, 5100], [2000, 5100]], base=-0.5, depth=4.0)
         row = {r["id"]: r for r in CU.classify(self.p, splitter)}[f]
-        self.assertEqual(row["state"], "unsupported")
-        self.assertIn("separate pieces", row["reason"])
+        self.assertEqual((row["state"], row["kind"]), ("cut", "boolean"))
 
     def test_a_wall_opening_is_classified_as_an_opening_and_the_policy_can_leave_it_alone(self):
         w = self.run_("model.add_wall", level=self.l1, start=[0, 0], end=[6000, 0], thickness=200, height=3)["id"]
@@ -201,15 +363,14 @@ class Classification(Case):
         self.assertEqual(CU.classify(self.p, high), [])                               # the roof's actual surface is far below it
         ridge = self.run_("model.add_extrusion", level=self.roof_level, points=[[4000, 2800], [4400, 2800], [4400, 3200], [4000, 3200]], void=True, base=1.2, depth=1.0)["id"]
         rows = CU.classify(self.p, ridge)
-        self.assertEqual([(r["id"], r["state"]) for r in rows], [(roof, "unsupported")])
-        self.assertIn("roof is not supported", rows[0]["reason"])
+        self.assertEqual([(r["id"], r["state"]) for r in rows], [(roof, "cut")])
+        self.assertEqual(rows[0]["kind"], "boolean")
 
     def test_a_void_wholly_inside_a_solid_is_found_by_the_solid_not_by_its_faces(self):
         ext = self.run_("model.add_extrusion", level=self.l1, points=[[0, 0], [4000, 0], [4000, 4000], [0, 4000]], depth=3.0, base=0.0)["id"]
         pocket = self.void([[1500, 1500], [2500, 1500], [2500, 2500], [1500, 2500]], base=1.0, depth=1.0)
         rows = self.classes(pocket)["Extrusion"]
-        self.assertEqual(rows["state"], "unsupported")                                 # an extrusion is cut only through its whole depth: this pocket is inside it
-        self.assertIn("pocket", rows["reason"])
+        self.assertEqual((rows["state"], rows["kind"]), ("cut", "boolean"))           # a genuine internal pocket is now handled by 3D CSG
         self.assertAlmostEqual(self.vol(ext), 48.0, places=9)
 
     def test_mesh_prism_test_is_exact(self):
@@ -235,9 +396,9 @@ class Panel(Case):
         self.assertEqual((cutting["cut_enabled"]["label"], cutting["cut_enabled"]["value"]), ("Cut Intersecting Geometry", "Enabled"))
         self.assertEqual([c["value"] for c in cutting["cut_policy"]["choices"]], ["automatic", "targets", "hosted", "disabled"])
         diag = {r["label"]: r["value"] for r in next(g for g in panel["groups"] if g["title"] == "Diagnostics")["rows"]}
-        self.assertEqual(diag["Effect"], "1 cut, 1 not supported, 0 left alone by the policy")
+        self.assertEqual(diag["Effect"], "2 cut, 0 not supported, 0 left alone by the policy")
         self.assertTrue(diag["Floor (floor)"].startswith("Cut:"))
-        self.assertTrue(next(v for k, v in diag.items() if k.startswith("Beam")).startswith("Not cut:"))
+        self.assertTrue(next(v for k, v in diag.items() if k.startswith("Beam")).startswith("Cut:"))
         self.set(v, "cut_policy", "targets")
         rows = next(g for g in E.properties(self.p, v)["groups"] if g["title"] == "Cutting")["rows"]
         self.assertIn("target_add", {r.get("key") for r in rows})
@@ -248,7 +409,7 @@ class Panel(Case):
         beam = self.run_("model.add_beam", level=self.l1, start=[500, 1500], end=[5500, 1500], top=2.5)["id"]
         v = self.void()
         msgs = [i["message"] for i in E.check(self.p)]
-        self.assertTrue(any("Beam" in m and "not supported" in m for m in msgs), msgs)
+        self.assertFalse(any("Beam" in m and "not supported" in m for m in msgs), msgs)
         self.set(v, "cut_policy", "targets")
         self.assertTrue(any("none is chosen" in i["message"] for i in E.check(self.p)))
         self.set(v, "cut_policy", "disabled")

@@ -34,6 +34,8 @@ REQUIRED: tuple[tuple[str, str, str, str], ...] = (
 )
 OPTIONAL: tuple[tuple[str, str, str, str], ...] = (
     ("numpy", "numpy", "1.24", "the STEM, Simulation, Spatial and Optimization agents"),
+    ("trimesh", "trimesh", "5.2", "3D sweep intersections and SLAI SGEO mesh Boolean cuts"),
+    ("manifold3d", "manifold3d", "3", "the SLAI SGEO backend for complex and multi-element Boolean cuts"),
     ("scipy", "scipy", "1.10", "the STEM Agent's numerical integrator and the Optimization Agent"),
     ("psutil", "psutil", "5.9", "SLAI's resource monitoring, imported by the agents"),
     ("openpyxl", "openpyxl", "3.1", "optional XLSX classification table import"),

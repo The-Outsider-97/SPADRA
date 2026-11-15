@@ -86,10 +86,10 @@ export class Store {
   roofOptions: { kind: "flat" | "shed" | "gable" | "hip"; pitch: number; thickness: number } = { kind: "flat", pitch: 30, thickness: 200 };
   /** What the Extrude, Void and Sweep tools make: depth and base in metres above the level, the sweep's profile in millimetres. */
   formOptions: {
-    depth: number; base: number; voidDepth: number; voidBase: number; sweepWidth: number; sweepHeight: number; sweepShape: "rectangle" | "round" | "user"; sweepBase: number;
+    depth: number; base: number; voidDepth: number; voidBase: number; sweepWidth: number; sweepHeight: number; sweepShape: "rectangle" | "round" | "user"; sweepBase: number; sweepVoid: boolean;
     /** A user-defined sweep profile: the closed polygon picked in the drawing (drawing units) and how it sits on the path. */
     sweepPolygon: Array<[number, number]> | null; sweepPivot: string; sweepAngle: number; sweepOffset: [number, number, number]; sweepMirror: boolean; sweepRadius: number;
-  } = { depth: 1, base: 0, voidDepth: 4, voidBase: -0.5, sweepWidth: 200, sweepHeight: 200, sweepShape: "rectangle", sweepBase: 0,
+  } = { depth: 1, base: 0, voidDepth: 4, voidBase: -0.5, sweepWidth: 200, sweepHeight: 200, sweepShape: "rectangle", sweepBase: 0, sweepVoid: false,
     sweepPolygon: null, sweepPivot: "center", sweepAngle: 0, sweepOffset: [0, 0, 0], sweepMirror: false, sweepRadius: 0 };
   selection: Selection = null;
   properties: Properties | null = null;
