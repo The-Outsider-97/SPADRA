@@ -28,6 +28,7 @@ thicknesses, or a profile wider than the path can turn, is refused.
 from __future__ import annotations
 
 import math
+
 from typing import Any, Mapping, Sequence
 
 from ..tools.errors import BadRequest
@@ -39,6 +40,8 @@ from . import geometry as G
 from . import planar as P
 
 Pt = tuple[float, float]
+PathPt = tuple[float, float, float]
+
 CATEGORIES = ("extrusion", "void", "sweep")
 SHAPES = ("rectangle", "round")
 ROUND_SEGMENTS = 24
@@ -48,6 +51,31 @@ TOL = 1e-6
 VOID_BASE = -0.5                       # a void made without numbers starts half a metre below its level and stands 4 m: through a slab and a storey wall
 VOID_DEPTH = 4.0
 MAX_PATH_POINTS = 500
+BASE_OFFSET = 0.001                     # a sweep's base is raised this much above the path to avoid touching the floor it stands on
+BASE_OFFSET_SLOPE = 0.001              # a sweep's base is raised this much above the path per metre of slope to avoid touching the floor it stands on
+END_CAPS = ("flat", "none", "chamfered")
+
+
+def offset_sweep_base(path: Sequence[PathPt], base: float) -> float:
+    """Base elevated above the path so the sweep does not touch the floor it stands on."""
+    if len(path) < 2:
+        return base + BASE_OFFSET
+    z0, z1 = path[0][2], path[-1][2]          # elevation, see §3.1
+    return base + BASE_OFFSET + abs(z1 - z0) * BASE_OFFSET_SLOPE
+
+def offset_sweep_path(path: Sequence[PathPt], base: float) -> list[PathPt]:
+    """A sweep's path is raised above the floor it stands on to avoid touching it: a fixed offset plus a slope-based offset."""
+    if len(path) < 2:
+        return [(path[0][0], path[0][1], path[0][2] + base + BASE_OFFSET)]
+    z0, z1 = path[0][2], path[-1][2]
+    sx, sy = path[0][0], path[0][1]
+    ex, ey = path[-1][0], path[-1][1]
+    total = math.hypot(ex - sx, ey - sy) or 1.0        # 2-D length, so the ratio is in [0, 1]
+    extra = abs(z1 - z0) * BASE_OFFSET_SLOPE
+    return [
+        (x, y, z + base + BASE_OFFSET + extra * (math.hypot(x - sx, y - sy) / total))
+        for x, y, z in path
+    ]
 
 
 # ------------------------------------------------------------------------------------------------------------------ plan geometry
@@ -224,7 +252,7 @@ def wall_spans(vs: Sequence[Mapping[str, Any]], frame: Mapping[str, Any], label:
             elif found == "niche":
                 notes.append((v["id"], f"{v['name']} stops short of the whole thickness of {label}, and a niche is not cut"))
             else:
-                spans.extend((cx0, cx1, zs[0], zs[1], v["id"]) for cx0, cx1 in found)
+                spans.extend((cx0, cx1, zs[0], zs[1], v["id"]) for cx0, cx1 in found) # type: ignore
             continue
         if y0 > -half + TOL or y1 < half - TOL:
             notes.append((v["id"], f"{v['name']} stops short of the whole thickness of {label}, and a niche is not cut"))
@@ -422,9 +450,9 @@ def report(project: Any, vid: str) -> dict[str, Any]:
 def _solid(profile: Sequence[Pt], holes: Sequence[Sequence[Pt]], z0: float, z1: float) -> G.Mesh:
     if not holes:
         return G.prism(list(profile), z0, z1)
-    from src.utils.spatial_formats.sgeo import brep_build, brep_mesh
+    from src.utils.spatial_formats.sgeo import brep_build, brep_mesh # type: ignore
     mesh = brep_mesh.tessellate_brep(brep_build.brep_extrusion([tuple(p) for p in profile], z1 - z0, [[tuple(p) for p in h] for h in holes]))
-    return E._positive_volume(([(x, y, z + z0) for x, y, z in mesh["vertices"]], mesh["faces"]))
+    return E._positive_volume(([(x, y, z + z0) for x, y, z in mesh["vertices"]], mesh["faces"])) # type: ignore
 
 
 def regenerate_extrusion(project: Any, oid: str) -> None:
@@ -438,7 +466,7 @@ def regenerate_extrusion(project: Any, oid: str) -> None:
     holes: Sequence[Sequence[Pt]] = []
     if E.m(meta, "category") == "extrusion":
         cut = remember_cuts(project, oid)
-        holes, profile = cut.holes, cut.outline or profile
+        holes, profile = cut.holes, cut.outline or profile # type: ignore
     try:
         E._set_mesh(project, oid, _solid(profile, holes, z0, z1))
     except G.GeometryError as exc:
@@ -484,12 +512,59 @@ def make_void(project: Any, oid: str, void: bool) -> bool:
 
 
 # ------------------------------------------------------------------------------------------------------------------------ sweeps
+SHAPES = ("rectangle", "round", "ellipse", "tube", "pipe", "i_beam", "channel", "angle", "trapezoid")
+
 def section_polygon(shape: str, width: float, height: float) -> list[list[float]]:
     """A cross-section sitting on the path's height, centred on the path: a rectangle, or an ellipse of ``ROUND_SEGMENTS`` sides."""
+    w = float(width)
+    h = float(height)
+    if w <= 0.0 or h <= 0.0:
+        raise BadRequest("Section width and height must be positive")
+
+    def ellipse_points(rx: float, ry: float, inset: float = 0.0) -> list[list[float]]:
+        if rx <= 0.0 or ry <= 0.0:
+            raise BadRequest("Section axes must be positive")
+        inner_x = max(rx - inset, 0.0)
+        inner_y = max(ry - inset, 0.0)
+        return [[inner_x * math.cos(2.0 * math.pi * i / ROUND_SEGMENTS), ry + inner_y * math.sin(2.0 * math.pi * i / ROUND_SEGMENTS)]
+                for i in range(ROUND_SEGMENTS)]
+
     if shape == "rectangle":
-        return [[-width / 2, 0.0], [width / 2, 0.0], [width / 2, height], [-width / 2, height]]
-    if shape == "round":
-        return [[width / 2 * math.cos(2 * math.pi * i / ROUND_SEGMENTS), height / 2 + height / 2 * math.sin(2 * math.pi * i / ROUND_SEGMENTS)] for i in range(ROUND_SEGMENTS)]
+        return [[-w / 2.0, 0.0], [w / 2.0, 0.0], [w / 2.0, h], [-w / 2.0, h]]
+    if shape in ("round", "ellipse"):
+        return [[(w / 2.0) * math.cos(2.0 * math.pi * i / ROUND_SEGMENTS), (h / 2.0) + (h / 2.0) * math.sin(2.0 * math.pi * i / ROUND_SEGMENTS)]
+                for i in range(ROUND_SEGMENTS)]
+    if shape == "tube":
+        wall = min(w, h) * 0.2
+        outer = [[-w / 2.0, 0.0], [w / 2.0, 0.0], [w / 2.0, h], [-w / 2.0, h]]
+        inner = [[-w / 2.0 + wall, wall], [w / 2.0 - wall, wall], [w / 2.0 - wall, h - wall], [-w / 2.0 + wall, h - wall]]
+        return outer + inner[::-1]
+    if shape == "pipe":
+        thickness = min(w, h) * 0.2
+        outer = [[(w / 2.0) * math.cos(2.0 * math.pi * i / ROUND_SEGMENTS), (h / 2.0) + (h / 2.0) * math.sin(2.0 * math.pi * i / ROUND_SEGMENTS)]
+                 for i in range(ROUND_SEGMENTS)]
+        inner = [[((w - 2.0 * thickness) / 2.0) * math.cos(2.0 * math.pi * i / ROUND_SEGMENTS),
+                  (h / 2.0) + ((h - 2.0 * thickness) / 2.0) * math.sin(2.0 * math.pi * i / ROUND_SEGMENTS)]
+                 for i in range(ROUND_SEGMENTS)]
+        return outer + inner[::-1]
+    if shape == "i_beam":
+        web = w * 0.25
+        flange = h * 0.25
+        return [[-w / 2.0, 0.0], [w / 2.0, 0.0], [w / 2.0, flange], [web / 2.0, flange], [web / 2.0, h - flange],
+                [w / 2.0, h - flange], [w / 2.0, h], [-w / 2.0, h], [-w / 2.0, h - flange], [-web / 2.0, h - flange],
+                [-web / 2.0, flange], [-w / 2.0, flange]]
+    if shape == "channel":
+        web = w * 0.25
+        flange = h * 0.25
+        return [[-w / 2.0, 0.0], [w / 2.0, 0.0], [w / 2.0, h], [-w / 2.0, h], [-w / 2.0, h - flange], [-web / 2.0, h - flange],
+                [-web / 2.0, flange], [w / 2.0, flange], [w / 2.0, h - flange]]
+    if shape == "angle":
+        leg = min(w, h) * 0.5
+        return [[-w / 2.0, 0.0], [w / 2.0, 0.0], [w / 2.0, leg], [0.0, leg], [0.0, h], [-w / 2.0, h]]
+    if shape == "trapezoid":
+        taper = 0.25
+        half_top = (w / 2.0) * (1.0 - taper)
+        return [[-w / 2.0, 0.0], [w / 2.0, 0.0], [half_top, h], [-half_top, h]]
     raise BadRequest(f"shape must be one of {', '.join(SHAPES)}")
 
 
@@ -520,7 +595,7 @@ def round_corners(polygon: Sequence[Sequence[float]], radius: float) -> list[lis
     out: list[list[float]] = []
     for i in range(n):
         p0, p1, p2 = pts[i - 1], pts[i], pts[(i + 1) % n]
-        a, b = G.unit(G.sub(p0, p1)), G.unit(G.sub(p2, p1))
+        a, b = G.unit(G.sub(p0, p1)), G.unit(G.sub(p2, p1)) # type: ignore
         cosang = max(-1.0, min(1.0, G.dot(a, b)))
         angle = math.acos(cosang)                                              # the angle between the two edges at this corner
         if angle < 1e-6 or abs(angle - math.pi) < 1e-6:                        # a spike or a straight run: nothing to round
@@ -531,9 +606,9 @@ def round_corners(polygon: Sequence[Sequence[float]], radius: float) -> list[lis
         if tangent > room:
             tangent = room
         r = tangent * math.tan(angle / 2)
-        start, end = G.add(p1, G.mul(a, tangent)), G.add(p1, G.mul(b, tangent))
-        bis = G.unit(G.add(a, b))
-        centre = G.add(p1, G.mul(bis, r / math.sin(angle / 2)))
+        start, end = G.add(p1, G.mul(a, tangent)), G.add(p1, G.mul(b, tangent)) # type: ignore
+        bis = G.unit(G.add(a, b)) # type: ignore
+        centre = G.add(p1, G.mul(bis, r / math.sin(angle / 2))) # type: ignore
         a0, a1 = math.atan2(start[1] - centre[1], start[0] - centre[0]), math.atan2(end[1] - centre[1], end[0] - centre[0])
         sweep = (a1 - a0 + math.pi) % (2 * math.pi) - math.pi                  # the short way round
         steps = max(2, int(math.ceil(abs(sweep) / (math.pi / 2) * ARC_SEGMENTS)))
@@ -596,9 +671,12 @@ def _path(points: Any, to_m: float, closed: bool) -> list[list[float]]:
         raise BadRequest(f"A path needs 2 to {MAX_PATH_POINTS} points")
     out: list[list[float]] = []
     for q in points:
-        if not isinstance(q, (list, tuple)) or len(q) != 2:
-            raise BadRequest("Every path point must be [x, y]")
-        pt = [float(number(q[0], "x", -1e9, 1e9)) * to_m, float(number(q[1], "y", -1e9, 1e9)) * to_m]
+        if not isinstance(q, (list, tuple)) or len(q) not in (2, 3):
+            raise BadRequest("Every path point must be [x, y] or [x, y, z]")
+        x = float(number(q[0], "x", -1e9, 1e9)) * to_m
+        y = float(number(q[1], "y", -1e9, 1e9)) * to_m
+        z = float(number(q[2], "z", -1e6, 1e6)) if len(q) == 3 else 0.0
+        pt = [x, y, z]
         if not out or math.dist(pt, out[-1]) > 1e-6:
             out.append(pt)
     if closed and len(out) > 2 and math.dist(out[0], out[-1]) <= 1e-6:
@@ -614,60 +692,280 @@ def _check_path(path: Sequence[Sequence[float]], closed: bool) -> None:
         for j in range(i + 2, len(segs)):
             if closed and i == 0 and j == len(segs) - 1:
                 continue
-            if _seg_hit(a, b, *segs[j]):
+            if _seg_hit(a, b, *segs[j]): # type: ignore
                 raise BadRequest("The path crosses itself")
 
 
+CORNER_STYLES = ("miter", "rounded", "chamfered")
+
+def round_path(path, closed, radius, style="rounded", arc_segments=ARC_SEGMENTS):
+    """Insert arc / chamfer points at every interior corner of a polyline."""
+    pts = list(path)
+    n = len(pts)
+    out = []
+    for i, p in enumerate(pts):
+        if not closed and i in (0, n - 1):
+            out.append(p); continue
+        p0, p1, p2 = pts[i - 1], p, pts[(i + 1) % n]
+        a, b = G.unit(G.sub(p0, p1)), G.unit(G.sub(p2, p1))
+        ang = math.acos(max(-1.0, min(1.0, G.dot(a, b))))
+        if ang < 1e-6 or abs(ang - math.pi) < 1e-6:
+            out.append(p); continue
+        tangent = min(radius / math.tan(ang / 2),
+                      math.dist(p0, p1) / 2, math.dist(p1, p2) / 2)
+        start = G.add(p1, G.mul(a, tangent))
+        end   = G.add(p1, G.mul(b, tangent))
+        if style == "chamfered":
+            out.extend([start, end]); continue
+        centre = G.add(p1, G.mul(G.unit(G.add(a, b)),
+                                 tangent / math.sin(ang / 2)))
+        a0 = math.atan2(start[1] - centre[1], start[0] - centre[0])
+        a1 = math.atan2(end[1]   - centre[1], end[0]   - centre[0])
+        sweep = (a1 - a0 + math.pi) % (2 * math.pi) - math.pi
+        steps = max(2, int(math.ceil(abs(sweep) / (math.pi / 2) * arc_segments)))
+        for k in range(steps + 1):
+            t = a0 + sweep * k / steps
+            out.append([centre[0] + radius * math.cos(t),
+                        centre[1] + radius * math.sin(t)])
+    if closed and math.dist(out[0], out[-1]) <= 1e-9:
+        out.pop()
+    return out
+
+
+def _to3d(path: Sequence[Sequence[float]]) -> list[tuple[float, float, float]]:
+    """Promote a 2‑D plan path to 3‑D (z = 0) without touching a path that is already 3‑D."""
+    out: list[tuple[float, float, float]] = []
+    for p in path:
+        if len(p) == 2:
+            out.append((float(p[0]), float(p[1]), 0.0))
+        elif len(p) == 3:
+            out.append((float(p[0]), float(p[1]), float(p[2])))
+        else:
+            raise BadRequest("A path point must be [x, y] or [x, y, z]")
+    return out
+
+
+def _cross3(a, b):
+    """3‑D cross product; `G.cross` is 2‑D (a scalar) and stays that way for the wall module."""
+    return (a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0])
+
+
+def _dot3(a, b):
+    """3‑D dot product; `G.dot` is 2‑D and stays that way for the wall module."""
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
 def _frames(path: Sequence[Sequence[float]], closed: bool, section: Sequence[Sequence[float]]) -> list[dict[str, Any]]:
-    """For every path point: the mitre direction ``m`` and its ``scale`` (a section point at ``u`` sits ``u * scale`` along ``m``), refusing the
-    corners the profile cannot get round."""
-    n = len(path)
-    pts = [tuple(p) for p in path]
+    """For every path point: the section's left axis ``m``, its up axis ``v``, the forward tangent ``t``, and the mitre ``scale``
+    (a section point at ``u`` sits ``u * scale`` along ``m``, and at ``v`` along ``v``). Refuses the corners the profile cannot get round.
+
+    The path may be plan-only (``[x, y]``, treated as z = 0, exactly the old behaviour) or 3-D (``[x, y, z]``). In 3-D the section is tilted
+    to stay perpendicular to the path's tangent, and the mitre is still computed in plan so a climbing sweep turns the way it does when drawn
+    in plan.
+    """
+    pts = _to3d(path)
+    n = len(pts)
     count = n if closed else n - 1
-    dirs = [G.unit(G.sub(pts[(i + 1) % n], pts[i])) for i in range(count)]
-    lengths = [math.dist(pts[(i + 1) % n], pts[i]) for i in range(count)]
-    left_extent, right_extent = max(max(u for u, _ in section), 0.0), max(max(-u for u, _ in section), 0.0)
+    if count < 1:
+        raise BadRequest("A path needs at least two points")
+
+    tangents: list[tuple[float, float, float]] = []
+    for i in range(count):
+        dx = pts[(i + 1) % n][0] - pts[i][0]
+        dy = pts[(i + 1) % n][1] - pts[i][1]
+        dz = pts[(i + 1) % n][2] - pts[i][2]
+        length = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if length < 1e-9:
+            raise BadRequest("A path segment must have non-zero length")
+        tangents.append((dx / length, dy / length, dz / length))
+    lengths       = [math.dist(pts[(i + 1) % n], pts[i]) for i in range(count)]
+    left_extent   = max(max(u  for u, _ in section), 0.0)
+    right_extent  = max(max(-u for u, _ in section), 0.0)
+    up = (0.0, 0.0, 1.0)
+
+    def add3(a, b):
+        return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+
+    def mul3(a, k):
+        return (a[0] * k, a[1] * k, a[2] * k)
+
+    def perp(v, t):
+        """Component of ``v`` perpendicular to the unit vector ``t``."""
+        k = _dot3(v, t)
+        return (v[0] - t[0] * k, v[1] - t[1] * k, v[2] - t[2] * k)
+
+    def unit_or_raise(v, msg):
+        size = math.sqrt(_dot3(v, v))
+        if size < 1e-9:
+            raise BadRequest(msg)
+        return mul3(v, 1.0 / size)
+
     frames: list[dict[str, Any]] = []
     for i in range(n):
-        d_in, d_out = (dirs[i - 1], dirs[i]) if closed else (dirs[max(i - 1, 0)], dirs[min(i, count - 1)])
-        n_in, n_out = G.left(d_in), G.left(d_out)
-        bis = G.add(n_in, n_out)
-        size = G.norm(bis)
-        if size < 1e-9:
-            raise BadRequest("The path doubles back on itself")
-        mdir = G.mul(bis, 1 / size)
-        cos_half = G.dot(mdir, n_out)
-        if 1 / cos_half > MITER_LIMIT:
-            raise BadRequest("The path turns too sharply for a mitred corner", hint=f"Corners may turn at most about {math.degrees(2 * math.acos(1 / MITER_LIMIT)):.0f}°")
-        turn = G.cross(d_in, d_out)
-        tan_half = abs(turn) / (1 + G.dot(d_in, d_out))
+        if closed:
+            t_in, t_out = tangents[i - 1], tangents[i]
+        else:
+            t_in  = tangents[i - 1] if i > 0 else tangents[0]
+            t_out = tangents[i]     if i < count else tangents[-1]
+
+        # The forward tangent at the node: the average of the two segment tangents. It is what the chamfer pushes past the end along,
+        # and what the v-axis is projected perpendicular to.
+        t_node = unit_or_raise(add3(t_in, t_out), "The path doubles back on itself")
+
+        # The section's "up": global up projected perpendicular to the (possibly climbing) tangent. A purely vertical tangent has no
+        # canonical section orientation, so it is refused with a clear message.
+        v_axis = unit_or_raise(perp(up, t_node),
+                               "A path point whose tangent is vertical cannot carry a section: a sweep cannot go straight up")
+
+        # Mitre in plan: the horizontal lefts of the two tangents, bisected.
+        u_in  = unit_or_raise(_cross3(up, t_in),  "The path turns too sharply for a mitred corner")
+        u_out = unit_or_raise(_cross3(up, t_out), "The path turns too sharply for a mitred corner")
+        m     = unit_or_raise(add3(u_in, u_out), "The path doubles back on itself")
+        cos_half = _dot3(m, u_out)
+        if cos_half <= 1e-9 or 1.0 / cos_half > MITER_LIMIT:
+            raise BadRequest("The path turns too sharply for a mitred corner",
+                             hint=f"Corners may turn at most about {math.degrees(2 * math.acos(1 / MITER_LIMIT)):.0f}°")
+
+        # The section's "left" at the node: the plan mitre direction, projected perpendicular to the (climbed) tangent.
+        u_axis = unit_or_raise(perp(m, t_node), "The path turns too sharply for a mitred corner")
+
+        # Reach: how far each corner's mitre extends into its segment, for the "profile too wide" check. The sign of the 3-D cross's
+        # z-component (i.e. the plan turn) picks the inside face.
+        turn = _cross3(t_in, t_out)[2]
+        dot_in_out = _dot3(t_in, t_out)
+        denom = 1.0 + dot_in_out
+        tan_half = math.sqrt(max(0.0, 1.0 - dot_in_out * dot_in_out)) / denom if denom > 1e-9 else 0.0
         inside = left_extent if turn > 0 else right_extent
-        frames.append({"p": pts[i], "m": mdir, "scale": 1 / cos_half, "reach": tan_half * inside})
+
+        frames.append({
+            "p":     pts[i],
+            "m":     u_axis,             # section's u axis (mitered "left")
+            "v":     v_axis,             # section's v axis (perpendicular to tangent, closest to global up)
+            "t":     t_node,             # forward tangent (used by chamfered end caps)
+            "scale": 1.0 / cos_half,     # u miter scale; v is unscaled (matches the old planar behaviour)
+            "reach": tan_half * inside,
+        })
+
     for i in range(count):
         if frames[i]["reach"] + frames[(i + 1) % n]["reach"] > lengths[i] + 1e-9:
-            raise BadRequest("The profile is too wide for the corners of this path", hint="Make the profile narrower or the segments longer")
+            raise BadRequest("The profile is too wide for the corners of this path",
+                             hint="Make the profile narrower or the segments longer")
     return frames
 
 
-def sweep_mesh(path: Sequence[Sequence[float]], closed: bool, section: Sequence[Sequence[float]], z0: float) -> G.Mesh:
-    section = [tuple(q) for q in section]
+def sweep_mesh(
+    path: Sequence[Sequence[float]],
+    closed: bool,
+    section: Sequence[Sequence[float]],
+    z0: float,
+    *,
+    end_cap: str = "flat",
+    end_chamfer: float = 0.0,
+) -> G.Mesh:
+    """A section swept along a path, capped at the ends of an open path.
+
+    ``end_cap`` controls how the two open ends are closed:
+
+    * ``"flat"`` (the default, unchanged) — each end is triangulated exactly as drawn, matching the section at the path's end point;
+    * ``"none"`` — nothing closes the ends, so a pipe run or railing that continues past the drawn path stays open;
+    * ``"chamfered"`` — each end is pushed past the drawn path by ``end_chamfer`` (m) along the path's forward tangent, and the section is
+      scaled about its centroid so the tip is inset by ``end_chamfer`` on every side. A short side band joins the drawn end to that smaller
+      ring, so the drawn length is unchanged and the sweep simply finishes with a bevel instead of a flat face.
+
+    A closed path ignores ``end_cap``. A chamfered end needs ``end_chamfer > 0`` and is refused when the chamfer is wider than the section it
+    must sit in.
+    """
+    if end_cap not in END_CAPS:
+        raise BadRequest(f"end cap must be one of {', '.join(END_CAPS)}")
+    chamfer = float(end_chamfer)
+    if end_cap == "chamfered":
+        if closed:
+            end_cap = "flat"                                    # a closed sweep has no ends to cap
+        elif chamfer <= 1e-9:
+            raise BadRequest(
+                "A chamfered end cap needs a positive chamfer length",
+                hint="Give end_chamfer in metres, e.g. 0.01 for 10 mm",
+            )
+
+    section: list[Pt] = [(float(q[0]), float(q[1])) for q in section]
     if G.signed_area(section) < 0:
         section.reverse()
     frames = _frames(path, closed, section)
-    rings = [[(f["p"][0] + f["m"][0] * u * f["scale"], f["p"][1] + f["m"][1] * u * f["scale"], z0 + v) for u, v in section] for f in frames]
-    s, n = len(section), len(rings)
-    verts = [list(v) for ring in rings for v in ring]
+    s, n = len(section), len(frames)
+
+    # Centroid and outer radius, used to shrink chamfered caps so the farthest point is inset by exactly ``end_chamfer``.
+    cx = sum(u for u, _ in section) / s
+    cy = sum(v for _, v in section) / s
+    outer = max(math.hypot(u - cx, v - cy) for u, v in section)
+    scale = 1.0
+    if end_cap == "chamfered":
+        if outer <= 1e-12:
+            end_cap = "flat"
+        elif chamfer >= outer:
+            raise BadRequest(
+                "The chamfer is wider than the section it is cutting",
+                hint="Use a smaller end_chamfer or no chamfered cap",
+            )
+        else:
+            scale = (outer - chamfer) / outer
+
+    def _ring(frame: Mapping[str, Any], *, along: float = 0.0, factor: float = 1.0) -> list[tuple[float, float, float]]:
+        """One ring: the section centred on ``(cx, cy)``, scaled by ``factor``, placed on the frame, pushed ``along`` metres past it in the
+        frame's forward tangent direction (0 for body rings). Each section point contributes to all three axes so a climbing sweep tilts
+        correctly and a horizontal sweep reproduces the old output exactly (``m[2]=0``, ``v[2]=1``)."""
+        px, py, pz = frame["p"]
+        if along:
+            tx, ty, tz = frame["t"]
+            px += tx * along
+            py += ty * along
+            pz += tz * along
+        mx, my, mz = frame["m"]
+        vx, vy, vz = frame["v"]
+        k = frame["scale"]
+        out: list[tuple[float, float, float]] = []
+        for u, v in section:
+            uu = (cx + (u - cx) * factor) * k
+            vv =  cy + (v - cy) * factor
+            out.append((px + mx * uu + vx * vv,
+                        py + my * uu + vy * vv,
+                        pz + z0 + mz * uu + vz * vv))
+        return out
+
+    rings = [_ring(f) for f in frames]
+    verts: list[list[float]] = [list(v) for r in rings for v in r]
     faces: list[list[int]] = []
+
     for i in range(n if closed else n - 1):
         j = (i + 1) % n
         for k in range(s):
             a, b = i * s + k, i * s + (k + 1) % s
             c, d = j * s + (k + 1) % s, j * s + k
             faces += [[a, b, c], [a, c, d]]
+
     if not closed:
-        for t in G.triangulate(section):
-            faces.append([(n - 1) * s + t[0], (n - 1) * s + t[1], (n - 1) * s + t[2]])           # end cap faces along the path
-            faces.append([t[0], t[2], t[1]])                                                       # start cap faces back
+        if end_cap == "flat":
+            for t in G.triangulate(section):
+                faces.append([(n - 1) * s + t[0], (n - 1) * s + t[1], (n - 1) * s + t[2]])
+                faces.append([t[0], t[2], t[1]])
+        elif end_cap == "chamfered":
+            end_small   = _ring(frames[-1], along=+chamfer, factor=scale)
+            start_small = _ring(frames[0],  along=-chamfer, factor=scale)
+            end_base   = len(verts); verts += [list(v) for v in end_small]
+            start_base = len(verts); verts += [list(v) for v in start_small]
+            last = (n - 1) * s
+            for k in range(s):
+                k2 = (k + 1) % s
+                faces += [[last + k, last + k2, end_base + k2],
+                          [last + k, end_base + k2, end_base + k]]
+                faces += [[start_base + k, start_base + k2, k2],
+                          [start_base + k, k2, k]]
+            for t in G.triangulate(section):
+                faces.append([end_base   + t[0], end_base   + t[1], end_base   + t[2]])
+                faces.append([start_base + t[0], start_base + t[2], start_base + t[1]])
+        # end_cap == "none": leave both ends open.
+
     return E._positive_volume((verts, faces))
 
 
@@ -688,24 +986,37 @@ def _follow(project: Any, meta: Mapping[str, Any]) -> list[float]:
 
 def placed(project: Any, meta: Mapping[str, Any]) -> tuple[list[list[float]], float]:
     """The path (m) and the height of the section's origin as the sweep stands: the stored path and base, moved by the offsets X, Y, Z and by the
-    element it is fixed to."""
+    element it is fixed to.
+
+    The path is returned in 3‑D: a 2‑D stored path is promoted with ``z = 0``, and the level elevation and base are folded into each point's z.
+    The second return value is kept for backwards compatibility and is ``0.0`` unless the caller passes a non-zero ``z0`` explicitly; ``sweep_mesh``
+    still accepts that as an additional vertical offset.
+    """
     dx, dy, dz = _follow(project, meta)
     ox, oy, oz = (float(E.m(meta, k, 0.0)) for k in ("offset_x", "offset_y", "offset_z"))
-    path = [[q[0] + ox + dx, q[1] + oy + dy] for q in E.m(meta, "path")]
-    return path, E.level_elevation(project, E.m(meta, "level")) + float(E.m(meta, "base", 0.0)) + oz + dz
+    base = E.level_elevation(project, E.m(meta, "level")) + float(E.m(meta, "base", 0.0)) + oz + dz
+    path = _to3d(E.m(meta, "path"))
+    if E.m(meta, "avoid_floor", False):
+        path = offset_sweep_path(path, base)
+        base = 0.0                                       # already folded into the path
+    return [(q[0] + ox + dx, q[1] + oy + dy, q[2] + base) for q in path], 0.0 # type: ignore
 
 
 def regenerate_sweep(project: Any, oid: str) -> None:
     meta = E.meta_of(project, oid)
     closed = bool(E.m(meta, "closed", False))
     source = E.m(meta, "profile_source")
-    if source:                                                                  # a user-defined profile: the section is derived from the polygon and its settings
+    if source:
         E._attach(project, oid, {"section": _clean_section(user_section(source))})
         meta = E.meta_of(project, oid)
     section = _clean_section(E.m(meta, "section"))
     path, z0 = placed(project, meta)
     _check_path(path, closed)
-    E._set_mesh(project, oid, sweep_mesh(path, closed, section, z0))
+    E._set_mesh(project, oid, sweep_mesh(
+        path, closed, section, z0,
+        end_cap=str(E.m(meta, "end_cap", "flat")),
+        end_chamfer=float(E.m(meta, "end_chamfer", 0.0)),
+    ))
     if E.m(meta, "fixed_to"):
         E._attach(project, oid, {"fixed_seen": anchor_of(project, str(E.m(meta, "fixed_to")))})
 
@@ -751,13 +1062,25 @@ def fix_to_released(project: Any, oid: str) -> None:
 
 
 def add_sweep(project: Any, p: Mapping[str, Any], to_m: float) -> str:
-    """A sweep along ``points`` (drawing units, plan). The section is a ``section`` polygon (m), or ``shape`` with ``width`` and ``height`` (mm)."""
+    """A sweep along ``points`` (drawing units, plan or 3‑D). The section is a ``section`` polygon (m), or ``shape`` with ``width`` and
+    ``height`` (mm)."""
     level = project.level(text(p.get("level"), "level", 80))
     closed = boolean(p["closed"], "closed") if p.get("closed") is not None else False
     path = _path(p.get("points"), to_m, closed)
     is_void = boolean(p["void"], "void") if p.get("void") is not None else False
-    values: dict[str, Any] = {"category": "sweep", "type": "Void Sweep" if is_void else "Sweep", "void_mode": is_void, "level": level["id"], "path": path, "closed": closed,
-                              "base": number(p.get("base", 0.0), "base", -500, 500), "material": E._choice(p.get("material", "Concrete"), E.MATERIALS, "material")}
+    end_cap = E._choice(p.get("end_cap", "flat"), END_CAPS, "end_cap")
+    end_chamfer = number(p.get("end_chamfer", 0.0), "end_chamfer", 0.0, 5000.0) / 1000.0
+    if closed:                                                              # a closed sweep has no ends to cap
+        end_cap, end_chamfer = "flat", 0.0
+    values: dict[str, Any] = {
+        "category": "sweep", "type": "Void Sweep" if is_void else "Sweep",
+        "void_mode": is_void, "level": level["id"], "path": path, "closed": closed,
+        "base": number(p.get("base", 0.0), "base", -500, 500),
+        "material": E._choice(p.get("material", "Concrete"), E.MATERIALS, "material"),
+        "end_cap": end_cap,
+        "end_chamfer": end_chamfer,
+        "avoid_floor": boolean(p.get("avoid_floor", False), "avoid_floor"),
+    }
     if is_void:
         values.update(CU.creation_values(project, p))
     if p.get("profile") == "user":
@@ -789,14 +1112,29 @@ def regenerate(project: Any, oid: str) -> None:
 # ----------------------------------------------------------------------------------------------------------------- edit, move, turn
 def move(project: Any, oid: str, meta: Mapping[str, Any], dx: float, dy: float, dz: float) -> None:
     if E.m(meta, "category") == "sweep":
-        E._attach(project, oid, {"path": [[q[0] + dx, q[1] + dy] for q in E.m(meta, "path")], "base": float(E.m(meta, "base", 0.0)) + dz})
+        old = E.m(meta, "path")
+        new_path: list[list[float]] = []
+        for q in old:
+            if len(q) >= 3:
+                new_path.append([q[0] + dx, q[1] + dy, q[2]])           # z moves via base, not the path itself
+            else:
+                new_path.append([q[0] + dx, q[1] + dy])
+        E._attach(project, oid, {"path": new_path, "base": float(E.m(meta, "base", 0.0)) + dz})
     else:
-        E._attach(project, oid, {"profile": [[q[0] + dx, q[1] + dy] for q in E.m(meta, "profile")], "base": float(E.m(meta, "base", 0.0)) + dz})
+        E._attach(project, oid, {"profile": [[q[0] + dx, q[1] + dy] for q in E.m(meta, "profile")],
+                                 "base": float(E.m(meta, "base", 0.0)) + dz})
 
 
 def rotate(project: Any, oid: str, meta: Mapping[str, Any], angle: float, centre: tuple[float, float]) -> None:
     if E.m(meta, "category") == "sweep":
-        E._attach(project, oid, {"path": [E._turn(q, angle, centre) for q in E.m(meta, "path")]})
+        new_path: list[list[float]] = []
+        for q in E.m(meta, "path"):
+            turned = E._turn(q[:2], angle, centre)
+            if len(q) >= 3:
+                new_path.append([turned[0], turned[1], q[2]])           # rotate in plan only, keep elevation
+            else:
+                new_path.append([turned[0], turned[1]])
+        E._attach(project, oid, {"path": new_path})
     else:
         E._attach(project, oid, {"profile": [E._turn(q, angle, centre) for q in E.m(meta, "profile")]})
 
@@ -835,6 +1173,14 @@ def set_property(project: Any, oid: str, meta: Mapping[str, Any], key: str, valu
             host = str(value or "").strip() or None
             fix_to(project, oid, host)
             return None
+        if key == "end_cap":
+            if bool(E.m(meta, "closed", False)):
+                raise BadRequest("A closed sweep has no ends to cap")
+            return {"end_cap": E._choice(value, END_CAPS, "end_cap")}
+        if key == "end_chamfer":
+            return {"end_chamfer": number(value, "end_chamfer", 0.0, 5000.0) / 1000.0}
+        if key == "avoid_floor":
+            return {"avoid_floor": boolean(value, "avoid_floor")}
         source = E.m(meta, "profile_source")
         if source and key in USER_KEYS[:4]:
             new = dict(source)
@@ -1007,8 +1353,15 @@ def check(project: Any, oid: str, label: str) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     try:
         if cat == "sweep":
-            _check_path(placed(project, meta)[0], bool(E.m(meta, "closed", False)))
-            _frames(placed(project, meta)[0], bool(E.m(meta, "closed", False)), _clean_section(E.m(meta, "section")))
+            path, _ = placed(project, meta)
+            closed = bool(E.m(meta, "closed", False))
+            _check_path(path, closed)
+            _frames(path, closed, _clean_section(E.m(meta, "section")))
+            cap = str(E.m(meta, "end_cap", "flat"))
+            if cap not in END_CAPS:
+                raise BadRequest(f"end cap must be one of {', '.join(END_CAPS)}")
+            if cap == "chamfered" and not closed and float(E.m(meta, "end_chamfer", 0.0)) <= 1e-9:
+                raise BadRequest("A chamfered end cap needs a positive chamfer length")
         elif not G.is_simple_polygon([tuple(q) for q in E.m(meta, "profile", [])]):
             raise BadRequest("The outline crosses itself")
     except BadRequest as exc:
@@ -1025,3 +1378,16 @@ def check(project: Any, oid: str, label: str) -> list[dict[str, str]]:
         elif s["enabled"] and s["policy"] != "disabled" and not rows:
             out.append(E.issue("warning", oid, f"{label} does not touch anything it can cut", "geometry"))
     return out
+
+
+def check_all(project: Any) -> list[dict[str, str]]:
+    """Problems with all extrusions, voids and sweeps: an outline that no longer fits, and a void that cuts nothing where it overlaps something."""
+    out: list[dict[str, str]] = []
+    for oid in project.model.query_ids(metadata={f"{E.NS}:category": "extrusion"}, limit=10_000):
+        out += check(project, oid, project.model.get(oid)["name"] or f"Extrusion {oid}")
+    for oid in project.model.query_ids(metadata={f"{E.NS}:category": "void"}, limit=10_000):
+        out += check(project, oid, project.model.get(oid)["name"] or f"Void {oid}")
+    for oid in project.model.query_ids(metadata={f"{E.NS}:category": "sweep"}, limit=10_000):
+        out += check(project, oid, project.model.get(oid)["name"] or f"Sweep {oid}")
+    return out
+
