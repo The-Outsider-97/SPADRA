@@ -141,6 +141,7 @@ class Project:
     reports: dict[str, bytes] = field(default_factory=dict, repr=False)    # generated project reports (SLDC), written to reports/ on save
     snapshots: dict[str, bytes] = field(default_factory=dict, repr=False)  # the pictures of 3D snapshots placed on sheets (PNG, by viewport id), written to snapshots/ on save
     _cache: dict = field(default_factory=dict, repr=False)                  # derived data keyed by revision (cleared whenever the revision moves)
+    _saved_manifest_hash: str | None = field(default=None, repr=False)        # disk version this session may safely replace
 
     # ------------------------------------------------------------------------------------------------------------ lifecycle
     @classmethod
@@ -175,7 +176,8 @@ class Project:
         if not manifest_path.is_file():
             raise NotFound(f"{root} is not a SPADRA project (no project.json)")
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest_bytes = manifest_path.read_bytes()
+            manifest = json.loads(manifest_bytes)
         except (OSError, ValueError) as exc:
             raise BadRequest(f"project.json cannot be read: {exc}") from exc
         if not isinstance(manifest, dict) or manifest.get("format") != PROJECT_FORMAT:
@@ -200,7 +202,8 @@ class Project:
 
         model = load("model.sgeo", SGEODocument.open)
         drawings = {v["id"]: load(f"drawings/{v['id']}.sdrw", SDRWDocument.open) for v in manifest["views"] if v.get("kind") not in NO_DRAWING}
-        project = cls(root, manifest, model, drawings, undo_depth=undo_depth, warnings=warnings)
+        project = cls(root, manifest, model, drawings, undo_depth=undo_depth, warnings=warnings,
+                      _saved_manifest_hash=sha256_hex(manifest_bytes))
         for entry in list(manifest["reports"]):
             path = root / "reports" / f"{entry['id']}.sldc"
             try:
@@ -236,6 +239,13 @@ class Project:
             raise Conflict(f"{target} already holds a project; choose another name", hint="SPADRA never overwrites another project")
         if target.suffix != SUFFIX:
             raise BadRequest(f"A project folder name must end in {SUFFIX}")
+        manifest_path = target / "project.json"
+        if target == self.root and manifest_path.is_file():
+            # A second SPADRA process (or an external editor) may have saved a
+            # newer project since this session opened it. Do not overwrite it.
+            if self._saved_manifest_hash is None or sha256_hex(manifest_path.read_bytes()) != self._saved_manifest_hash:
+                raise Conflict("This project changed on disk since it was opened or last saved",
+                               hint="Open the newer project or use Save As to keep both revisions")
         try:
             (target / "drawings").mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -273,6 +283,7 @@ class Project:
         self.manifest["files"] = files
         self.manifest["modified"] = _now()
         atomic_write_json(target / "project.json", self.manifest)
+        self._saved_manifest_hash = sha256_hex((target / "project.json").read_bytes())
         for old in (target / "reports").glob("*.sldc") if (target / "reports").is_dir() else ():          # a deleted report's file goes once the manifest no longer lists it
             if f"reports/{old.name}" not in listed:
                 old.unlink(missing_ok=True)
@@ -411,8 +422,10 @@ class Project:
 
     def summary(self) -> dict[str, Any]:
         return {"id": self.manifest["id"], "name": self.name, "unit": self.manifest["unit"], "revision": self.revision, "dirty": self.dirty,
-                "path": str(self.root) if self.root else None, "can_undo": bool(self.undo_stack), "can_redo": bool(self.redo_stack),
-                "undo_label": self.undo_stack[-1].label if self.undo_stack else None, "warnings": list(self.warnings), "auto_rooms": AR.is_on(self)}
+                "path": str(self.root) if self.root else None, "last_saved": self.manifest.get("modified") if self.root else None,
+                "can_undo": bool(self.undo_stack), "can_redo": bool(self.redo_stack),
+                "undo_label": self.undo_stack[-1].label if self.undo_stack else None, "warnings": list(self.warnings), "auto_rooms": AR.is_on(self),
+                "default_materials": {category: E.default_material(self, category) for category in E.DEFAULT_MATERIALS}}
 
     def level(self, level_id: str) -> dict[str, Any]:
         for level in self.manifest["levels"]:
@@ -1700,7 +1713,7 @@ class _Commands:
         level = project.level(text(p.get("level"), "level", 80))
         thickness = number(p.get("thickness", 200), "thickness", 1, 5000) / 1000.0
         height = number(p.get("height", 3.0), "height", 0.01, 500)
-        material = p.get("material", "Concrete")
+        material = p.get("material", E.default_material(project, "wall"))
         if material not in MATERIALS:
             raise BadRequest(f"material must be one of {', '.join(MATERIALS)}")
         name = text(p.get("name") or "Basic Wall", "name", 80)
@@ -1912,6 +1925,105 @@ class _Commands:
         else:
             E.set_property(project, oid, key, p.get("value"))
         return {"id": oid}
+
+    @staticmethod
+    @command(_model_target("Copy compatible element attributes"))
+    def model__copy_attributes(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """One undoable, all-or-nothing instance transfer; IDs and hosts never move."""
+        from . import parametric_properties as PP
+        from . import relations as RL
+        source = text(p.get("source"), "source", 80)
+        if not E.alive(project, source):
+            raise NotFound(f"Source element {source} does not exist")
+        source_category = E.category(project, source)
+        destinations = list(dict.fromkeys(text(i, "destination", 80) for i in (p.get("destinations") or [])))
+        if not destinations or len(destinations) > 500:
+            raise BadRequest("Select between 1 and 500 destination elements")
+        if source in destinations:
+            raise BadRequest("A source cannot also be a destination")
+        groups = set(p.get("groups") or ())
+        allowed = {"appearance", "construction", "formulas", "classification", "custom", "dimensions"}
+        if not groups or groups - allowed:
+            raise BadRequest("Choose one or more supported attribute groups")
+        for dest in destinations:
+            if not E.alive(project, dest) or E.category(project, dest) != source_category:
+                raise BadRequest(f"{dest} is not a compatible {source_category} destination")
+        src_meta = E.meta_of(project, source)
+        source_rows = {row["key"]: row for section in ([{"rows": E.properties(project, source)["top"]}] + E.properties(project, source)["groups"])
+                       for row in section["rows"] if row.get("key")}
+        dimensions = {"height", "width", "thickness", "length", "pitch", "slope", "lean_angle", "lean_enabled", "lean_direction",
+                      "frame_width", "frame_depth", "mullion_depth", "transom_depth", "overhang"}
+        transferred: dict[str, list[str]] = {}
+        for dest in destinations:
+            changed: list[str] = []
+            source_layers = LY.stack(project, source) if source_category in LY.LAYERED else []
+            layer_ids: dict[str, str] = {}
+            if "construction" in groups:
+                if source_category not in LY.LAYERED:
+                    raise BadRequest(f"{source_category} elements do not have construction layers")
+                layers = []
+                for row in source_layers:
+                    if row["openings"] == "selected" and row["opening_ids"]:
+                        raise BadRequest("This construction references specific source openings; choose the destination's cuts first")
+                    copied = _clone(row)
+                    copied["id"] = new_id()[:8]
+                    layer_ids[row["id"]] = copied["id"]
+                    copied.pop("offset", None)
+                    layers.append(copied)
+                LY._store(project, dest, layers)
+                E.regenerate(project, dest)
+                changed.append("construction")
+            if "appearance" in groups:
+                # The source's instance overrides are copied. Material palette
+                # definitions in the project or shared family types are not.
+                for key in ("material", "color"):
+                    if E.m(src_meta, key) is not None:
+                        if key == "material" and "construction" in groups:
+                            continue                                # LY._store already assigned the first layer's material
+                        E.set_property(project, dest, key, E.m(src_meta, key))
+                        changed.append(key)
+                for key in ("material_rule", "layer_material_rules"):
+                    if E.m(src_meta, key) is not None:
+                        rule = _clone(E.m(src_meta, key))
+                        if key == "layer_material_rules" and rule:
+                            if not layer_ids:
+                                target_layers = LY.stack(project, dest) if source_category in LY.LAYERED else []
+                                if len(source_layers) != len(target_layers):
+                                    raise BadRequest("Copy the construction layers too before transferring layer-specific material rules")
+                                layer_ids = {s["id"]: d["id"] for s, d in zip(source_layers, target_layers)}
+                            rule = {layer_ids[k]: v for k, v in rule.items() if k in layer_ids}
+                        E._attach(project, dest, {key: rule})
+                        changed.append(key)
+            if "dimensions" in groups:
+                for key in dimensions:
+                    if key == "thickness" and "construction" in groups:
+                        continue
+                    row = source_rows.get(key)
+                    if row and row.get("type") in ("number", "choice"):
+                        E.set_property(project, dest, key, row["value"])
+                        changed.append(key)
+            if "classification" in groups:
+                for key, row in source_rows.items():
+                    if (E.SF.is_field(key) or E.CL.is_field(key)) and row.get("value") is not None:
+                        E.set_property(project, dest, key, row["value"])
+                        changed.append(key)
+            if "custom" in groups:
+                for name, value in RL.custom_of(src_meta).items():
+                    kind = (E.m(src_meta, "custom_types") or {}).get(name)
+                    RL.set_custom(project, dest, name, value, kind)
+                    changed.append(f"custom:{name}")
+            if "formulas" in groups:
+                formulas = dict(E.m(src_meta, "formulas") or {})
+                current = dict(E.m(E.meta_of(project, dest), "formulas") or {})
+                current.update(formulas)
+                PP._ordered(current, set(PP._context(project, dest)[1]))
+                E._attach(project, dest, {"formulas": current})
+                if current:
+                    project.manifest["has_property_formulas"] = True
+                    PP.recompute(project, dest)
+                changed.extend(f"formula:{key}" for key in formulas)
+            transferred[dest] = changed
+        return {"source": source, "category": source_category, "destinations": transferred}
 
     @staticmethod
     @command(_model_target("Move element"))

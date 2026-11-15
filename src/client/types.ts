@@ -4,10 +4,13 @@ export type Pt = [number, number];
 export type Pt3 = [number, number, number];
 
 export interface ProjectSummary {
+  last_saved?: string | null;
   id: string; name: string; unit: "mm" | "cm" | "m"; revision: number; dirty: boolean; path: string | null;
   can_undo: boolean; can_redo: boolean; undo_label: string | null; warnings: string[];
   /** Whether rooms are made on their own wherever walls close a space. */
   auto_rooms: boolean;
+  /** Server-resolved, project-specific category defaults; the UI must not override them with hardcoded selections. */
+  default_materials: Record<string, string>;
 }
 export interface Level { id: string; name: string; elevation: number }
 export interface View {

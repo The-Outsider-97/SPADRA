@@ -280,6 +280,11 @@ def solve_sketch(op: Mapping[str, Any], r: Mapping[str, Any], constraints: Seque
             rows.append({"kind": "coincident", "refs": [{"entity": f"s{i}", "part": "end"}, {"entity": f"s{j}", "part": "start"}]})
     joints = len(rows)
     fixed: list[str] = []
+    # Some supported SLAI versions predate circle entities. Keep the sketch's
+    # circular constraints for an exact analytical compatibility pass instead
+    # of asking that solver to parse entities or kinds it does not understand.
+    native_circles = {"radius", "tangent"}.issubset(getattr(CE, "KINDS", ()))
+    circle_constraints: list[Mapping[str, Any]] = []
     placement = op.get("placement", "anchored")
     if placement == "anchored":
         entities["axis"] = {"kind": "segment", "coords": [0.0, 0.0, 1.0, 0.0]}
@@ -295,7 +300,17 @@ def solve_sketch(op: Mapping[str, Any], r: Mapping[str, Any], constraints: Seque
         if not isinstance(c, Mapping) or not isinstance(c.get("kind"), str):
             diags.append(diag("constraint.shape", "error", "a constraint needs a kind", op=oid))
             continue
-        cap = CE.capability(c["kind"])
+        # The shared solver's older public API only exposes KINDS; newer
+        # revisions provide richer per-constraint capability diagnostics.
+        probe = getattr(CE, "capability", None)
+        if not native_circles and c["kind"] in ("radius", "tangent"):
+            circle_constraints.append(c)
+            continue
+        cap = probe(c["kind"]) if callable(probe) else {
+            "supported": c["kind"] in getattr(CE, "KINDS", ()),
+            "reason": ("spline and curvature continuity constraints are not implemented by this SLAI constraint engine"
+                       if c["kind"] == "curvature_continuous" else "not implemented by this SLAI constraint engine"),
+        }
         if not cap["supported"]:
             diags.append(diag("constraint.unsupported", "error", f"constraint '{c['kind']}' is not supported: {cap['reason']}", op=oid))
             continue
@@ -303,9 +318,11 @@ def solve_sketch(op: Mapping[str, Any], r: Mapping[str, Any], constraints: Seque
         if c.get("value") is not None:
             row["value"] = c["value"]
         rows.append(row)
-    for name, circle in (op.get("circles") or {}).items():
+    circle_defs = op.get("circles") or {}
+    for name, circle in circle_defs.items():
         cc = circle.get("center") or [0.0, 0.0]
-        entities[name] = {"kind": "circle", "coords": [float(cc[0]), float(cc[1]), float(circle.get("radius", 1.0))]}
+        if native_circles:
+            entities[name] = {"kind": "circle", "coords": [float(cc[0]), float(cc[1]), float(circle.get("radius", 1.0))]}
     if any(d["severity"] == "error" for d in diags):
         return {"profile": None, "status": "invalid", "diagnostics": diags}
     try:
@@ -337,6 +354,71 @@ def solve_sketch(op: Mapping[str, Any], r: Mapping[str, Any], constraints: Seque
     if status == "conflicting":
         return {"profile": None, "status": status, "dof": res["dof"], "diagnostics": diags, "analysis": {k: res[k] for k in ("iterations", "max_residual", "rank", "variables", "equations")}}
     sol = res["solution"]
+    if not native_circles and circle_defs:
+        # Preserve the drawn tangential position where unconstrained. The
+        # closest solution of the signed point-to-line distance equations is
+        # deterministic; reject contradictory constraints rather than silently
+        # shifting a circle away from all its intended tangencies.
+        import numpy as np
+        by_circle: dict[str, list[Mapping[str, Any]]] = {name: [] for name in circle_defs}
+        for constraint in circle_constraints:
+            refs = constraint.get("refs") or []
+            circles = [ref for ref in refs if isinstance(ref, str) and ref in circle_defs]
+            if len(circles) != 1 or (constraint["kind"] == "radius" and len(refs) != 1) or (constraint["kind"] == "tangent" and len(refs) != 2):
+                diags.append(diag("constraint.invalid", "error", f"{constraint['kind']} needs one existing circle and, for tangency, one segment", op=oid))
+                continue
+            by_circle[circles[0]].append(constraint)
+        for name, definition in circle_defs.items():
+            cc = definition.get("center") or [0.0, 0.0]
+            origin = np.array([float(cc[0]), float(cc[1])], dtype=float)
+            radius = float(definition.get("radius", 1.0))
+            dimensioned: list[float] = []
+            for constraint in by_circle[name]:
+                if constraint["kind"] == "radius":
+                    value = constraint.get("value")
+                    if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                        diags.append(diag("constraint.invalid", "error", f"radius of '{name}' needs a positive finite dimension", op=oid))
+                    else:
+                        dimensioned.append(float(value))
+            if dimensioned:
+                if max(dimensioned) - min(dimensioned) > 1e-8:
+                    diags.append(diag("sketch.conflict", "error", f"contradictory radius dimensions on circle '{name}'", op=oid))
+                radius = dimensioned[0]
+            if radius <= 0 or not math.isfinite(radius):
+                diags.append(diag("constraint.invalid", "error", f"circle '{name}' needs a positive finite radius", op=oid))
+                continue
+            normals: list[list[float]] = []
+            targets: list[float] = []
+            for constraint in by_circle[name]:
+                if constraint["kind"] != "tangent":
+                    continue
+                seg_name = next((ref for ref in constraint["refs"] if ref != name), None)
+                seg = sol.get(seg_name) if isinstance(seg_name, str) else None
+                if seg is None or len(seg) != 4:
+                    diags.append(diag("constraint.invalid", "error", f"circle '{name}' tangency needs a resolved 2D segment", op=oid))
+                    continue
+                a, b = np.asarray(seg[:2], dtype=float), np.asarray(seg[2:], dtype=float)
+                u = b - a
+                length = float(np.linalg.norm(u))
+                if length < 1e-10:
+                    diags.append(diag("constraint.invalid", "error", f"circle '{name}' cannot be tangent to a zero-length edge", op=oid))
+                    continue
+                normal = np.array([-u[1], u[0]]) / length
+                side = 1 if float(np.dot(normal, origin - a)) >= 0 else -1
+                normals.append(normal.tolist())
+                targets.append(float(np.dot(normal, a) + side * radius))
+            if normals:
+                matrix, target = np.asarray(normals), np.asarray(targets)
+                centre = origin + np.linalg.lstsq(matrix, target - matrix @ origin, rcond=None)[0]
+                if float(np.max(np.abs(matrix @ centre - target))) > 1e-7:
+                    diags.append(diag("sketch.conflict", "error", f"incompatible tangency constraints on circle '{name}'", op=oid))
+            else:
+                centre = origin
+            sol[name] = [float(centre[0]), float(centre[1]), radius]
+        if circle_constraints and not any(d["severity"] == "error" for d in diags):
+            diags.append(diag("constraint.circle_compat", "info", "Circle radius and line tangency evaluated analytically for this older SLAI constraint engine", op=oid))
+    if any(d["severity"] == "error" for d in diags):
+        return {"profile": None, "status": "invalid", "diagnostics": diags}
     profile = [[sol[f"s{i}"][0], sol[f"s{i}"][1]] for i in range(segs)]
     if not closed:
         profile.append([sol[f"s{segs - 1}"][2], sol[f"s{segs - 1}"][3]])

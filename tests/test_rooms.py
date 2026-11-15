@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from applications.SPADRA import rooms as R
+from applications.SPADRA import elements as E
 from applications.SPADRA.project import Project
 from applications.tools.errors import BadRequest
 
@@ -39,6 +40,12 @@ class Base(unittest.TestCase):
 
 
 class RoomBasics(Base):
+    def test_scoped_room_check_reuses_project_diagnostics(self):
+        room = self.room(name="Checked room")
+        self.assertEqual(E.check_room(self.p, room), [issue for issue in E.check(self.p) if issue["ref"] == room])
+        with self.assertRaisesRegex(Exception, "does not exist"):
+            E.check_room(self.p, "nonexistent-room")
+
     def test_a_room_has_an_outline_area_perimeter_and_no_solid(self):
         rid = self.room(name="Studio")
         obj = self.p.model.get(rid)

@@ -422,3 +422,122 @@ table.schedule tfoot td { font-weight: 700; border-top: 2px solid var(--ink); bo
 .keymap-clash { color: var(--danger, #b3261e); font-size: .8em; font-weight: 600; }
 .keymap-builtin summary { cursor: pointer; }
 .keymap-bar label { display: inline-flex; align-items: center; gap: .4rem; }
+
+/* SPADRA's full-screen startup composition. The shared loader still owns readiness, progress, failure and retry. */
+dialog.slai-startup.spadra-startup[open] {
+  position: fixed;
+  inset: 0;
+  box-sizing: border-box;
+  width: 100vw;
+  height: 100vh;
+  width: 100dvw;
+  height: 100dvh;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  outline: 0;
+  box-shadow: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: #121318;
+  color: #e9e9ed;
+  text-align: center;
+  font-family: Georgia, 'Times New Roman', serif;
+  --spadra-startup-size: min(40vw, 45vh, 480px);
+}
+.spadra-startup::backdrop { background: #121318; }
+.spadra-startup-content {
+  box-sizing: border-box;
+  width: var(--spadra-startup-size);
+  max-width: 100%;
+  display: grid;
+  justify-items: center;
+  gap: calc(var(--spadra-startup-size) * .047);
+  animation: spadra-startup-enter .35s ease-out both;
+}
+.spadra-startup .slai-startup-orb {
+  width: calc(var(--spadra-startup-size) * .94);
+  height: calc(var(--spadra-startup-size) * .94);
+}
+.spadra-startup .slai-startup-orb img {
+  width: 42%;
+  height: 42%;
+  object-fit: contain;
+}
+.spadra-startup .slai-startup-orb::before,
+.spadra-startup .slai-startup-orb::after {
+  border-width: max(1px, calc(var(--spadra-startup-size) * .005));
+  border-style: solid;
+  border-color: #363842;
+  border-top-color: #d9bc0b;
+  will-change: transform;
+  animation: slai-startup-orbit 3.4s linear infinite;
+}
+.spadra-startup .slai-startup-orb::after {
+  inset: 12%;
+  border-top-color: #ad9510;
+  animation-duration: 2.65s;
+  animation-direction: reverse;
+}
+.spadra-startup p[role="status"] {
+  margin: 0;
+  color: #e9e9ed;
+  font: 400 calc(var(--spadra-startup-size) * .108)/1.08 Georgia, 'Times New Roman', serif;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.spadra-startup progress {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  height: calc(var(--spadra-startup-size) * .058);
+  margin: 0;
+  padding: calc(var(--spadra-startup-size) * .008);
+  border: max(1px, calc(var(--spadra-startup-size) * .006)) solid #c4ab09;
+  border-radius: 999px;
+  overflow: hidden;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  color: #d6b900;
+}
+.spadra-startup progress::-webkit-progress-bar { background: transparent; border-radius: 999px; }
+.spadra-startup progress::-webkit-progress-value { background: #d6b900; border-radius: 999px; transition: width .25s ease-out; }
+.spadra-startup progress::-moz-progress-bar { background: #d6b900; border-radius: 999px; transition: width .25s ease-out; }
+.spadra-startup progress:indeterminate { background: linear-gradient(90deg, transparent 0 18%, #d6b900 40% 60%, transparent 82% 100%) 0 / 200% 100%; animation: spadra-startup-sweep 1.9s ease-in-out infinite; }
+.spadra-startup h1 {
+  margin: 0;
+  font: 400 calc(var(--spadra-startup-size) * .108)/1.12 Georgia, 'Times New Roman', serif;
+  color: #e9e9ed;
+}
+.spadra-startup .spadra-startup-subtitle {
+  margin: calc(var(--spadra-startup-size) * .028) 0 0;
+  max-width: 100%;
+  font: 400 calc(var(--spadra-startup-size) * .049)/1.32 Georgia, 'Times New Roman', serif;
+  color: #e9e9ed;
+}
+.spadra-startup.failed progress { display: none; }
+.spadra-startup.failed p[role="alert"] {
+  max-width: min(88vw, 45rem);
+  font: 400 clamp(13px, 1.5vw, 18px)/1.4 var(--font-ui), sans-serif;
+}
+.spadra-startup > button { margin: .3rem; cursor: pointer; }
+@keyframes spadra-startup-enter { from { opacity: 0; } to { opacity: 1; } }
+@keyframes spadra-startup-sweep { from { background-position: 150% 0; } to { background-position: -150% 0; } }
+@media (orientation: portrait) {
+  dialog.slai-startup.spadra-startup[open] { --spadra-startup-size: min(72vw, 22vh, 480px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .spadra-startup-content { animation: none; }
+  .spadra-startup .slai-startup-orb::before,
+  .spadra-startup .slai-startup-orb::after { animation: none; will-change: auto; }
+  .spadra-startup progress:indeterminate { animation: none; background-position: 0; }
+  .spadra-startup progress::-webkit-progress-value,
+  .spadra-startup progress::-moz-progress-bar { transition: none; }
+}

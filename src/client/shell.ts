@@ -1,7 +1,7 @@
 /** The application shell: title bar, menu tabs, ribbon, document tabs, panels, status bar and the model-check toast. */
 import { h, replace } from "../../../tools/web/src/dom.js";
 import { glyph } from "../../../tools/web/src/icons.js";
-import { promptDialog, saveBlob, toast } from "../../../tools/web/src/ui.js";
+import { openDialog, promptDialog, saveBlob, toast } from "../../../tools/web/src/ui.js";
 import { openMenu, type MenuEntry } from "./menus.js";
 import { Browser, iconFor } from "./browser.js";
 import { beamAnalysisDialog } from "./engineering.js";
@@ -107,11 +107,23 @@ export class Shell {
     store.time.on(() => this.timeline.syncTime());
     window.addEventListener("keydown", (e) => this.shortcut(e));
     window.addEventListener("beforeunload", (e) => { if (store.project?.dirty) { e.preventDefault(); } });
+    store.startAutosave();
     this.render();
   }
 
   // ---------------------------------------------------------------------------------------------------------- commands
   private async save(): Promise<void> { if (store.project && (await store.save())) toast("Project saved.", { kind: "ok", timeoutMs: 2500 }); }
+  private autosaveDialog(): void {
+    const intervals = [0, 5, 10, 15, 30, 60];
+    const select = h("select", { attrs: { "aria-label": "Autosave interval" } },
+      ...intervals.map((minutes) => h("option", { value: String(minutes), text: minutes ? `Every ${minutes} minutes` : "Off", selected: minutes === store.autosaveMinutes })));
+    openDialog({ title: "Automatic saving", size: "narrow", body: h("div", {},
+      h("label", { text: "Save changes automatically", attrs: { for: "spadra-autosave-setting" } }),
+      select,
+      h("p", { class: "note", text: "SPADRA only saves when there are changes, using the existing project backups. The setting is remembered on this device." })),
+      actions: [{ label: "Apply", kind: "primary", run: () => { store.setAutosaveMinutes(Number(select.value)); return true; } }] });
+    select.id = "spadra-autosave-setting";
+  }
   private async saveAs(): Promise<void> {
     if (!store.project) return;
     const name = await promptDialog({ title: "Save As", label: "Name of the copy", value: `${store.project.name} copy`, confirmLabel: "Save a copy", maxLength: 80,
@@ -302,6 +314,7 @@ export class Shell {
       { label: "Open project…", icon: "folder", run: () => { void openProjectDialog(store); } },
       { label: "Save", icon: "save", disabled: !has, run: () => { void this.save(); } },
       { label: "Save As…", icon: "save", disabled: !has, run: () => { void this.saveAs(); } },
+      { label: `Autosave: ${store.autosaveMinutes ? `${store.autosaveMinutes} min` : "Off"}…`, icon: "clock", run: () => this.autosaveDialog() },
       { label: "Close project", icon: "close", disabled: !has, run: () => { void this.closeProject(); } },
       "separator",
       { label: "Keyboard shortcuts…", icon: "info", run: () => shortcutsDialog(keymap, () => this.render()) },
@@ -536,7 +549,7 @@ export class Shell {
     replace(this.title,
       h("div", { class: "brand" }, h("img", { attrs: { src: "/assets/img/spadra_main.png", alt: "" } }), h("span", { text: "SPADRA" })),
       switcher,
-      p ? h("div", { class: "save-state", data: { dirty: String(p.dirty) }, attrs: { title: p.path ? `Saved to ${p.path}` : "Not saved yet" } }, glyph("cloud"), h("span", { text: p.dirty ? "Unsaved changes" : p.path ? "Saved" : "Not saved" })) : null,
+      p ? h("div", { class: "save-state", data: { dirty: String(p.dirty) }, attrs: { title: p.path ? `Saved to ${p.path}${p.last_saved ? ` · Last saved ${new Date(p.last_saved).toLocaleString()}` : ""}` : "Not saved yet" } }, glyph("cloud"), h("span", { text: p.dirty ? "Unsaved changes" : p.path ? "Saved" : "Not saved" })) : null,
       h("div", { class: "spacer" }));
   }
 

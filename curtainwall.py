@@ -289,7 +289,7 @@ def cell_spec(sp, cell):
             "thickness": sp["panel_thickness"], "offset": sp["panel_offset"],
             "door_type": sp["door_type"], "hinge": sp["door_hinge"],
             "swing": sp["door_swing"], "slide": "end",
-            "opening_angle": sp["opening_angle"], "show_open": False}
+            "opening_angle": sp["opening_angle"], "show_open": False, "threshold": "auto"}
     layers = [wall]
     for bands, (lo, hi) in ((sp["bands"]["cols"], (cell["u0"], cell["u1"])),
                             (sp["bands"]["rows"], (cell["z0"], cell["z1"]))):
@@ -521,6 +521,23 @@ def _slats(u0, u1, z0, z1, yd, lo):
     return slats
 
 
+def _floor_door_columns(project: Any, meta: Mapping[str, Any], sp: Mapping[str, Any]) -> set[int]:
+    """Bottom door columns that actually meet a supporting floor top."""
+    from . import attachments as AT
+    base, level = base_z(project, meta), str(E.m(meta, "level"))
+    c, s = math.cos(sp["angle"]), math.sin(sp["angle"])
+    eligible: set[int] = set()
+    for cell in cells(sp):
+        if cell["row"] != 0 or cell_spec(sp, cell)["type"] != "Door":
+            continue
+        mid = (cell["u0"] + cell["u1"]) / 2
+        p = (sp["start"][0] + mid * c, sp["start"][1] + mid * s)
+        floor = AT.find_floor(project, level, [p])
+        if floor and abs(AT.floor_top(project, floor) - base) <= 0.002:
+            eligible.add(cell["col"])
+    return eligible
+
+
 def members(project: Any, meta: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Every solid of the curtain wall in the wall's own frame (u along, d across, z up from the base), in drawing order: the frame, then each field's
     glazing, panel or door leaves. Each carries its ``kind``, ``material``, ``mesh``, what it is (``role``, ``cell``, ``length``) and its component
@@ -530,7 +547,9 @@ def members(project: Any, meta: Mapping[str, Any]) -> list[dict[str, Any]]:
     Two things beyond the grid: a top that follows a roof (``top_profile``) becomes one sloped top member, the members and fields under it are cut
     along its underside and those wholly above it are left out; and an end that meets another curtain wall (``end_cond``) gives up its perimeter
     member to the corner post and stops where the post begins."""
-    return _members(project, spec(meta))
+    sp = spec(meta)
+    sp["floor_door_columns"] = _floor_door_columns(project, meta, sp)
+    return _members(project, sp)
 
 
 def _members(project: Any, sp: Mapping[str, Any], doors: bool = True) -> list[dict[str, Any]]:
@@ -600,6 +619,21 @@ def _members(project: Any, sp: Mapping[str, Any], doors: bool = True) -> list[di
             frame(cid, role, True, z, max(lo_u, a0 - w), min(hi_u, a1 + w), k0, k1)
 
     join = sp["join"]
+    removed_bottom = {cell["col"] for cell in cells(sp) if cell["row"] == 0 and cell_spec(sp, cell)["type"] == "Door" and
+                      (cell_spec(sp, cell)["threshold"] == "remove" or
+                       (cell_spec(sp, cell)["threshold"] == "auto" and cell["col"] in sp.get("floor_door_columns", ())))}
+
+    def bottom_segments(cid: str, role: str, z: float, a0: float, a1: float,
+                        k0: float = 0.0, k1: float = 0.0) -> None:
+        """Trim just the door field's bottom span, preserving neighbouring frame members."""
+        cursor = a0
+        for col in sorted(removed_bottom):
+            left, right = V[col] + w / 2, V[col + 1] - w / 2
+            if right <= a0 or left >= a1:
+                continue
+            horizontal(cid, role, z, cursor, min(left, a1), k0 if cursor == a0 else 0.0)
+            cursor = max(cursor, min(right, a1))
+        horizontal(cid, role, z, cursor, a1, 0.0, k1)
     last_v, last_h = len(V) - 1, len(Hh) - 1
     top_index = last_h if low is None else last_h - 1                                    # a sloped top replaces the top perimeter member
     for i, u in enumerate(V):
@@ -635,21 +669,24 @@ def _members(project: Any, sp: Mapping[str, Any], doors: bool = True) -> list[di
                 for c in range(len(V) - 1):
                     b0 = start_u if (c == 0 and start_u is not None) else V[c] + w / 2
                     b1 = end_u if (c == len(V) - 2 and end_u is not None) else V[c + 1] - w / 2
-                    horizontal(cid, role, z, b0, b1)
+                    bottom_segments(cid, role, z, b0, b1) if r == 0 and removed_bottom else horizontal(cid, role, z, b0, b1)
             else:
-                horizontal(cid, role, z, a0, a1)
+                bottom_segments(cid, role, z, a0, a1) if r == 0 and removed_bottom else horizontal(cid, role, z, a0, a1)
         elif join == "mitre" and perimeter:
             bottom = r == 0
             a0 = start_u if start_u is not None else w / 2
             a1 = end_u if end_u is not None else L - w / 2
             k0 = 0.0 if start_u is not None else (1.0 if bottom else -1.0)
             k1 = 0.0 if end_u is not None else (-1.0 if bottom else 1.0)
-            frame(cid, role, True, z, a0, a1, k0, k1)
+            if bottom and removed_bottom:
+                bottom_segments(cid, role, z, a0, a1, k0, k1)
+            else:
+                frame(cid, role, True, z, a0, a1, k0, k1)
         else:
             for c in range(len(V) - 1):
                 b0 = start_u if (c == 0 and start_u is not None) else V[c] + w / 2
                 b1 = end_u if (c == len(V) - 2 and end_u is not None) else V[c + 1] - w / 2
-                frame(cid, role, True, z, b0, b1)
+                bottom_segments(cid, role, z, b0, b1) if r == 0 and removed_bottom else frame(cid, role, True, z, b0, b1)
     if lines_top is not None:                                                            # the sloped top member, from end to end (or post to post)
         top, lowl = lines_top
         a0 = start_u if start_u is not None else 0.0
@@ -673,6 +710,8 @@ def _members(project: Any, sp: Mapping[str, Any], doors: bool = True) -> list[di
         cs = cell_spec(sp, cell)
         kind = {"Window": "glass", "Opaque panel": "panel", "Door": "door", "Louvre": "louvre"}[cs["type"]]
         u0, u1, z0, z1 = _field_box(sp, cell, low)
+        if kind == "door" and cell["row"] == 0 and cell["col"] in removed_bottom:
+            z0 = 0.0
         yd, t = cs["offset"], cs["thickness"]
         regions = _clip_below(u0, u1, z0, z1, [(u, zz) for u, zz in low] if low is not None else None)
         if kind != "door":
@@ -815,7 +854,8 @@ def build(project: Any, oid: str) -> None:
     meta = E.meta_of(project, oid)
     check_spec(project, meta, oid)
     mesh, runs = _parts(project, meta)
-    E._attach(project, oid, {"parts": runs, "component_faces": _component_runs(project, meta), "built_sig": _signature(meta)})
+    E._attach(project, oid, {"parts": runs, "component_faces": _component_runs(project, meta), "built_sig": _signature(meta),
+                             "built_threshold": sorted(_floor_door_columns(project, meta, spec(meta)))})
     E._set_mesh(project, oid, mesh)
 
 
@@ -1161,7 +1201,7 @@ def add_curtainwalls(project: Any, p: Mapping[str, Any], to_m: float) -> list[st
     closed = bool(p.get("closed")) and len(pts) >= 3
     level = project.level(text(p.get("level"), "level", 80))
     height = number(p.get("height", 3000), "height", 100, 500000) / 1000.0
-    setup = _setup(p, to_m)
+    setup = _setup({"frame_material": E.default_material(project, "curtainwall"), **p}, to_m)
     corner = p.get("corner", "auto")
     if corner != "auto":
         corner = E._choice(corner, tuple(CORNER_TYPES), "corner type")
@@ -1258,6 +1298,8 @@ def set_panel_field(project: Any, oid: str, cell: str, field: str, value: Any) -
             over["opening_angle"] = number(value, "opening angle", E.MIN_OPENING_ANGLE, E.MAX_OPENING_ANGLE)
         elif field == "show_open":                                                        # the 3D view shows the leaf open at its opening angle
             over["show_open"] = value in (True, "open", "true", "1", 1)
+        elif field == "threshold":
+            over["threshold"] = E._choice(value, ("auto", "keep", "remove"), "door threshold")
         elif field == "open_to":                                                          # dragged in 3D: the angle, and shown open there
             over["opening_angle"] = number(value, "opening angle", E.MIN_OPENING_ANGLE, E.MAX_OPENING_ANGLE)
             over["show_open"] = True
@@ -2166,7 +2208,9 @@ def reconcile(project: Any) -> list[str]:
         before = (E.m(meta, "end_cond") or {}, E.m(meta, "corner_posts") or [])
         sig = _signature(meta)
         after = resolve_ends(project, oid)
-        if (after["end_cond"], after["corner_posts"]) != before or sig != E.m(meta, "built_sig"):
+        threshold = sorted(_floor_door_columns(project, meta, spec(meta)))
+        if ((after["end_cond"], after["corner_posts"]) != before or sig != E.m(meta, "built_sig") or
+                threshold != (E.m(meta, "built_threshold") or [])):
             build(project, oid)
             rebuilt.append(oid)
     return rebuilt
@@ -2269,6 +2313,8 @@ def component_properties(project: Any, oid: str, part: str) -> dict[str, Any]:
         rows = [{"key": pre + "type", "label": "Type", "type": "choice", "value": cs["type"], "choices": E._choices(PANEL_TYPES)}]
         if cs["type"] == "Door":
             rows += [{"key": pre + "door_type", "label": "Door type", "type": "choice", "value": cs["door_type"], "choices": E._choices(DOOR_TYPES)},
+                     {"key": pre + "threshold", "label": "Bottom frame", "type": "choice", "value": cs["threshold"],
+                      "choices": [{"value": "auto", "label": "Auto (remove on floor)"}, {"value": "keep", "label": "Keep"}, {"value": "remove", "label": "Remove"}]},
                      {"key": pre + "hinge", "label": "Hinge", "type": "choice", "value": cs["hinge"], "choices": [{"value": "start", "label": "Start side"}, {"value": "end", "label": "End side"}]},
                      {"key": pre + "swing", "label": "Swing", "type": "choice", "value": "left" if cs["swing"] > 0 else "right", "choices": E._choices(("left", "right"))},
                      {"key": pre + "opening_angle", "label": "Opening angle", "type": "number", "unit": "°", "value": cs["opening_angle"]},

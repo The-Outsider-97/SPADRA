@@ -45,6 +45,16 @@ function writeNumber(key, value) {
     }
     catch { /* storage unavailable: the setting lasts for this page only */ }
 }
+const AUTOSAVE_MINUTES = [0, 5, 10, 15, 30, 60];
+function readAutosaveMinutes() {
+    try {
+        const setting = Number(window.localStorage.getItem("spadra.autosaveMinutes") ?? "0");
+        return AUTOSAVE_MINUTES.some((minutes) => minutes === setting) ? setting : 0;
+    }
+    catch {
+        return 0;
+    }
+}
 export class Store {
     api = createClient({ slug: "spadra" });
     changed = new Emitter();
@@ -66,6 +76,10 @@ export class Store {
     gridSpacingMm = readNumber("spadra.gridSpacingMm");
     /** Whether the 3D view orbits about the selected element (otherwise about the point it looks at). */
     orbitSelection = readFlag("spadra.orbitSelection", true);
+    /** Session preference, never stored in the project itself. Zero disables automatic saving. */
+    autosaveMinutes = readAutosaveMinutes();
+    autosaveTimer = null;
+    savePending = null;
     /** What the next wall will be: height in metres, thickness in millimetres, and which line the drawn path is: the wall's near face (the right-hand one looking along
      *  the path), its centre, or its far face, plus an offset in millimetres toward the far side. Shared by the 2D and 3D wall tools. */
     wallOptions = { height: 3.2, thickness: 250, reference: "centre", offset: 0 };
@@ -109,6 +123,8 @@ export class Store {
     /** A sketch started from a door/window context menu. The closed SDRW contour remains editable in its drawing and
      *  is associated with the opening after the user's next closed polyline command succeeds. */
     pendingOpeningSketch = null;
+    /** Attribute clipboard is scoped to the currently open project; it stores IDs, never copied ownership. */
+    attributeSource = null;
     /** Model-element commands are shared by the 2D and 3D viewports and Project Browser. The menu belongs to the clicked
      *  element, not whichever model item happened to be previously selected. The server owns every geometry operation. */
     openModelContextMenu(id, category, anchor, at = {}) {
@@ -117,6 +133,15 @@ export class Store {
             return;
         }
         const entries = [{ label: "Select element", icon: "select", run: () => { void this.select({ kind: "model", ids: [id] }); } }];
+        entries.push("separator", { label: "Copy Attributes", icon: "copy", run: () => {
+                if (!this.project)
+                    return;
+                this.attributeSource = { id, category, project: this.project.id };
+                toast(`Copied ${category} attributes. Select the destination elements, then choose Paste Attributes.`, { kind: "info" });
+            } });
+        if (this.attributeSource?.category === category && this.attributeSource.project === this.project?.id) {
+            entries.push({ label: "Paste Attributes…", icon: "paste", run: () => { void this.pasteAttributes(id); } });
+        }
         const edgePrompt = async (title) => {
             const value = await promptDialog({ title, label: "Boundary edge number (1, 2, …) or all", value: "all", confirmLabel: title,
                 validate: (s) => /^(all|[1-9]\d*)$/i.test(s.trim()) ? null : "Enter an edge number or all." });
@@ -149,12 +174,102 @@ export class Store {
             entries.push("separator", { label: "Corner at Start…", icon: "curtainwall", run: () => { void cornerDialog(this, id, "start"); } }, { label: "Corner at End…", icon: "curtainwall", run: () => { void cornerDialog(this, id, "end"); } });
         }
         if (category === "wall" || category === "curtainwall") {
-            entries.push("separator", { label: "Stand on the Floor Below", icon: "floor", run: () => { void this.run("model.attach_wall", { ids: [id], to: "floor" }); } }, { label: "Free the Base from the Floor", icon: "close", run: () => { void this.run("model.detach_wall", { ids: [id], from: "floor" }); } }, { label: "Attach Top to Roof…", icon: "roof", run: () => { void this.attachTopToRoof(id); } }, { label: "Free the Top", icon: "close", run: () => { void this.run("model.detach_wall", { ids: [id], from: "roof" }); } });
+            const selected = this.selection?.kind === "model" && this.selection.ids.includes(id) ? this.selection.ids : [id];
+            const candidates = new Map((this.scene?.objects ?? []).map((obj) => [obj.id, obj.category]));
+            const wallIds = selected.filter((target) => target === id || ["wall", "curtainwall"].includes(candidates.get(target) ?? ""));
+            entries.push("separator", { label: "Stand on the Floor Below", icon: "floor", run: () => { void this.run("model.attach_wall", { ids: wallIds, to: "floor" }); } }, { label: "Free the Base from the Floor", icon: "close", run: () => { void this.run("model.detach_wall", { ids: wallIds, from: "floor" }); } }, { label: "Attach Top to Roof…", icon: "roof", run: () => { void this.attachTopToRoof(wallIds); } }, { label: "Free the Top", icon: "close", run: () => { void this.run("model.detach_wall", { ids: wallIds, from: "roof" }); } });
         }
         if (category === "door" || category === "window") {
             entries.push("separator", { label: "Add Opening Profile", icon: "rectangle", run: () => { void this.standardOpeningProfile(id, category); } }, { label: "Use Existing SDRW Profile…", icon: "polyline", run: () => { void this.chooseOpeningDrawingProfile(id); } }, { label: "Sketch New SDRW Profile…", icon: "polyline", run: () => { void this.startOpeningProfileSketch(id); } }, { label: "Import SDRW Profile into Drawing…", icon: "folder", run: () => { void this.importOpeningDrawingProfile(); } }, "separator", { label: "Replace Opening Profile…", icon: "rectangle", run: () => { void this.standardOpeningProfile(id, category, true); } }, { label: "Replace Opening Profile from SDRW…", icon: "polyline", run: () => { void this.chooseOpeningDrawingProfile(id, true); } }, { label: "Sketch Replacement Profile…", icon: "polyline", run: () => { void this.startOpeningProfileSketch(id, true); } }, { label: "Remove Opening Profile", icon: "close", run: () => { void this.run("model.remove_opening_profile", { opening: id }); } });
         }
         openMenu(anchor, entries, { label: `${category} actions` });
+    }
+    async pasteAttributes(id) {
+        const source = this.attributeSource;
+        if (!source || source.project !== this.project?.id)
+            return;
+        const targets = this.selection?.kind === "model" && this.selection.ids.includes(id) ? this.selection.ids : [id];
+        const categoryOf = new Map((this.scene?.objects ?? []).map((obj) => [obj.id, obj.category]));
+        const incompatible = targets.filter((target) => target !== source.id && categoryOf.has(target) && categoryOf.get(target) !== source.category);
+        const destinations = targets.filter((target) => target !== source.id && !incompatible.includes(target));
+        if (!destinations.length) {
+            toast("Select at least one destination other than the source.", { kind: "info" });
+            return;
+        }
+        const options = [
+            ["appearance", "Material, colour and conditional appearance"],
+            ["construction", "Construction layers (walls, floors, roofs)"],
+            ["classification", "BIM classification"],
+            ["custom", "Instance custom properties"],
+            ["formulas", "Parametric formulas"],
+            ["dimensions", "Compatible dimensions (may change geometry)"],
+        ];
+        const toggles = options.map(([key, label]) => {
+            const input = h("input", { attrs: { type: "checkbox", value: key } });
+            if (key === "appearance")
+                input.checked = true;
+            if (key === "construction" && !["wall", "roof", "floor"].includes(source.category))
+                input.disabled = true;
+            return { key, label, input };
+        });
+        const preview = h("div", { class: "muted" });
+        try {
+            const [from, to] = await Promise.all([
+                this.api.post("/properties", { model: source.id }),
+                this.api.post("/properties", { model: destinations[0] }),
+            ]);
+            const collect = (properties) => {
+                const result = new Map();
+                for (const group of [{ title: "General", rows: properties.top }, ...properties.groups]) {
+                    for (const row of group.rows)
+                        if (row.key)
+                            result.set(row.key, {
+                                label: row.label, group: group.title.toLowerCase(), value: String(row.expression ?? row.value ?? ""),
+                            });
+                }
+                return result;
+            };
+            const fromRows = collect(from), toRows = collect(to);
+            const updatePreview = () => {
+                const selected = new Set(toggles.filter(({ input }) => input.checked).map(({ key }) => key));
+                const differences = [];
+                for (const [key, row] of fromRows) {
+                    const dest = toRows.get(key);
+                    if (!dest || row.value === dest.value)
+                        continue;
+                    const group = row.group;
+                    const allowed = (selected.has("appearance") && (key.includes("material") || key.includes("color") || group.includes("appearance")))
+                        || (selected.has("dimensions") && ["height", "width", "thickness", "length", "pitch", "slope", "lean_angle", "lean_enabled", "lean_direction"].includes(key))
+                        || (selected.has("classification") && (group.includes("classification") || group.includes("omniclass") || group.includes("ifc")))
+                        || (selected.has("custom") && group.includes("custom"))
+                        || (selected.has("construction") && group.includes("layer"))
+                        || (selected.has("formulas") && row.value.startsWith("="));
+                    if (allowed)
+                        differences.push(`${row.label}: ${dest.value || "(empty)"} → ${row.value || "(empty)"}`);
+                }
+                preview.replaceChildren(h("strong", { text: "Preview · first destination" }), ...differences.slice(0, 12).map((line) => h("div", { text: line })), h("div", { text: differences.length > 12 ? `…and ${differences.length - 12} more changes` :
+                        differences.length ? "Layer definitions and material rules are also validated on Apply." :
+                            "No differing visible properties in the selected groups; non-scalar rules and layers are validated on Apply." }));
+            };
+            for (const { input } of toggles)
+                input.addEventListener("change", updatePreview);
+            updatePreview();
+        }
+        catch {
+            preview.textContent = "Property preview is unavailable. SPADRA will still validate the complete transfer before committing it.";
+        }
+        const body = h("div", {}, h("p", { text: `Apply properties from one ${source.category} to ${destinations.length} eligible destination(s)${incompatible.length ? ` (${incompatible.length} incompatible selection(s) excluded)` : ""}. Placement, IDs, hosts and shared type definitions stay unchanged.` }), ...toggles.map(({ label, input }) => h("label", { class: "checkbox-row" }, input, h("span", { text: label }))), preview);
+        const result = await openDialog({ title: "Paste compatible attributes", size: "narrow", body,
+            actions: [{ label: "Apply to destinations", kind: "primary", run: () => {
+                        const selected = toggles.filter(({ input }) => input.checked).map(({ key }) => key);
+                        if (!selected.length) {
+                            toast("Choose at least one attribute group.", { kind: "info" });
+                            return null;
+                        }
+                        return selected;
+                    } }] }).result;
+        if (result?.length)
+            await this.run("model.copy_attributes", { source: source.id, destinations, groups: result });
     }
     /** A roof edge member or drip edge: what it is decides the menu, so it is read first (one small request). */
     async accessoryContextMenu(id, category, anchor) {
@@ -174,7 +289,7 @@ export class Store {
             openMenu(anchor, entries, { label: `${category} actions` });
     }
     /** Attach the top of a wall or curtain wall to a roof: the one roof in the model, or the one the person picks. */
-    async attachTopToRoof(id) {
+    async attachTopToRoof(ids) {
         const roofs = (this.scene?.objects ?? []).filter((o) => o.category === "roof");
         let roof = roofs.length === 1 ? roofs[0]?.id : undefined;
         if (!roof) {
@@ -189,7 +304,7 @@ export class Store {
                 return;
             roof = choice;
         }
-        await this.run("model.attach_wall", { ids: [id], to: "roof", roof });
+        await this.run("model.attach_wall", { ids, to: "roof", roof });
     }
     async standardOpeningProfile(opening, category, replace = false) {
         const width = await promptDialog({ title: `${replace ? "Replace" : "Add"} ${category} opening profile`, label: "Profile face width (mm)", value: "50",
@@ -371,25 +486,78 @@ export class Store {
     async save() {
         if (!this.project)
             return false;
-        const result = await this.guard(() => this.api.post("/project/save", this.project?.path ? {} : { name: this.project?.name }), "Saving");
-        if (!result)
-            return false;
-        this.project = result.project;
-        this.boot = this.boot ? { ...this.boot, recent: (await this.guard(() => this.api.get("/bootstrap")))?.recent ?? this.boot.recent } : this.boot;
-        this.setStatus(`Saved to ${result.path}`);
-        return true;
+        if (this.savePending)
+            return this.savePending;
+        const source = this.project;
+        const save = async () => {
+            const result = await this.guard(() => this.api.post("/project/save", { ...(source.path ? {} : { name: source.name }), expected_revision: source.revision }), "Saving");
+            if (!result)
+                return false;
+            // A later command may have completed while the save response was in flight.
+            // Never clear a newer unsaved revision with an older save response.
+            if (this.project?.id === source.id && this.project.revision === source.revision)
+                this.project = result.project;
+            else if (this.project?.id === source.id && !this.project.path)
+                this.project = { ...this.project, path: result.path };
+            this.boot = this.boot ? { ...this.boot, recent: (await this.guard(() => this.api.get("/bootstrap")))?.recent ?? this.boot.recent } : this.boot;
+            this.setStatus(`Saved to ${result.path}`);
+            return true;
+        };
+        this.savePending = save();
+        try {
+            return await this.savePending;
+        }
+        finally {
+            this.savePending = null;
+        }
+    }
+    /** The shell starts this once; changing the interval replaces the existing timer. */
+    startAutosave() { this.scheduleAutosave(); }
+    setAutosaveMinutes(minutes) {
+        if (!AUTOSAVE_MINUTES.some((n) => n === minutes))
+            throw new RangeError("Unsupported autosave interval");
+        this.autosaveMinutes = minutes;
+        try {
+            window.localStorage.setItem("spadra.autosaveMinutes", String(minutes));
+        }
+        catch { /* session-only */ }
+        this.scheduleAutosave();
+        this.changed.emit();
+    }
+    scheduleAutosave() {
+        if (this.autosaveTimer !== null)
+            window.clearInterval(this.autosaveTimer);
+        this.autosaveTimer = this.autosaveMinutes > 0 ? window.setInterval(() => {
+            if (this.project?.dirty && !this.savePending)
+                void this.save();
+        }, this.autosaveMinutes * 60_000) : null;
     }
     /** Save a copy under a new name and carry on with the copy. The server never overwrites another project. */
     async saveAs(name) {
         if (!this.project)
             return false;
-        const result = await this.guard(() => this.api.post("/project/save", { name, save_as: true }), "Saving a copy");
-        if (!result)
+        if (this.savePending)
+            await this.savePending;
+        const source = this.project;
+        if (!source)
             return false;
-        this.project = result.project;
-        this.boot = this.boot ? { ...this.boot, recent: (await this.guard(() => this.api.get("/bootstrap")))?.recent ?? this.boot.recent } : this.boot;
-        this.setStatus(`Saved a copy to ${result.path}`);
-        return true;
+        const task = async () => {
+            const result = await this.guard(() => this.api.post("/project/save", { name, save_as: true, expected_revision: source.revision }), "Saving a copy");
+            if (!result)
+                return false;
+            if (this.project?.id === source.id && this.project.revision === source.revision)
+                this.project = result.project;
+            this.boot = this.boot ? { ...this.boot, recent: (await this.guard(() => this.api.get("/bootstrap")))?.recent ?? this.boot.recent } : this.boot;
+            this.setStatus(`Saved a copy to ${result.path}`);
+            return true;
+        };
+        this.savePending = task();
+        try {
+            return await this.savePending;
+        }
+        finally {
+            this.savePending = null;
+        }
     }
     /** Open one of this project's backups as a new, unsaved copy. The project it came from is not touched. */
     async recover(backup, discard = false) {

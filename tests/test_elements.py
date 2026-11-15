@@ -9,7 +9,7 @@ from pathlib import Path
 
 from applications.SPADRA import elements as E
 from applications.SPADRA.project import NS, Project
-from applications.tools.errors import BadRequest
+from applications.tools.errors import BadRequest, Conflict
 
 
 class ElementCase(unittest.TestCase):
@@ -133,6 +133,33 @@ class RoofAccessoryConnections(ElementCase):
 
 
 class Appearance(ElementCase):
+    def test_category_material_defaults_respect_project_and_instance_precedence(self):
+        self.p.manifest["default_materials"] = {"wall": "Masonry", "floor": "Timber", "roof": "Glass", "beam": "Timber", "structural": "Concrete"}
+        self.p.manifest["material_colors"] = {"Masonry": "#194477"}
+        wall = self.wall()
+        floor = self.run_("model.add_floor", level=self.l1, points=[[0, 0], [6000, 0], [6000, 4000], [0, 4000]])["id"]
+        roof = self.run_("model.add_roof", level=self.l2, roof="flat", points=[[0, 0], [6000, 0], [6000, 4000], [0, 4000]])["id"]
+        beam = self.run_("model.add_beam", level=self.l1, start=[0, 1000], end=[6000, 1000])["id"]
+        column = self.run_("model.add_column", level=self.l1, point=[2000, 4000], width=300, depth=300, top=3)["id"]
+        for oid, expected in ((wall, "Masonry"), (floor, "Timber"), (roof, "Glass"), (beam, "Timber")):
+            self.assertEqual(E.m(self.meta(oid), "material"), expected)
+        self.assertEqual(E.m(self.meta(column), "material"), "Concrete")
+        self.assertEqual(E.default_material(self.p, "wall"), "Masonry")
+        self.assertEqual(E.default_color(self.p, "wall"), "#194477")
+        self.assertEqual(self.p.summary()["default_materials"]["wall"], "Masonry")
+        self.assertEqual(next(item for item in self.p.scene_data()["objects"] if item["id"] == wall)["color"], "#194477")
+        explicit = self.wall(a=(0, 8000), b=(6000, 8000), material="Concrete")
+        self.assertEqual(E.m(self.meta(explicit), "material"), "Concrete")
+        self.run_("model.set_property", id=wall, key="color", value="#BB7733")
+        self.assertEqual(next(item for item in self.p.scene_data()["objects"] if item["id"] == wall)["color"], "#BB7733")
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / "defaults.spadra"
+            self.p.save_as(target)
+            reopened = Project.open(target)
+            self.assertEqual(reopened.summary()["default_materials"]["wall"], "Masonry")
+            self.assertEqual(E.m(reopened.model.get(wall)["metadata"], "material"), "Masonry")
+            self.assertEqual(next(item for item in reopened.scene_data()["objects"] if item["id"] == wall)["color"], "#BB7733")
+
     def test_shared_and_instance_colors_are_independent_and_undoable(self):
         a, b = self.wall(), self.wall(a=(0, 2000), b=(6000, 2000))
         self.run_("model.set_property", id=a, key="material_color", value="#164f7c")
@@ -575,6 +602,130 @@ class PropertiesAndChecks(ElementCase):
         d = self.run_("model.add_door", wall=w, offset=2.0)["id"]
         self.p.model.attach_semantics(d, {"host": "gone"}, namespace=NS)
         self.assertTrue(any("lost its wall" in i["message"] for i in self.p.check()["issues"]))
+
+
+class InclinedWallAndAttributeCopy(ElementCase):
+    def test_inclination_hosted_opening_and_formulas_round_trip_through_native_project(self):
+        wall = self.wall()
+        door = self.run_("model.add_door", wall=wall, offset=2.0)["id"]
+        self.run_("model.set_property", id=wall, key="lean_angle", value="=angle * 0 + 5 deg")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "inclined.spadra"
+            self.p.save(path)
+            reopened = Project.open(path)
+            self.assertAlmostEqual(E.m(reopened.model.get(wall)["metadata"], "lean_angle"), 5)
+            self.assertTrue(E.m(reopened.model.get(wall)["metadata"], "lean_enabled"))
+            self.assertIn("lean_angle", E.m(reopened.model.get(wall)["metadata"], "formulas"))
+            self.assertGreater(reopened.model.world_bounds(door)[1][1], 0.0)
+            reopened.execute("model.set_property", {"id": wall, "key": "height", "value": 4.0})
+            self.assertGreater(reopened.model.world_bounds(wall)[1][1], self.bounds(wall)[1][1])
+
+    def test_second_process_cannot_overwrite_newer_project_manifest(self):
+        self.wall()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "concurrent.spadra"
+            self.p.save(path)
+            other = Project.open(path)
+            theirs = other.execute("model.add_wall", {"start": [0, 5000], "end": [6000, 5000], "level": self.l1, "height": 3})["result"]["id"]
+            other.save()
+            ours = self.wall((0, 10000), (6000, 10000))
+            with self.assertRaises(Conflict):
+                self.p.save()
+            self.assertTrue(self.p.dirty)
+            reopened = Project.open(path)
+            self.assertTrue(E.alive(reopened, theirs))
+            self.assertFalse(E.alive(reopened, ours))
+
+    def test_nearly_coincident_roof_cut_stations_do_not_create_zero_area_mesh_triangles(self):
+        from applications.SPADRA import geometry as G
+        mesh = G.wall_mesh(4, .25, 3, (), top_breaks=(0, 1e-16, -1e-16))
+        for a, b, c in mesh[1]:
+            u = [mesh[0][b][i] - mesh[0][a][i] for i in range(3)]
+            v = [mesh[0][c][i] - mesh[0][a][i] for i in range(3)]
+            normal = [u[1]*v[2] - u[2]*v[1], u[2]*v[0] - u[0]*v[2], u[0]*v[1] - u[1]*v[0]]
+            self.assertGreater(sum(q*q for q in normal), 1e-30)
+
+    def test_lean_is_parametric_and_reversible(self):
+        w = self.wall()
+        self.run_("model.set_property", id=w, key="lean_angle", value=15)
+        a, b = self.bounds(w)
+        self.assertAlmostEqual(b[1] - a[1], .25 / math.cos(math.radians(15)) + 3.2 * math.tan(math.radians(15)), places=5)
+        self.assertAlmostEqual(self.vol(w), 6 * 3.2 * .25 / math.cos(math.radians(15)), places=5)
+        self.run_("model.set_property", id=w, key="lean_angle", value=-15)
+        a2, b2 = self.bounds(w)
+        self.assertAlmostEqual(b2[1] - a2[1], b[1] - a[1], places=6)
+        self.assertAlmostEqual(self.meta(w)[f"{NS}:lean_angle"], -15)
+        self.p.undo()
+        self.assertAlmostEqual(self.meta(w)[f"{NS}:lean_angle"], 15)
+        self.run_("model.set_property", id=w, key="lean_enabled", value=False)
+        self.assertEqual(self.kind(w), "box")
+
+    def test_lean_opening_follows_wall_and_formulas_update(self):
+        w = self.wall()
+        door = self.run_("model.add_door", wall=w, offset=2.0)["id"]
+        before = self.bounds(door)
+        self.run_("model.set_property", id=w, key="lean_angle", value=10)
+        after = self.bounds(door)
+        self.assertGreater(after[1][1], before[1][1])
+        self.assertGreater(self.bounds(w)[1][1], 0.25)
+        self.run_("model.set_property", id=w, key="lean_angle", value="=angle * 0 + 5 deg")
+        self.assertAlmostEqual(self.meta(w)[f"{NS}:lean_angle"], 5)
+
+    def test_attribute_copy_is_atomic_and_keeps_destination_identity(self):
+        source = self.wall()
+        target = self.wall((0, 5000), (6000, 5000))
+        floor = self.run_("model.add_floor", points=[[0, 0], [4000, 0], [4000, 4000], [0, 4000]], level=self.l1)["id"]
+        self.run_("model.set_property", id=source, key="lean_angle", value=12)
+        self.run_("model.set_property", id=source, key="color", value="#AABBCC")
+        self.run_("model.copy_attributes", source=source, destinations=[target], groups=["appearance", "dimensions"])
+        self.assertEqual(self.meta(target)[f"{NS}:lean_angle"], 12)
+        self.assertEqual(self.meta(target)[f"{NS}:color"], "#AABBCC")
+        self.assertEqual(self.meta(target)[f"{NS}:start"], [0.0, 5.0])
+        with self.assertRaises(BadRequest):
+            self.run_("model.copy_attributes", source=source, destinations=[target, floor], groups=["appearance"])
+        self.p.undo()
+        self.assertIsNone(self.meta(target).get(f"{NS}:lean_angle"))
+
+    def test_roofs_and_floors_accept_same_category_appearance_but_not_cross_category(self):
+        for category, params in (
+            ("floor", {"points": [[0, 0], [4000, 0], [4000, 4000], [0, 4000]], "level": self.l1}),
+            ("roof", {"points": [[0, 0], [4000, 0], [4000, 4000], [0, 4000]], "level": self.l2,
+                      "roof": "gable", "pitch": 20}),
+        ):
+            source = self.run_(f"model.add_{category}", **params)["id"]
+            other = dict(params)
+            other["points"] = [[x + 6000, y] for x, y in params["points"]]
+            target = self.run_(f"model.add_{category}", **other)["id"]
+            self.run_("model.set_property", id=source, key="color", value="#ABC123")
+            self.run_("model.copy_attributes", source=source, destinations=[target], groups=["appearance"])
+            self.assertEqual(E.m(self.meta(target), "color"), "#ABC123")
+            self.assertEqual(E.category(self.p, target), category)
+
+    def test_copy_construction_layers_uses_new_instance_layer_ids(self):
+        from applications.SPADRA import layers as LY
+        source = self.wall()
+        target = self.wall((0, 5000), (6000, 5000))
+        self.run_("model.add_layer", id=source, material="Mineral wool", thickness=100)
+        ids_before = [row["id"] for row in LY.stack(self.p, source)]
+        self.run_("model.copy_attributes", source=source, destinations=[target], groups=["construction"])
+        self.assertEqual([row["material"] for row in LY.stack(self.p, source)],
+                         [row["material"] for row in LY.stack(self.p, target)])
+        self.assertFalse(set(ids_before) & {row["id"] for row in LY.stack(self.p, target)})
+        self.assertEqual(self.meta(target)[f"{NS}:start"], [0.0, 5.0])
+
+    def test_bulk_formula_transfer_recomputes_each_wall_without_moving_it(self):
+        source = self.wall()
+        targets = [self.wall((0, y), (6000, y)) for y in (5000, 10000)]
+        self.run_("model.set_property", id=source, key="lean_angle", value="=angle * 0 + 7 deg")
+        result = self.run_("model.copy_attributes", source=source, destinations=targets, groups=["formulas"])
+        self.assertEqual(set(result["destinations"]), set(targets))
+        for target, y in zip(targets, (5000, 10000)):
+            self.assertAlmostEqual(E.m(self.meta(target), "lean_angle"), 7)
+            self.assertIn("lean_angle", E.m(self.meta(target), "formulas"))
+            self.assertAlmostEqual(E.m(self.meta(target), "start")[1], y / 1000)
+        self.p.undo()
+        for target in targets:
+            self.assertFalse(E.m(self.meta(target), "formulas"))
 
 
 if __name__ == "__main__":

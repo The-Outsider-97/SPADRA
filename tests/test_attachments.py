@@ -19,6 +19,46 @@ RECT = [[0, 0], [6000, 0], [6000, 4000], [0, 4000]]
 
 
 class Attachments(Case):
+    def test_inclined_wall_reaches_actual_roof_underside(self):
+        wall = self._eave_wall()
+        roof = self.roof()
+        # A 10° lean brings the top through the gable ridge *inside* the wall
+        # thickness, requiring a transverse top split, not a twisted triangle.
+        self.run_("model.set_property", id=wall, key="lean_angle", value=10)
+        self.run_("model.attach_wall", ids=[wall], to="roof")
+        vertices, _ = DOC.world_mesh(self.p, wall, self.p.model._model.world_transforms())
+        facets = E.roof_facets(self.p, E.meta_of(self.p, roof))
+        for x, y, z in vertices:
+            if z < 2.9:
+                continue
+            matches = [a * x + b * y + c for ring, (a, b, c) in facets if AT._inside(ring, x, y)]
+            self.assertTrue(matches, "The inclined top must meet the roof footprint")
+            self.assertAlmostEqual(z, matches[0], places=6)
+
+    def test_layered_inclined_wall_has_closed_roof_ridge_cut(self):
+        wall = self._eave_wall()
+        roof = self.roof()
+        self.run_("model.add_layer", id=wall, side="right", material="Mineral wool", thickness=100)
+        self.run_("model.set_property", id=wall, key="lean_angle", value=10)
+        self.run_("model.attach_wall", ids=[wall], to="roof")
+        vertices, faces = DOC.world_mesh(self.p, wall, self.p.model._model.world_transforms())
+        incidence = Counter(tuple(sorted((a, b))) for face in faces for a, b in zip(face, face[1:] + face[:1]))
+        self.assertEqual(set(incidence.values()), {2})
+        facets = E.roof_facets(self.p, E.meta_of(self.p, roof))
+        for x, y, z in vertices:
+            if z <= 2.9:
+                continue
+            roof_heights = [a*x + b*y + c for ring, (a, b, c) in facets if AT._inside(ring, x, y)]
+            self.assertTrue(roof_heights)
+            self.assertAlmostEqual(z, roof_heights[0], places=6)
+
+    def test_unambiguous_existing_roof_is_detected_without_preselection(self):
+        wall = self._eave_wall()
+        roof = self.roof()
+        result = self.run_("model.attach_wall", ids=[wall], to="roof")
+        self.assertEqual(result["roof"], roof)
+        self.assertEqual(self.meta(wall)["spadra:top_to"]["roof"], roof)
+
     def _eave_wall(self, thickness=500):
         """A wall parallel to the ridge, whose two faces lie at different roof heights."""
         return self.run_("model.add_wall", start=[1000, 500], end=[5000, 500], level=self.l1,

@@ -44,6 +44,15 @@ class Case(unittest.TestCase):
 
 
 class Types(Case):
+    def test_project_gutter_and_downpipe_material_defaults_are_respected(self):
+        self.p.manifest["default_materials"] = {"gutter": "Copper", "downpipe": "Steel"}
+        roof = self.roof("gable")
+        made = self.gutters(roof, edges=[0])["ids"]
+        gutter = next(oid for oid in made if self.cat(oid) == "gutter")
+        pipe = next(oid for oid in made if self.cat(oid) == "downpipe")
+        self.assertEqual(E.m(self.meta(gutter), "material"), "Copper")
+        self.assertEqual(E.m(self.meta(pipe), "material"), "Steel")
+
     def test_a_gable_verge_trim_alone_displaces_an_existing_eave_gutter_at_the_corner(self):
         roof = self.roof("gable")
         gutter = self.gutters(roof, edges=[0], downpipe=False)["gutters"][0]
@@ -336,7 +345,7 @@ class Drainage(Case):
         g = D.schedule_data(self.p, "gutter")
         row = g["rows"][0]
         self.assertEqual((row["no"], row["type"], row["length"], row["width"], row["depth"], row["fall"], row["catchment"], row["flow"], row["downpipes"], row["material"]),
-                         ("GT01", "Half-round gutter", 10.0, 125.0, 62.5, 4.0, 30.0, 0.9, 1, "Zinc"))
+                         ("GT01", "Half-round gutter", 10.0, 125.0, 62.5, 4.0, 30.0, 0.9, 1, E.DEFAULT_MATERIALS["gutter"]))
         self.assertEqual(g["totals"]["catchment"], 30.0)
         self.assertTrue(row["sfb"] == "-")
         d = D.schedule_data(self.p, "downpipe")["rows"][0]
@@ -365,7 +374,7 @@ class Drainage(Case):
         rows = {r["id"]: r for r in self.p.quantities()["rows"]}
         gutter = next(i for i in rows if rows[i]["category"] == "gutter")
         self.assertGreater(rows[gutter]["volume_m3"], 0)
-        self.assertEqual(rows[gutter]["material"], "Zinc")
+        self.assertEqual(rows[gutter]["material"], E.DEFAULT_MATERIALS["gutter"])
 
 
 if __name__ == "__main__":

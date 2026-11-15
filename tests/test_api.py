@@ -41,6 +41,17 @@ class Access(ServerCase):
 
 
 class Lifecycle(ServerCase):
+    def test_save_rejects_stale_revision_without_marking_unsaved_work_saved(self):
+        self.start()
+        self.api.cmd("draw.line", {"drawing": self.plan, "start": [0, 0], "end": [100, 0]})
+        revision = self.api.get("/api/bootstrap")["project"]["revision"]
+        status, result = self.api.call("POST", "/api/project/save", {"name": "Stale", "expected_revision": revision - 1})
+        self.assertEqual((status, result["error"]["code"]), (409, "conflict"))
+        self.assertTrue(self.api.get("/api/bootstrap")["project"]["dirty"])
+        saved = self.api.post("/api/project/save", {"name": "Current", "expected_revision": revision})
+        self.assertFalse(saved["project"]["dirty"])
+        self.assertIsNotNone(saved["project"]["last_saved"])
+
     def start(self):
         self.api.post("/api/project/new", {"name": "Community Pavilion", "unit": "mm"})
         tree = self.api.get("/api/project/tree")

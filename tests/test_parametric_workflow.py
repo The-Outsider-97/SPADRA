@@ -100,10 +100,14 @@ class OneProject(unittest.TestCase):
         # 7. the door opens on its hinge (needs the SLAI Animation Agent)
         if AB.BRIDGE.available:
             self.x("anim.settings", duration=2)
-            with self.assertRaises(Conflict):                                                         # the facade's panels stand hard against the jamb: refused at 5 mm ...
+            # A facade may genuinely clear the swept leaf. Place a measured
+            # 10 mm obstruction in its arc so this tests collision tolerance,
+            # independently of facade panel layout changes.
+            obstruction = self.x("model.add_column", level=self.l0, point=[2300, 200], width=10, depth=10, base=0, top=3)["id"]
+            with self.assertRaises(Conflict):                                                         # the 10 mm overlap exceeds the default 5 mm tolerance
                 self.x("anim.swing_door", id=door, degrees=90, start=0, end=2)
-            swung = self.x("anim.swing_door", id=door, degrees=90, start=0, end=2, tolerance_mm=12)   # ... and accepted when the few mm of contact are explicitly tolerated
-            self.assertTrue(swung["checked"] and swung["contacts_mm"])
+            swung = self.x("anim.swing_door", id=door, degrees=90, start=0, end=2, tolerance_mm=12)   # ... accepted when 10 mm contact is explicitly tolerated
+            self.assertTrue(swung["checked"] and obstruction in swung["contacts_mm"])
 
         # the features did not disturb one another
         self.assertTrue(PG.describe(self.p))
