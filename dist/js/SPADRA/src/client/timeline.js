@@ -504,23 +504,26 @@ export class Timeline {
         if (this.playButton)
             this.playButton.textContent = "Pause";
         const loop = this.store.animation?.settings.loop ?? false;
+        // The playhead is kept here in whole seconds, not read back from the store: the store snaps its time to a frame, so a tick shorter than half a
+        // frame would round back to the frame it was on and playback would stand still on a fast machine.
+        let head = this.store.animTime;
         const tick = (now) => {
             if (!this.store.playing)
                 return;
-            if (!this.waiting) { // one request at a time: the picture may lag, the time stays true
-                const dt = ((now - this.last) / 1000) * this.speed;
-                this.last = now;
-                this.waiting = true;
-                let next = this.store.animTime + dt;
-                if (next >= d) {
-                    if (loop)
-                        next -= d;
-                    else {
-                        void this.store.seek(d).finally(() => { this.waiting = false; this.stop(); });
-                        return;
-                    }
+            head += ((now - this.last) / 1000) * this.speed; // time passes whether or not the last picture has come back
+            this.last = now;
+            if (head >= d) {
+                if (loop)
+                    head -= d;
+                else {
+                    this.waiting = true;
+                    void this.store.seek(d).finally(() => { this.waiting = false; this.stop(); });
+                    return;
                 }
-                void this.store.seek(next).finally(() => { this.waiting = false; });
+            }
+            if (!this.waiting) { // one request at a time: the picture may lag, the time stays true
+                this.waiting = true;
+                void this.store.seek(head).finally(() => { this.waiting = false; });
             }
             this.raf = requestAnimationFrame(tick);
         };
