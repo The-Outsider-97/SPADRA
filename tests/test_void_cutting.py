@@ -250,6 +250,17 @@ class BooleanVoidRegression(Case):
 
 
 class SweptVoidRegression(Case):
+    def test_newly_created_elements_are_cut_and_moving_the_sweep_restores_them(self):
+        cutter = self.run_("model.add_sweep", level=self.l1, points=[[500, 1500], [5500, 1500]],
+                           shape="rectangle", width=400, height=700, base=1.0, void=True)["id"]
+        wall = self.run_("model.add_wall", level=self.l1, start=[0, 1500], end=[6000, 1500], thickness=200, height=3)["id"]
+        raw = self.p.model.volume(wall, unit="m")
+        self.assertLess(E.solid_status(self.p, wall).volume, raw)
+        self.run_("model.move", id=cutter, dx=0.0, dy=5.0, dz=0.0)
+        self.assertAlmostEqual(E.solid_status(self.p, wall).volume, raw)
+        self.run_("model.move", id=cutter, dx=0.0, dy=-5.0, dz=0.0)
+        self.assertLess(E.solid_status(self.p, wall).volume, raw)
+
     def test_a_swept_cutter_is_a_persistent_boolean_with_exclusions_and_hidden_scene_category(self):
         wall = self.run_("model.add_wall", level=self.l1, start=[0, 1500], end=[6000, 1500], thickness=200, height=3)["id"]
         before = E.solid_status(self.p, wall).volume

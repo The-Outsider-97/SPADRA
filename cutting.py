@@ -27,7 +27,7 @@ from ..tools.validation import boolean, text
 from . import elements as E
 
 POLICIES = {"automatic": "Automatic", "targets": "Selected Targets", "hosted": "Hosted Objects", "disabled": "Disabled"}
-CUTTABLE = ("floor", "extrusion", "wall")                       # what a void can actually cut
+CUTTABLE = ("floor", "extrusion", "wall")                       # categories with an additional exact 2D/profile cutting path
 NEVER_HIT = ("void", "room", "grid")                            # voids do not act on these
 TOL = 1e-6
 
