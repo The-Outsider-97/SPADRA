@@ -401,7 +401,7 @@ def detach_boolean_void(project: Any, vid: str) -> None:
 
 
 def report(project: Any, vid: str) -> dict[str, Any]:
-    """What one void cuts (names of elements) and the reasons it leaves other elements it touches alone. Read-only."""
+    """Legacy exact-planar cut report; use ``cutting.classify`` for actual 3D Boolean results too."""
     vs = voids(project)
     cut: list[str] = []
     notes: list[str] = []

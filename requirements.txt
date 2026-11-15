@@ -10,6 +10,8 @@ PyYAML>=6.0           # tested with 6.0.3 : SLAI's configuration repository (src
 #
 # Needed only by the feature named. Without them SPADRA still starts and reports what is unavailable (GET /api/agents):
 numpy>=1.24           # tested with 2.5.3 : STEM, Simulation, Spatial and Optimization agents
+trimesh>=5.2,<6        # swept-void intersection and SLAI SGEO mesh Boolean evaluation
+manifold3d>=3,<4      # general SGEO Boolean backend for multi-element prism and swept-void cuts
 scipy>=1.10           # tested with 1.18.1: STEM Agent integrator, Optimization Agent
 psutil>=5.9           # tested with 7.2.2 : resource monitoring imported by the agents
 openpyxl>=3.1         # optional XLSX classification-table import (data/build_nl_sfb.py and classifications.py)
