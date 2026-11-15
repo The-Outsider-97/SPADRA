@@ -917,7 +917,7 @@ def _cutting_rows(project: Any, vid: str, meta: Mapping[str, Any]) -> list[dict[
                      "choices": [{"value": "", "label": "Choose an element…"}] + [
                          {"value": t, "label": project.model.get(t)["name"] if E.alive(project, t) else f"{t} (deleted)"} for t in s["excluded"]]})
     rows.append({"label": "Excluded categories", "type": "readonly", "value": ", ".join(s["excluded_categories"]) or "none"})
-    categories = sorted({E.category(project, i) for i in E.element_ids(project)} - set(CU.NEVER_HIT))
+    categories = CU.eligible_categories(project)
     rows.append({"key": "exclude_category_add", "label": "Exclude category", "type": "choice", "value": "",
                  "choices": [{"value": "", "label": "Choose a category…"}] + [
                      {"value": c, "label": c.title()} for c in categories if c not in s["excluded_categories"]]})

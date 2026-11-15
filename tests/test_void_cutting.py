@@ -156,6 +156,14 @@ class Policies(Case):
 
 
 class Exclusions(Case):
+    def test_category_rule_can_precede_creation_of_any_element_in_that_category(self):
+        cutter = self.void(excluded_categories=["floor"])
+        floor = self.floor()
+        self.assertAlmostEqual(self.vol(floor), 6.0)
+        self.assertEqual({r["id"]: r for r in CU.classify(self.p, cutter)}[floor]["state"], "excluded")
+        self.set(cutter, "exclude_category_remove", "floor")
+        self.assertAlmostEqual(self.vol(floor), 5.8)
+
     def test_excluding_one_intersected_floor_preserves_the_other(self):
         a = self.floor(0, 3000)
         b = self.floor(3000, 3000)

@@ -32,6 +32,11 @@ NEVER_HIT = ("void", "room", "grid")                            # voids do not a
 TOL = 1e-6
 
 
+def eligible_categories(project: Any) -> list[str]:
+    """Known solid BIM categories plus actual model categories, even before instances exist."""
+    return sorted((set(E.SPECIAL) | {E.category(project, i) for i in E.element_ids(project)}) - set(NEVER_HIT))
+
+
 # ------------------------------------------------------------------------------------------------------------------------------ settings
 def settings(meta: Mapping[str, Any]) -> dict[str, Any]:
     """A void's cutting settings. A void made before they existed cuts everything it can."""
@@ -103,7 +108,7 @@ def set_property(project: Any, vid: str, meta: Mapping[str, Any], key: str, valu
     if key in ("exclude_category_add", "exclude_category_remove"):
         cat = text(value, "excluded category", 80)
         if key == "exclude_category_add":
-            categories = {E.category(project, i) for i in E.element_ids(project)} - set(NEVER_HIT)
+            categories = set(eligible_categories(project))
             if cat not in categories:
                 raise BadRequest(f"'{cat}' is not an eligible category in this project")
             return {"cut_excluded_categories": [*now["excluded_categories"], cat] if cat not in now["excluded_categories"] else now["excluded_categories"]}
@@ -137,7 +142,7 @@ def creation_values(project: Any, p: Mapping[str, Any]) -> dict[str, Any]:
     if p.get("excluded_categories") is not None:
         if not isinstance(p["excluded_categories"], list):
             raise BadRequest("excluded_categories must be a list of category names")
-        cats = {E.category(project, i) for i in E.element_ids(project)} - set(NEVER_HIT)
+        cats = set(eligible_categories(project))
         names = [text(t, "excluded category", 80) for t in p["excluded_categories"]]
         if any(c not in cats for c in names):
             raise BadRequest("excluded_categories contains an unsupported category")
