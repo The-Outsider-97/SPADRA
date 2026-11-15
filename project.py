@@ -685,7 +685,7 @@ class Project:
             if total > max_vertices:
                 raise LimitExceeded(f"The model has more than {max_vertices} vertices to draw", hint="Hide or simplify objects")
             meta = obj["metadata"]
-            category = meta.get(f"{NS}:category", "generic")
+            category = "void" if E.m(meta, "void_mode") else meta.get(f"{NS}:category", "generic")
             counts = E.m(meta, "layer_faces") or []
             layers = LY.stack(self, oid) if counts and category in LY.LAYERED else []
             layer_colors = ([{"count": int(n), "color": E.m(meta, "color") or lay.get("color") or

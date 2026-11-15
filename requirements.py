@@ -600,7 +600,8 @@ def ils_report(project: Any) -> dict[str, Any]:
     """Every active rule against every element: which requirement (with its source) is met by how many, and which elements fail and why."""
     cfg = ils_config(project)
     qto = _quantity_getter(project)
-    ctxs = [Context(project, oid, qto) for oid in E.element_ids(project) if E.category(project, oid) not in ("grid", "void", "array", "room")]
+    ctxs = [Context(project, oid, qto) for oid in E.element_ids(project) if E.category(project, oid) not in ("grid", "void", "array", "room")
+            and not E.m(E.meta_of(project, oid), "void_mode")]
     rules = []
     allr = [{**r, "scope": "baseline", "source": BASE + r["chapter"]} for r in BASELINE] + [
         {"id": r["id"], "title": r["title"], "scope": "project", "source": r["source"], "strength": None, "text": f"{r['set']}.{r['property']}" + (" required" if r["required"] else ""),

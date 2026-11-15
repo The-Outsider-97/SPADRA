@@ -699,14 +699,32 @@ def export_model(project: Any, fmt: str, object_ids: list[str] | None = None) ->
             counts.update(families=len(model.families()), levels=len(project.manifest["levels"]))
             adapter["dropped"] = _project_only_data(project)
         else:
-            cutters = [i for i in ids if E.m(model.get(i)["metadata"], "category") == "void"]            # a void removes material: it is not a surface of the building
+            cutters = [i for i in ids if E.m(model.get(i)["metadata"], "category") == "void" or
+                       E.m(model.get(i)["metadata"], "void_mode")]  # construction geometry never appears in presentation exports
             selected = None if object_ids is None and not cutters else [i for i in ids if i not in cutters]
+            from . import documentation as D
+            derived = D.evaluated_meshes(project)
+            if any(E.m(model.get(i)["metadata"], "void_boolean_modifiers") for i in ids if E.alive(project, i)):
+                reports = {row["modifier_id"]: row for row in model.evaluate_modifiers()}
+                failed = [mid for i in ids if E.alive(project, i)
+                          for mid in (E.m(model.get(i)["metadata"], "void_boolean_modifiers") or {}).values()
+                          if reports.get(mid, {}).get("status") != "ok"]
+                if failed:
+                    raise BadRequest("Presentation export contains an unresolved void Boolean; fix the cutter or geometry before exporting",
+                                     details={"modifier_ids": failed[:10]})
             source = model
-            if cutters and fmt == "glb":                                                                  # GLB takes the whole scene: leave the voids out of a copy
+            if cutters or derived:
                 source = model.copy(fresh_id=False)
+                # Bake only the detached evaluated result into this temporary
+                # presentation copy. The authoritative native model and its
+                # non-destructive modifier history remain entirely unchanged.
+                for oid, mesh in derived.items():
+                    source.set_geometry(oid, {"kind": "mesh", "vertices": mesh["vertices"], "faces": mesh["faces"]})
+                for modifier in list(source.modifiers())[::-1]:
+                    source.remove_modifier(modifier["id"])
                 for i in cutters:
                     source.remove(i)
-            data, report = {"glb": lambda: source.to_glb(), "stl": lambda: model.to_stl(selected), "obj": lambda: model.to_obj(selected)}[fmt]()
+            data, report = {"glb": lambda: source.to_glb(), "stl": lambda: source.to_stl(selected), "obj": lambda: source.to_obj(selected)}[fmt]()
             if cutters:
                 counts["voids_left_out"] = len(cutters)
             adapter = report_dict(report)

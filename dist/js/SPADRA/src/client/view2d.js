@@ -118,9 +118,11 @@ export class DrawingView {
         const polygon = this.pickedPolygon.bind(this);
         const extrudeBtn = h("button", { type: "button", class: "tool-inline", text: "Use selected polygon", attrs: { title: "Stand the closed polygon selected in this drawing up to the depth" }, on: { click: () => { void this.extrudeSelected(); } } });
         hud("extrude", "Click each corner of the outline, or select a closed polygon and use it. Enter or double-click finishes, Esc cancels.", [num("Depth (m)", () => o.depth, (n) => { o.depth = n; }, "0.1", true), num("Base (m)", () => o.base, (n) => { o.base = n; }, "0.1", false)], [extrudeBtn]);
-        hud("void", "Draw the outline of the cut. It cuts floors and extrusions it lies wholly inside, and walls it passes through square.", [num("Depth (m)", () => o.voidDepth, (n) => { o.voidDepth = n; }, "0.1", true), num("Base (m)", () => o.voidBase, (n) => { o.voidBase = n; }, "0.1", false)]);
+        hud("void", "Draw the cutting outline. All intersected eligible solids are cut unless excluded in Properties.", [num("Depth (m)", () => o.voidDepth, (n) => { o.voidDepth = n; }, "0.1", true), num("Base (m)", () => o.voidBase, (n) => { o.voidBase = n; }, "0.1", false)]);
         const shape = h("select", { attrs: { "aria-label": "Profile" } }, h("option", { value: "rectangle", text: "Rectangle" }), h("option", { value: "round", text: "Round" }), h("option", { value: "user", text: "User defined" }));
         const shapeLabel = h("label", {}, "Profile", shape);
+        const sweepMode = h("select", { attrs: { "aria-label": "Sweep mode" } }, h("option", { value: "solid", text: "Solid" }), h("option", { value: "void", text: "Void (cut intersecting solids)" }));
+        sweepMode.addEventListener("change", () => { o.sweepVoid = sweepMode.value === "void"; });
         const [widthLabel, syncWidth] = num("Width (mm)", () => o.sweepWidth, (n) => { o.sweepWidth = n; }, "10", true);
         const [heightLabel, syncHeight] = num("Height (mm)", () => o.sweepHeight, (n) => { o.sweepHeight = n; }, "10", true);
         // User defined: the polygon picked in the drawing replaces width and height with where it sits on the path.
@@ -144,6 +146,7 @@ export class DrawingView {
         const refresh = () => {
             const user = o.sweepShape === "user";
             shape.value = o.sweepShape;
+            sweepMode.value = o.sweepVoid ? "void" : "solid";
             widthLabel.hidden = heightLabel.hidden = user;
             for (const el of userOnly)
                 el.hidden = !user;
@@ -158,7 +161,7 @@ export class DrawingView {
             offs.forEach((x) => x[1]());
         };
         shape.addEventListener("change", () => { o.sweepShape = shape.value === "round" ? "round" : shape.value === "user" ? "user" : "rectangle"; refresh(); });
-        hud("sweep", "Click along the path. Enter or double-click finishes, C closes it, Esc cancels. The path stays at one height.", [[shapeLabel, () => refresh()], [widthLabel, () => { }], [heightLabel, () => { }], [pivotLabel, () => { }], [angleLabel, () => { }], ...offs.map((x) => [x[0], () => { }]),
+        hud("sweep", "Click along the path. Enter or double-click finishes, C closes it, Esc cancels. The path stays at one height.", [[h("label", {}, "Mode", sweepMode), () => { sweepMode.value = o.sweepVoid ? "void" : "solid"; }], [shapeLabel, () => refresh()], [widthLabel, () => { }], [heightLabel, () => { }], [pivotLabel, () => { }], [angleLabel, () => { }], ...offs.map((x) => [x[0], () => { }]),
             [mirrorLabel, () => { }], [radiusLabel, () => { }], num("Base (m)", () => o.sweepBase, (n) => { o.sweepBase = n; }, "0.1", false)], [pick, picked]);
         refresh();
     }
@@ -1171,7 +1174,7 @@ export class DrawingView {
                 const params = o.sweepShape === "user"
                     ? { points: pts, closed, level, base: o.sweepBase, profile: "user", polygon: o.sweepPolygon, pivot: o.sweepPivot, angle: o.sweepAngle, offset_x: o.sweepOffset[0], offset_y: o.sweepOffset[1], offset_z: o.sweepOffset[2], mirror: o.sweepMirror, radius: o.sweepRadius }
                     : { points: pts, closed, level, shape: o.sweepShape, width: o.sweepWidth, height: o.sweepHeight, base: o.sweepBase };
-                const out = await this.store.run("model.add_sweep", params);
+                const out = await this.store.run("model.add_sweep", { ...params, void: o.sweepVoid });
                 const id = out?.result?.id;
                 if (id)
                     await this.store.select({ kind: "model", ids: [id] });

@@ -244,7 +244,8 @@ def calculated(project: Any, ids: Sequence[str] | None = None) -> dict[str, dict
     from . import quantities as Q
     from . import rooms as R
     wanted = [i for i in (ids if ids is not None else E.element_ids(project)) if E.alive(project, i)]
-    measurable = [i for i in wanted if E.category(project, i) not in ("room", "void", "grid") and project.model.get(i).get("geometry") is not None
+    measurable = [i for i in wanted if E.category(project, i) not in ("room", "void", "grid") and
+                  not E.m(E.meta_of(project, i), "void_mode") and project.model.get(i).get("geometry") is not None
                   and sets_for(E.meta_of(project, i), "qto")]
     rows: dict[str, Any] = {}
     if measurable:

@@ -1,9 +1,9 @@
 """Which elements a void cuts, and why it leaves the others alone.
 
-A void (``forms``) cuts what can be cut exactly: a hole through a floor or a solid extrusion, a notch where it crosses their edge (overlapping voids act as one),
-a rectangular opening through a wall. Nothing about a
-void is ever written into the element it cuts: the cut is recomputed from the void's parameters every time, so changing or deleting a void, or
-turning its cutting off, gives the element back whole.
+A void (``forms``) uses exact plan/wall cuts where possible and reversible SGEO
+Boolean subtraction for other solid intersections. A void sweep uses its actual
+3D sweep mesh as a cutter. Source element geometry remains unchanged, and
+changing or deleting a cutter restores the original solid.
 
 This module adds the control over *which* elements a void is applied to, and the classification that says what happens to every element it meets.
 
@@ -12,10 +12,10 @@ This module adds the control over *which* elements a void is applied to, and the
   or ``disabled``.
 
 **Classification** of a void against every element: an element that the void does not reach is not listed. One it reaches is ``cut`` (the cut is made),
-``unsupported`` (it is reached but this kind of cut is not computed, with the reason: a pocket that does not go through, a void that would split the
-element in two, an angled wall opening, a roof, a beam ...) or ``excluded`` (it could be cut, but the policy leaves it alone). "Reached" is decided from the geometry, not from
-bounding boxes: for floors, extrusions and walls from their outlines and height ranges, and for every other element from its actual triangles, which are
-clipped against the void's prism (a triangle that has a point inside the prism, or a void that lies inside the solid, is a hit).
+``unsupported`` (its Boolean evaluation failed and the diagnostic says why) or
+``excluded`` (its cutting policy leaves it alone). Prism hits are tested against
+actual source meshes; swept hits use 3D volume intersection rather than only
+overlapping bounding boxes.
 """
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ def applies(v: Mapping[str, Any], oid: str, category: str | None = None) -> tupl
 
 def _element(project: Any, oid: Any, what: str) -> str:
     oid = text(oid, what, 80)
-    if oid not in E.element_ids(project) or E.category(project, oid) in NEVER_HIT:
+    if oid not in E.element_ids(project) or E.category(project, oid) in NEVER_HIT or E.m(E.meta_of(project, oid), "void_mode"):
         raise NotFound(f"{oid} is not an element a void can act on")
     return oid
 
@@ -285,18 +285,46 @@ def _inside_solid(verts: Sequence[Sequence[float]], faces: Sequence[Sequence[int
     return hits % 2 == 1
 
 
+def base_world_mesh(project: Any, oid: str) -> tuple[list[list[float]], list[list[int]]]:
+    """Unmodified source geometry: void hits must not disappear after a successful cut."""
+    mesh = project.model.tessellate(oid)
+    t = project.model.world_transform(oid)
+    verts = [[t[0] * x + t[1] * y + t[2] * z + t[3],
+              t[4] * x + t[5] * y + t[6] * z + t[7],
+              t[8] * x + t[9] * y + t[10] * z + t[11]] for x, y, z in mesh["vertices"]]
+    return verts, mesh["faces"]
+
+
 def touches(project: Any, oid: str, v: Mapping[str, Any]) -> bool:
-    """Whether an element, from its actual mesh, meets the void's prism."""
-    from . import documentation as D
+    """Whether the source solid (before modifiers) meets the void's prism."""
     try:
         lo, hi = project.model.world_bounds(oid)
     except Exception:                                                         # a group or anything without geometry has nothing to meet
         return False
+    if v.get("swept"):
+        cutter_lo, cutter_hi = project.model.world_bounds(v["id"])
+        if any(hi[i] <= cutter_lo[i] + TOL or cutter_hi[i] <= lo[i] + TOL for i in range(3)):
+            return False
+        # The sweep's actual three-dimensional solid, not its path envelope,
+        # determines intersections. This also detects cutters fully enclosed
+        # by their targets without relying on coincident surface triangles.
+        try:
+            import trimesh
+            a_v, a_f = base_world_mesh(project, oid)
+            b_v, b_f = base_world_mesh(project, v["id"])
+            a = trimesh.Trimesh(vertices=a_v, faces=a_f, process=False)
+            b = trimesh.Trimesh(vertices=b_v, faces=b_f, process=False)
+            overlap = trimesh.boolean.intersection([a, b], engine="manifold")
+            return bool(overlap is not None and not overlap.is_empty and overlap.volume > TOL ** 3)
+        except (ImportError, ValueError, RuntimeError):
+            # Keep a conservative candidate so the normal modifier evaluator
+            # can explain a missing backend or malformed Boolean explicitly.
+            return True
     xs = [p[0] for p in v["poly"]]
     ys = [p[1] for p in v["poly"]]
     if hi[0] < min(xs) - TOL or lo[0] > max(xs) + TOL or hi[1] < min(ys) - TOL or lo[1] > max(ys) + TOL or hi[2] < v["z0"] + TOL or lo[2] > v["z1"] - TOL:
         return False                                                          # the boxes are apart, so the shapes are: only ever used to skip work
-    verts, faces = D.world_mesh(project, oid)
+    verts, faces = base_world_mesh(project, oid)
     return mesh_meets_prism(verts, faces, v["poly"], v["z0"], v["z1"])
 
 
@@ -309,12 +337,53 @@ def classify(project: Any, vid: str) -> list[dict[str, Any]]:
     if v is None:
         raise NotFound(f"Void {vid} does not exist")
     rows: list[dict[str, Any]] = []
+    evaluated: dict[str, dict[str, Any]] | None = None
+    previous_volumes: dict[str, float] = {}
+
+    def boolean_result(oid: str) -> dict[str, Any] | None:
+        """Report the evaluated CSG cut, not merely the existence of its modifier."""
+        nonlocal evaluated
+        mid = (E.m(E.meta_of(project, oid), "void_boolean_modifiers") or {}).get(vid)
+        if not mid:
+            return None
+        if evaluated is None:
+            from src.utils.spatial_formats.sgeo.analysis import analyze_mesh
+            from src.utils.spatial_formats.sgeo.tessellation import tessellate
+            evaluated = {}
+            for item in project.model.evaluate_modifiers():
+                evaluated[item["modifier_id"]] = item
+                original = previous_volumes.get(item["item_id"])
+                if original is None:
+                    original = project.model.volume(item["item_id"], unit="m")
+                geom = (item.get("result") or {}).get("geometry")
+                if item["status"] == "ok" and geom:
+                    measured = analyze_mesh(tessellate(geom))
+                    if measured.signed_volume is not None:
+                        new_volume = abs(measured.signed_volume)
+                        item["void_cut_volume"] = original - new_volume
+                        previous_volumes[item["item_id"]] = new_volume
+        row = evaluated.get(mid)
+        if row and row["status"] == "ok" and row.get("void_cut_volume", 0.0) > TOL ** 3:
+            return {"state": "cut", "reason": "a 3D Boolean void cut is applied", "kind": "boolean"}
+        if row and row["status"] == "ok":
+            return None                                # the meshes only touch or their bounds overlap: no material was cut
+        detail = (row or {}).get("diagnostics") or {}
+        return {"state": "unsupported", "reason": str(detail.get("reason") or detail.get("error") or
+                                                     "the 3D Boolean evaluator could not generate a valid cut")}
+
     for oid in E.element_ids(project):
         cat = E.category(project, oid)
-        if cat in NEVER_HIT or oid == vid:
+        if cat in NEVER_HIT or E.m(E.meta_of(project, oid), "void_mode") or oid == vid:
             continue
         name = project.model.get(oid)["name"] or str(cat).title()
         yes, why = applies(v, oid, cat)
+        if v.get("swept"):
+            if touches(project, oid, v):
+                fallback = boolean_result(oid) if yes else None
+                if fallback is not None or not yes:
+                    rows.append({"id": oid, "name": name, "category": cat,
+                                 **({"state": "excluded", "reason": why[0].upper() + why[1:]} if not yes else fallback)})
+            continue
         if cat in CUTTABLE:
             try:
                 _, notes, cuts = FX._cuts(project, oid, [v], policy=False)
@@ -323,18 +392,23 @@ def classify(project: Any, vid: str) -> list[dict[str, Any]]:
                 continue
             mine = [n for who, n in notes if who == vid]
             made = vid in FX.cut_ids(cuts)
-            if not made and not mine:
+            fallback = boolean_result(oid) if not made and yes else None
+            if not made and not mine and not fallback:
                 continue                                                      # apart from it
             kind = "opening" if cat == "wall" else "notch" if getattr(cuts, "outline", None) else "hole"
             if not yes:
                 rows.append({"id": oid, "name": name, "category": cat, "state": "excluded", "reason": why[0].upper() + why[1:], "would": kind if made else None})
             elif made:
                 rows.append({"id": oid, "name": name, "category": cat, "state": "cut", "reason": f"a {kind} is cut", "kind": kind})
+            elif fallback:
+                rows.append({"id": oid, "name": name, "category": cat, **fallback})
             else:
                 rows.append({"id": oid, "name": name, "category": cat, "state": "unsupported", "reason": mine[0]})
         elif touches(project, oid, v):
-            rows.append({"id": oid, "name": name, "category": cat, "state": "excluded" if not yes else "unsupported",
-                         "reason": (why[0].upper() + why[1:]) if not yes else f"cutting a {cat} is not supported: it is left whole"})
+            fallback = boolean_result(oid) if yes else None
+            rows.append({"id": oid, "name": name, "category": cat,
+                         **({"state": "excluded", "reason": why[0].upper() + why[1:]} if not yes else
+                            fallback or {"state": "unsupported", "reason": f"cutting a {cat} is not supported: it is left whole"})})
     return rows
 
 
