@@ -553,6 +553,19 @@ def connections_propose(app: SpadraApp, req: Request) -> Any:
         return {"message": project.propose_connection_fix(req.json()), "project": project.summary()}
 
 
+@router.route("POST", "/api/validation/layers")
+def validation_layers(app: SpadraApp, req: Request) -> Any:
+    with app.lock:
+        return app.require().layered_validation(req.json())
+
+
+@router.route("POST", "/api/validation/layers/propose")
+def validation_layers_propose(app: SpadraApp, req: Request) -> Any:
+    with app.lock:
+        project = app.require()
+        return {"message": project.propose_validation_fix(req.json()), "project": project.summary()}
+
+
 @router.route("GET", "/api/agents/roles")
 def agents_roles(app: SpadraApp, req: Request) -> Any:
     """How each agent role named for parametric design / reconstruction / impact work maps to SPADRA, and whether that agent is really available now."""

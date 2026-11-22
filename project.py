@@ -982,6 +982,30 @@ class Project:
             raise BadRequest("Choose 1 to 100 findings to correct")
         return CX.DIAGNOSER.propose_fix(self, params.get("revision"), [text(f, "finding", 20) for f in raw], self._id_list(params.get("ids")), params.get("domains"))
 
+    def layered_validation(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        """The layered validation (``validation_layers``): geometry (1), BIM / functional (2) and, only for the beams asked for with their own loads, an analytical
+        baseline (3), each finding with its measurement, limit, basis and, where there is one, a correction that can be proposed. Read-only."""
+        from . import validation_layers as VL
+        layers = params.get("layers")
+        if layers is not None and (not isinstance(layers, (list, tuple)) or not all(isinstance(l, int) and not isinstance(l, bool) for l in layers)):
+            raise BadRequest("layers is a list of layer numbers: 1, 2, 3")
+        physical = params.get("physical")
+        if physical is not None and (not isinstance(physical, (list, tuple)) or len(physical) > 50 or not all(isinstance(p, Mapping) for p in physical)):
+            raise BadRequest("physical is a list of up to 50 beam analyses, each with its id, load and support")
+        limits = params.get("limits")
+        if limits is not None and not isinstance(limits, Mapping):
+            raise BadRequest("limits is an object")
+        return VL.PIPELINE.validate(self, ids=self._id_list(params.get("ids")), limits=limits, layers=layers, physical=physical)
+
+    def propose_validation_fix(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        """A reviewable assistant proposal from the corrections of the validation findings ``findings`` made at ``revision``. Nothing changes until it is approved."""
+        from . import validation_layers as VL
+        raw = params.get("findings") or []
+        if not isinstance(raw, (list, tuple)) or not raw or len(raw) > 100:
+            raise BadRequest("Choose 1 to 100 findings to correct")
+        return VL.PIPELINE.propose_fix(self, params.get("revision"), [text(f, "finding", 60) for f in raw], ids=self._id_list(params.get("ids")),
+                                       limits=params.get("limits"), layers=params.get("layers"), physical=params.get("physical"))
+
     @staticmethod
     def _id_list(raw: Any) -> list[str] | None:
         if raw in (None, "", []):
