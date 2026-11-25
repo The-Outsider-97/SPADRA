@@ -329,7 +329,9 @@ class Sweeps(Base):
         self.p.execute("model.set_property", {"id": r, "key": "shape", "value": "round"})
         self.assertLess(self.vol(r), 0.1 * 0.4 * 2.0)
         self.p.execute("model.move", {"id": r, "dx": 0.0, "dy": 1.0, "dz": 1.0})
-        self.assertEqual(E.meta_of(self.p, r)["spadra:path"][0], [0.0, 1.0])
+        meta = E.meta_of(self.p, r)
+        self.assertEqual(meta["spadra:path"][0], [0.0, 1.0, 0.0])                         # sweep paths are 3-D: (dx, dy) move the plan position, dz moves the base, never the path's own z
+        self.assertAlmostEqual(meta["spadra:base"], 1.0, places=9)
 
     def test_what_a_profile_cannot_get_round_is_refused(self):
         before = self.p.revision

@@ -71,6 +71,17 @@ class Contents(Case):
         self.assertEqual({f[8] for f in faces}, {0x345678})
         self.assertTrue(SH.verify_sldc(self.p, raw, self.sheet)["identical"])
 
+    def test_a_sheet_with_a_snapshot_exports_with_its_printable_page_and_reads_back(self):
+        # the browser export sends the printed page (PNG + SVG); the snapshot's own picture must then still be shown by a figure, or the package refuses it
+        self.run_("sheet.set", id=self.sheet, key="paper", value="A3 Landscape")
+        self.run_("sheet.place_snapshot", id=self.sheet, data=base64.b64encode(png(40, 30)).decode(), camera={"azimuth": 45, "elevation": 30}, title="Corner")
+        page = png(420, 297, (250, 250, 250))
+        svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 297" width="420mm" height="297mm"><rect width="420" height="297" fill="#fff"/></svg>'
+        raw, _ = SH.to_sldc(self.p, self.sheet, page, svg)
+        restored = SH.read_sldc(raw)
+        self.assertEqual(len(restored["assets"]), 2)                    # the printed page and the snapshot
+        self.assertEqual([v.get("kind") for v in restored["sheet"]["viewports"]], ["snapshot"])
+
     def test_a_box_seen_from_a_corner_shows_three_sides(self):
         # a single closed box: from a corner and above only the three faces that face the viewer are drawn, each as two triangles
         data = SV.model_view(self.p, -45.0, 30.0, 1.0)

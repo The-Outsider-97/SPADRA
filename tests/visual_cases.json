@@ -1,0 +1,46 @@
+{
+  "note": "Read by tests/test_visualization.py and tests_ts/visualization.test.ts so that visualization.py and visual_shading.ts follow the same rules.",
+  "defaults": {"v": 1, "mode": "realistic", "edge_boost": 100, "shadows": {"lined": false, "colored": false, "gray": false}, "sun": {"azimuth": 225, "elevation": 45}},
+  "normalise": [
+    {"name": "nothing stored", "raw": null, "expect": {"v": 1, "mode": "realistic", "edge_boost": 100, "shadows": {"lined": false, "colored": false, "gray": false}, "sun": {"azimuth": 225, "elevation": 45}}},
+    {"name": "not an object", "raw": "gray", "expect": {"v": 1, "mode": "realistic", "edge_boost": 100, "shadows": {"lined": false, "colored": false, "gray": false}, "sun": {"azimuth": 225, "elevation": 45}}},
+    {"name": "a valid setting is kept", "raw": {"mode": "lined", "edge_boost": 150, "shadows": {"lined": true, "gray": true}, "sun": {"azimuth": 90, "elevation": 30}},
+     "expect": {"v": 1, "mode": "lined", "edge_boost": 150, "shadows": {"lined": true, "colored": false, "gray": true}, "sun": {"azimuth": 90, "elevation": 30}}},
+    {"name": "each bad field falls back alone", "raw": {"mode": "toon", "edge_boost": 20, "shadows": {"colored": "yes"}, "sun": {"azimuth": 90, "elevation": 999}},
+     "expect": {"v": 1, "mode": "realistic", "edge_boost": 100, "shadows": {"lined": false, "colored": false, "gray": false}, "sun": {"azimuth": 90, "elevation": 45}}},
+    {"name": "azimuth wraps", "raw": {"sun": {"azimuth": 450}}, "expect": {"v": 1, "mode": "realistic", "edge_boost": 100, "shadows": {"lined": false, "colored": false, "gray": false}, "sun": {"azimuth": 90, "elevation": 45}}},
+    {"name": "negative azimuth wraps", "raw": {"sun": {"azimuth": -90}}, "expect": {"v": 1, "mode": "realistic", "edge_boost": 100, "shadows": {"lined": false, "colored": false, "gray": false}, "sun": {"azimuth": 270, "elevation": 45}}},
+    {"name": "boolean is not a number", "raw": {"edge_boost": true, "sun": {"elevation": false}}, "expect": {"v": 1, "mode": "realistic", "edge_boost": 100, "shadows": {"lined": false, "colored": false, "gray": false}, "sun": {"azimuth": 225, "elevation": 45}}},
+    {"name": "range ends are allowed", "raw": {"edge_boost": 50, "sun": {"elevation": 1}}, "expect": {"v": 1, "mode": "realistic", "edge_boost": 50, "shadows": {"lined": false, "colored": false, "gray": false}, "sun": {"azimuth": 225, "elevation": 1}}}
+  ],
+  "refused": [
+    {"name": "unknown mode", "patch": {"mode": "toon"}},
+    {"name": "edge thickness below the range", "patch": {"edge_boost": 49}},
+    {"name": "edge thickness above the range", "patch": {"edge_boost": 201}},
+    {"name": "edge thickness not a number", "patch": {"edge_boost": "thick"}},
+    {"name": "sun on the horizon", "patch": {"sun": {"elevation": 0}}},
+    {"name": "sun past the zenith", "patch": {"sun": {"elevation": 91}}},
+    {"name": "sun azimuth not a number", "patch": {"sun": {"azimuth": null}}},
+    {"name": "unknown sun field", "patch": {"sun": {"distance": 4}}},
+    {"name": "unknown setting", "patch": {"fog": 1}},
+    {"name": "shadows in wireframe", "patch": {"shadows": {"wireframe": true}}},
+    {"name": "shadows switched off in realistic", "patch": {"shadows": {"realistic": false}}},
+    {"name": "shadow value not a boolean", "patch": {"shadows": {"gray": 1}}}
+  ],
+  "shadows_on": [
+    {"visual": {"mode": "wireframe", "shadows": {"lined": true, "colored": true, "gray": true}}, "expect": false},
+    {"visual": {"mode": "realistic", "shadows": {"lined": false, "colored": false, "gray": false}}, "expect": true},
+    {"visual": {"mode": "lined", "shadows": {"lined": true}}, "expect": true},
+    {"visual": {"mode": "lined", "shadows": {"colored": true}}, "expect": false},
+    {"visual": {"mode": "colored", "shadows": {"colored": true}}, "expect": true},
+    {"visual": {"mode": "gray", "shadows": {"gray": false}}, "expect": false}
+  ],
+  "sun": [
+    {"azimuth": 0, "elevation": 90, "expect": [0, 0, 1]},
+    {"azimuth": 0, "elevation": 0, "expect": [0, 1, 0]},
+    {"azimuth": 90, "elevation": 0, "expect": [1, 0, 0]},
+    {"azimuth": 180, "elevation": 0, "expect": [0, -1, 0]},
+    {"azimuth": 270, "elevation": 0, "expect": [-1, 0, 0]},
+    {"azimuth": 225, "elevation": 45, "expect": [-0.5, -0.5, 0.7071067811865476]}
+  ]
+}

@@ -74,7 +74,10 @@ class Levels(Case):
         self.run_("view.set_cut_plane", id=plan["id"], key="cut_reference", value=self.l2)
         group = self.p.properties({"view": plan["id"]})["groups"][0]
         self.assertIn("3200", str(group["rows"][-1]["value"]))
-        self.assertNotIn(wall, [i["id"] for i in self.p.drawing_data(plan["id"])["model"]])
+        # The wall (0 .. 3.2 m) no longer meets the cut at 5.5 m, but it is within the view range, so it is drawn as a projection, not cut.
+        seen = {i["id"]: i for i in self.p.drawing_data(plan["id"])["model"]}
+        self.assertIn(wall, seen)
+        self.assertFalse(seen[wall]["cut"])
         self.p.undo()
         self.assertFalse(next(item for item in self.p.drawing_data(plan["id"])["model"] if item["id"] == door)["cut"])
 

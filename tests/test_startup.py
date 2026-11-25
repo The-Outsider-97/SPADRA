@@ -207,6 +207,30 @@ class CommitAdapters(unittest.TestCase):
         self.assertIn("No module named 'x'", found.fix)
 
 
+class OtherAgents(unittest.TestCase):
+    def test_the_agents_spadra_does_not_use_are_reported_from_what_imports_on_this_computer(self):
+        from .. import agent_hub as AH
+        seen = {"planning": {"importable": True, "error": None}, "reasoning": {"importable": True, "error": None}}
+        gone = {"importable": False, "error": "ModuleNotFoundError: No module named 'torch'"}
+        with mock.patch.object(AH.HUB, "probe", side_effect=lambda key: seen.get(key, gone)):
+            finding = ST.check_other_agents()
+        self.assertEqual(finding.status, "ok")                                  # informational: an agent SPADRA does not use never blocks or warns
+        self.assertIn("import here: Planning, Reasoning.", finding.detail)
+        self.assertEqual(finding.detail.count("ModuleNotFoundError: No module named 'torch'"), 1)      # the same error for many agents is said once
+        self.assertIn("Language", finding.detail.split("Do not import here:")[1])
+        for used in ("STEM", "Spatial", "Simulation", "Optimization", "Animation", "Observability"):
+            self.assertNotIn(used, finding.detail)                              # the agents SPADRA uses are reported by their own lines
+
+    def test_it_is_part_of_the_check_and_not_of_a_normal_start(self):
+        with mock.patch.object(ST, "check_other_agents", return_value=ST.Finding("Other SLAI agents (SPADRA does not use them)", "ok", "import here: none")) as other, \
+                mock.patch.object(ST, "check_agents", return_value=[]):
+            names = [f.name for f in ST.check_environment(CHECKOUT, APP / "dist", agents=True)]
+            self.assertIn("Other SLAI agents (SPADRA does not use them)", names)
+            other.reset_mock()
+            ST.check_environment(CHECKOUT, APP / "dist", agents=False)
+            other.assert_not_called()
+
+
 class Report(unittest.TestCase):
     def test_render_counts_problems_and_shows_fixes_only_where_needed(self) -> None:
         text = ST.render([ST.Finding("A", "ok", "fine", "never shown"), ST.Finding("B", "warn", "meh", "do x"), ST.Finding("C", "error", "bad", "do y")])
