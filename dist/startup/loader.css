@@ -35,3 +35,23 @@ dialog.slai-startup[open] {
   .slai-startup.failed .slai-startup-orb::before, .slai-startup.failed .slai-startup-orb::after { animation: none; }
 }
 .slai-startup progress { width: min(16em, 70vw); height: 4px; accent-color: #ebcd48; }
+/* The branded layout of applications that report real start-up stages (data-variant="branded"): logo orb, status line, progress bar, name, tagline. */
+dialog.slai-startup-live[open] { width: min(90vw, 32em); max-width: none; transition: opacity .2s ease; }
+.slai-startup-live::backdrop { transition: opacity .2s ease; }
+.slai-startup-live .spadra-startup-content { display: grid; justify-items: center; gap: 18px; }
+.slai-startup-live .spadra-startup-content h1 { margin: 0; font: 600 22px/1.2 system-ui, sans-serif; letter-spacing: .02em; }
+.slai-startup-live .spadra-startup-subtitle { font: 400 13px/1.4 system-ui, sans-serif; color: #a9acb6; text-transform: none; letter-spacing: 0; }
+.slai-startup-live p[role=status], .slai-startup-live p[role=alert] { min-height: 1.5em; }
+.slai-startup-live progress { width: min(18em, 70vw); height: 4px; }
+.slai-startup-live.failed button { margin: 0 .4em; }
+.slai-startup-live.leaving[open] { opacity: 0; pointer-events: none; }
+.slai-startup-live.leaving::backdrop { opacity: 0; }
+@media (prefers-reduced-motion: reduce) { dialog.slai-startup-live[open], .slai-startup-live::backdrop { transition: none; } }
+.slai-startup:focus, .slai-startup:focus-visible { outline: none; }
+/* No frame around the loader, and the logo is about a third of the window (35vh or 35vw, whichever is smaller) so it reads from across a room. */
+dialog.slai-startup-live, dialog.slai-startup-live[open] { border: 0; outline: none; box-shadow: none; }
+.slai-startup-live .slai-startup-orb { width: min(35vh, 35vw); height: min(35vh, 35vw); }
+.slai-startup-live .slai-startup-orb img { width: 41%; height: 41%; }
+.slai-startup-live .slai-startup-orb::before, .slai-startup-live .slai-startup-orb::after { border-width: 2px; border-top-color: #ebcd48; }
+.slai-startup-live .slai-startup-orb::after { inset: 13%; }
+.slai-startup-live .spadra-startup-content { gap: clamp(12px, 3vh, 24px); }

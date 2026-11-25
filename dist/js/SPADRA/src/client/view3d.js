@@ -9,6 +9,11 @@ import { niceStep, snapToGrid, wallCentreShift } from "./geom2d.js";
 import { addLayerDialog } from "./dialogs.js";
 import { downpipeComponentsDialog } from "./gutters.js";
 import { dragAngle, leafPoint, partOfFace } from "./assembly.js";
+import { MeasureTool } from "./measure_ui.js";
+import { meshArrays } from "./snapshot_render.js";
+import { VisualControls } from "./visual_ui.js";
+import { edgeOffsetFactor, EdgeRenderer, GlUnavailable, placeholderShadowTexture, ShadowPass } from "./visual_gl.js";
+import { edgePixels, FLAT_SHADOW_KEEP, MESH_FS, MESH_VS, MODE_LABEL, renderPlan } from "./visual_shading.js";
 const MM_PER = { mm: 1, cm: 10, m: 1000 };
 const MATERIAL_COLOR = {
     Concrete: [0.72, 0.73, 0.75], Timber: [0.70, 0.50, 0.30], Glass: [0.55, 0.75, 0.88], Masonry: [0.72, 0.42, 0.34], Steel: [0.50, 0.56, 0.64], Plasterboard: [0.92, 0.91, 0.88],
@@ -17,6 +22,14 @@ const FALLBACK_COLOR = [0.75, 0.75, 0.78];
 const VOID_COLOR = [0.86, 0.30, 0.30];
 const VOID_ALPHA = 0.3;
 const PITCH_LIMIT = Math.PI / 2 - 0.02;
+const SHADOW_MAP_SIZE = 2048;
+const IDENTITY = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+/** What a related element is tinted when something it is linked to or grouped with is selected: colour and strength by role. */
+const ROLE_TINT = {
+    parent: { colour: [0.88, 0.55, 0.05], amount: 0.5 }, ancestor: { colour: [0.88, 0.55, 0.05], amount: 0.28 },
+    child: { colour: [0.12, 0.62, 0.55], amount: 0.5 }, descendant: { colour: [0.12, 0.62, 0.55], amount: 0.28 },
+    group: { colour: [0.58, 0.37, 0.82], amount: 0.3 },
+};
 export class ModelView {
     store;
     el;
@@ -34,6 +47,14 @@ export class ModelView {
     polyPts = [];
     openingAt = null;
     pendingTool = "";
+    visualControls;
+    visualPanel;
+    edges = null;
+    shadow = null;
+    shadowPlaceholder = null;
+    /** What this view draws now, for the tests and the status of the render: the mode and whether a shadow map was drawn. */
+    lastRender = { mode: "", shadows: false, edgePx: 0, shadowDraws: 0 };
+    shadowDraws = 0;
     meshProgram = null;
     lineProgram = null;
     gridBuffer = null;
@@ -42,6 +63,8 @@ export class ModelView {
     drawables = [];
     bounds = null;
     sceneRevision = -1;
+    /** Counts every time the drawn geometry is replaced (also for an animation frame, whose revision does not change): a shadow map is valid for one serial. */
+    sceneSerial = 0;
     width = 1;
     height = 1;
     frame = 0;
@@ -57,6 +80,7 @@ export class ModelView {
     ground = null;
     cubeFaces = [];
     matrices = null;
+    measure = null;
     constructor(store) {
         this.store = store;
         this.canvas = h("canvas", { class: "view-canvas", attrs: { "aria-hidden": "true" } });
@@ -115,9 +139,21 @@ export class ModelView {
         const rail = h("div", { class: "view-rail", attrs: { role: "toolbar", "aria-label": "View tools" } }, this.railButton("home", "Home view", () => { this.home(); }), this.railButton("search", "Zoom to selection", () => { this.zoomSelection(); }), this.railButton("pan", "Pan (hold the right mouse button, or toggle here)", (b) => { this.panMode = !this.panMode; b.setAttribute("aria-pressed", String(this.panMode)); }), this.orbitButton = this.railButton("orbit", "Orbit around the selected element (turn off to orbit around the point in the middle of the view)", () => { this.store.setOrbitSelection(!this.store.orbitSelection); this.orbitButton?.setAttribute("aria-pressed", String(this.store.orbitSelection)); }), this.railButton("fit", "Zoom to fit the whole model", () => { this.fit(); }));
         const unavailable = h("div", { class: "view-unavailable", hidden: !!this.gl, text: "3D view needs WebGL 2, which this browser does not provide. The model, properties and exports still work." });
         this.contextAnchor.style.cssText = "position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;padding:0;border:0";
-        this.el = h("div", { class: "canvas-wrap" }, this.canvas, this.overlay, this.layerControls, this.hud, rail, unavailable, this.contextAnchor);
+        this.visualControls = new VisualControls({ get: () => this.store.activeVisual(), commit: (patch) => { void this.store.setVisual(patch); }, preview: (patch) => this.store.previewVisual(patch) });
+        // Closed, the panel is one small button in the top right corner, so it never covers the model; open, it lists the modes and only the controls the mode uses.
+        const body = h("div", { class: "visual-body", hidden: true }, this.visualControls.el);
+        const toggle = h("button", { type: "button", class: "visual-toggle", attrs: { "aria-expanded": "false", title: "How the 3D view is drawn: mode, edge thickness, shadows, sun" },
+            on: { click: () => { body.hidden = !body.hidden; toggle.setAttribute("aria-expanded", String(!body.hidden)); } } });
+        const showMode = () => { toggle.textContent = `Display: ${MODE_LABEL[this.store.activeVisual().mode]}`; };
+        const visualPanel = h("div", { class: "visual-panel", attrs: { role: "region", "aria-label": "How the 3D view is drawn" } }, toggle, body);
+        this.visualPanel = visualPanel;
+        showMode();
+        this.store.visualChanged.on(() => { this.visualControls.update(); showMode(); this.draw(); });
+        this.el = h("div", { class: "canvas-wrap" }, this.canvas, this.overlay, this.layerControls, this.hud, rail, visualPanel, unavailable, this.contextAnchor);
         if (this.gl)
             this.setup(this.gl);
+        this.measure = new MeasureTool({ store: this.store, el: this.el, project: (p) => this.project(p), redraw: () => this.draw(),
+            hit: (x, y) => { const c = this.hitCandidates(x, y)[0]; return c ? { id: c.id, point: c.point } : null; } });
         new ResizeObserver(() => this.resize()).observe(this.el);
         this.bind();
     }
@@ -153,25 +189,18 @@ export class ModelView {
         return prog;
     }
     setup(gl) {
-        this.meshProgram = this.compile(gl, `#version 300 es
-      in vec3 a_pos; in vec3 a_normal; uniform mat4 u_vp; out vec3 v_normal; out float v_height;
-      void main() { v_normal = a_normal; v_height = a_pos.z; gl_Position = u_vp * vec4(a_pos, 1.0); }`, `#version 300 es
-      precision highp float; in vec3 v_normal; in float v_height; uniform vec3 u_color; uniform vec3 u_tint; uniform float u_tintAmount; uniform float u_alpha;
-      uniform float u_gradient; uniform vec3 u_top; uniform vec3 u_bottom; uniform float u_zMin; uniform float u_zMax;
-      uniform float u_boundary; uniform float u_fadeWidth; uniform float u_abrupt; out vec4 o;
-      void main() {
-        vec3 n = normalize(v_normal); vec3 l = normalize(vec3(-0.45, -0.6, 0.75));
-        float d = abs(dot(n, l)); float sky = 0.5 + 0.5 * abs(n.z); vec3 base = u_color;
-        if (u_gradient > 0.5) {
-          float t = clamp((v_height - u_zMin) / max(u_zMax - u_zMin, 0.000001), 0.0, 1.0);
-          float blend = (u_abrupt > 0.5 || u_fadeWidth < 0.00001) ? step(u_boundary, t) : smoothstep(u_boundary - u_fadeWidth * 0.5, u_boundary + u_fadeWidth * 0.5, t);
-          base = mix(u_bottom, u_top, blend);
-        }
-        vec3 c = base * (0.58 + 0.30 * d + 0.18 * sky); c = mix(c, u_tint, u_tintAmount); o = vec4(c, u_alpha);
-      }`);
+        this.meshProgram = this.compile(gl, MESH_VS, MESH_FS); // the same shader the snapshot renderer draws with
         this.lineProgram = this.compile(gl, `#version 300 es
       in vec3 a_pos; uniform mat4 u_vp; void main() { gl_Position = u_vp * vec4(a_pos, 1.0); }`, `#version 300 es
       precision highp float; uniform vec4 u_color; out vec4 o; void main() { o = u_color; }`);
+        try {
+            this.edges = new EdgeRenderer(gl);
+        }
+        catch (error) {
+            if (!(error instanceof GlUnavailable))
+                throw error;
+            console.error(error.message);
+        }
         this.gridBuffer = gl.createBuffer();
         this.axisBuffer = gl.createBuffer();
         gl.enable(gl.DEPTH_TEST);
@@ -184,6 +213,7 @@ export class ModelView {
         // (While an animation exists the view can legitimately be empty for a moment, when everything is hidden; the camera must not jump then.)
         const first = this.sceneRevision < 0 || (this.drawables.length === 0 && !this.store.animation?.animation && (scene?.objects.length ?? 0) > 0);
         this.sceneRevision = scene?.revision ?? -1;
+        this.sceneSerial++;
         this.disposeDrawables();
         this.bounds = scene?.bounds ?? null;
         const gl = this.gl;
@@ -224,9 +254,45 @@ export class ModelView {
         }
         this.buildGrid();
         this.refreshLevels();
+        this.visualControls.update();
         if (first || !scene)
             this.fit();
         this.draw();
+    }
+    /** Free every GPU object this view holds (buffers, programs, the shadow map). The view is not usable afterwards. */
+    dispose() {
+        const gl = this.gl;
+        if (!gl)
+            return;
+        if (this.frame) {
+            cancelAnimationFrame(this.frame);
+            this.frame = 0;
+        }
+        this.disposeDrawables();
+        this.shadow?.dispose();
+        this.shadow = null;
+        this.edges?.dispose();
+        this.edges = null;
+        if (this.shadowPlaceholder) {
+            gl.deleteTexture(this.shadowPlaceholder);
+            this.shadowPlaceholder = null;
+        }
+        if (this.gridBuffer) {
+            gl.deleteBuffer(this.gridBuffer);
+            this.gridBuffer = null;
+        }
+        if (this.axisBuffer) {
+            gl.deleteBuffer(this.axisBuffer);
+            this.axisBuffer = null;
+        }
+        if (this.meshProgram) {
+            gl.deleteProgram(this.meshProgram);
+            this.meshProgram = null;
+        }
+        if (this.lineProgram) {
+            gl.deleteProgram(this.lineProgram);
+            this.lineProgram = null;
+        }
     }
     disposeDrawables() {
         const gl = this.gl;
@@ -246,10 +312,8 @@ export class ModelView {
         if (keep && this.store.levels.some((l) => l.id === keep))
             this.levelSelect.value = keep;
     }
-    buildGrid() {
-        const gl = this.gl;
-        if (!gl || !this.gridBuffer)
-            return;
+    /** The ground grid and the world axes for the model's extent: line end points (x, y, z) and the axes' reach. */
+    gridGeometry() {
         const [lo, hi] = this.bounds ?? [[-10, -10, 0], [10, 10, 0]];
         const span = Math.max(hi[0] - lo[0], hi[1] - lo[1], 10);
         let step = span > 80 ? 10 : span > 30 ? 5 : span > 12 ? 2 : 1;
@@ -263,15 +327,46 @@ export class ModelView {
             const x = (cx + i) * step, y = (cy + i) * step, x0 = (cx - n) * step, x1 = (cx + n) * step, y0 = (cy - n) * step, y1 = (cy + n) * step;
             pts.push(x, y0, 0, x, y1, 0, x0, y, 0, x1, y, 0);
         }
+        const reach = Math.max(Math.abs(cx) + n, Math.abs(cy) + n, 10) * step; // the axes run through the origin as far as the grid reaches from it
+        return { pts, axes: [-reach, 0, 0, reach, 0, 0, 0, -reach, 0, 0, reach, 0] };
+    }
+    buildGrid() {
+        const gl = this.gl;
+        if (!gl || !this.gridBuffer)
+            return;
+        const { pts, axes } = this.gridGeometry();
         this.gridCount = pts.length / 3;
         gl.bindBuffer(gl.ARRAY_BUFFER, this.gridBuffer);
         gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(pts), gl.STATIC_DRAW);
-        const reach = Math.max(Math.abs(cx) + n, Math.abs(cy) + n, 10) * step; // the axes run through the origin as far as the grid reaches from it
         if (this.axisBuffer) {
             gl.bindBuffer(gl.ARRAY_BUFFER, this.axisBuffer);
-            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-reach, 0, 0, reach, 0, 0, 0, -reach, 0, 0, reach, 0]), gl.STATIC_DRAW);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(axes), gl.STATIC_DRAW);
         }
     }
+    /** What an offscreen snapshot needs from this view, as plain copies: the meshes with their colours, the camera and the theme. The snapshot is drawn elsewhere
+     *  (``snapshot_render.ts``) at the size asked for, so nothing here is resized, redrawn or changed. Null where the browser has no WebGL 2. */
+    snapshotInput() {
+        if (!this.gl)
+            return null;
+        const items = this.drawables.map((d) => {
+            const { positions, edges } = meshArrays(d.verts, d.faces, featureEdges(d.verts, d.faces));
+            const split = d.layerColors.length && d.layerColors.reduce((n, x) => n + x.count * 3, 0) === d.triCount
+                ? d.layerColors.map((x) => ({ count: x.count * 3, color: x.color })) : [{ count: d.triCount, color: d.color }];
+            const parts = split.map((part, index) => {
+                const g = d.layerGradients?.[index] ?? d.gradient;
+                const hex = part.color && /^#[0-9a-f]{6}$/i.test(part.color) ? part.color : null;
+                const color = hex ? hexRgb01(hex) : MATERIAL_COLOR[d.material ?? ""] ?? FALLBACK_COLOR;
+                return { count: part.count, color, gradient: g ? { top: hexRgb01(g.top), bottom: hexRgb01(g.bottom), position: g.position / 100, fade: g.fade_width / 100, abrupt: g.transition === "abrupt" } : null };
+            });
+            return { id: d.id, construction: d.category === "void", positions, edges, parts, zMin: d.zMin, zMax: d.zMax };
+        });
+        const { pts, axes } = this.gridGeometry();
+        const c = (name, fallback) => { const [r, g, b] = this.parseColor(this.css(name, fallback)); return [r, g, b]; };
+        return { items, visual: structuredClone(this.store.activeVisual()), viewHeight: this.height, bounds: this.bounds, camera: { ...this.cam, target: [...this.cam.target] }, extent: this.extent, grid: new Float32Array(pts), axes: new Float32Array(axes),
+            colours: { paper: c("--paper", "#ffffff"), ink: c("--ink", "#1a1d23"), grid: c("--grid-major", "#cfd4dc"), axisX: c("--axis-x", "#d9483b"), axisY: c("--axis-y", "#3aa655") } };
+    }
+    /** Width over height of the view on screen, for "same as the view" snapshots. */
+    viewAspect() { return this.width / Math.max(1, this.height); }
     // ------------------------------------------------------------------------------------------------------------ camera
     home() { this.cam.yaw = HOME_VIEW.yaw; this.cam.pitch = HOME_VIEW.pitch; this.fit(); }
     fit() {
@@ -381,6 +476,10 @@ export class ModelView {
                 return;
             }
         }
+        if (this.store.tool === "measure" && !g) {
+            this.measure?.move(x, y);
+            return;
+        }
         const tool = this.store.tool;
         if (tool === "wall" || tool === "beam" || tool === "column" || tool === "floor" || tool === "roof" || tool === "section")
             this.ground = this.groundPoint(x, y, e.shiftKey);
@@ -430,6 +529,10 @@ export class ModelView {
             return;
         }
         const tool = this.store.tool;
+        if (tool === "measure") {
+            await this.measure?.click();
+            return;
+        }
         if (tool === "wall") {
             await this.placeWall(this.groundPoint(x, y, e.shiftKey));
             return;
@@ -470,10 +573,10 @@ export class ModelView {
         if (hit && e.shiftKey) {
             const cur = this.selectedIds();
             const ids = cur.includes(hit) ? cur.filter((i) => i !== hit) : [...cur, hit];
-            await this.store.select(ids.length ? { kind: "model", ids } : null);
+            await this.store.select(ids.length ? { kind: "model", ids, member: true } : null);
         }
         else
-            await this.store.select(hit ? { kind: "model", ids: [hit] } : null);
+            await this.store.select(hit ? { kind: "model", ids: [hit], member: e.ctrlKey } : null); // a group is picked as one; Ctrl+click picks one member
     }
     /** Move the camera from the keyboard: arrows orbit (Shift for bigger steps), Ctrl+arrows walk, Page Up and Page Down raise and lower it. */
     navigate(e) {
@@ -509,6 +612,10 @@ export class ModelView {
         return true;
     }
     async key(e) {
+        if (this.measure?.key(e)) {
+            e.preventDefault();
+            return;
+        }
         if (e.key === "Escape") {
             if (this.wallStart || this.polyPts.length) {
                 this.wallStart = null;
@@ -948,6 +1055,7 @@ export class ModelView {
         this.orbitButton?.setAttribute("aria-pressed", String(this.store.orbitSelection));
         for (const g of this.hudGroups)
             g.hidden = g.dataset["tool"] !== tool;
+        this.measure?.setActive(tool === "measure");
         if (tool === "wall")
             for (const [key, option] of [["wall.height", "height"], ["wall.thickness", "thickness"]]) {
                 const input = this.fields[key];
@@ -1260,19 +1368,62 @@ export class ModelView {
             gl.uniform4f(uColor, ay[0], ay[1], ay[2], 1);
             gl.drawArrays(gl.LINES, 2, 2);
         }
-        const mesh = this.meshProgram;
-        gl.useProgram(mesh);
-        gl.uniformMatrix4fv(gl.getUniformLocation(mesh, "u_vp"), false, vp);
-        const mPos = gl.getAttribLocation(mesh, "a_pos"), mNor = gl.getAttribLocation(mesh, "a_normal");
+        const visual = this.store.activeVisual();
+        const plan = renderPlan(visual);
         const ids = new Set(this.clean ? [] : this.selectedIds());
         const hover = this.clean ? null : this.hover;
+        const roles = this.clean ? null : this.store.relationRoles;
+        const solids = this.drawables.filter((d) => d.category !== "void");
+        // the sun's shadow map (drawn again only when the model or the sun changes)
+        let shadowTex = null, lightVp = IDENTITY, shadowSize = 1;
+        if (plan.shadows && plan.faces !== "none" && solids.length) {
+            try {
+                this.shadow ??= new ShadowPass(gl, SHADOW_MAP_SIZE);
+                const meshes = solids.map((d) => ({ buf: d.tri, count: d.triCount }));
+                if (this.shadow.render(this.bounds, plan.sun, meshes, `${this.sceneSerial}|${plan.sun.map((x) => x.toFixed(5)).join(",")}`))
+                    this.shadowDraws++;
+                shadowTex = this.shadow.texture;
+                lightVp = this.shadow.lightVp;
+                shadowSize = this.shadow.size;
+            }
+            catch (error) {
+                if (!(error instanceof GlUnavailable))
+                    throw error;
+                toast(error.message, { kind: "error" });
+            }
+        }
+        this.shadowPlaceholder ??= placeholderShadowTexture(gl);
+        const mesh = this.meshProgram;
+        gl.useProgram(mesh);
+        const loc = {};
+        const at = (name) => (loc[name] ??= gl.getUniformLocation(mesh, name));
+        const eye = cameraEye(this.cam);
+        const toTarget = [this.cam.target[0] - eye[0], this.cam.target[1] - eye[1], this.cam.target[2] - eye[2]];
+        const reach = Math.hypot(...toTarget) || 1;
+        gl.uniformMatrix4fv(at("u_vp"), false, vp);
+        gl.uniformMatrix4fv(at("u_light"), false, lightVp);
+        gl.uniform3f(at("u_sun"), plan.sun[0], plan.sun[1], plan.sun[2]);
+        gl.uniform3f(at("u_eye"), eye[0], eye[1], eye[2]);
+        gl.uniform3f(at("u_viewDir"), toTarget[0] / reach, toTarget[1] / reach, toTarget[2] / reach);
+        gl.uniform1f(at("u_ortho"), this.cam.ortho ? 1 : 0);
+        gl.uniform1f(at("u_encode"), 1);
+        gl.uniform1f(at("u_flatKeep"), FLAT_SHADOW_KEEP);
+        gl.uniform1f(at("u_shadowTexel"), 1 / shadowSize);
+        gl.uniform1i(at("u_shadowMap"), 0);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, shadowTex ?? this.shadowPlaceholder);
+        const mPos = gl.getAttribLocation(mesh, "a_pos"), mNor = gl.getAttribLocation(mesh, "a_normal");
         const paintSolids = (voids) => {
+            gl.uniform1f(at("u_mode"), voids ? 1 : plan.shaderMode); // a construction cutter is always a plain translucent colour
+            gl.uniform1f(at("u_shadowOn"), !voids && shadowTex ? 1 : 0);
             for (const d of this.drawables) {
                 if ((d.category === "void") !== voids)
                     continue;
-                gl.uniform3f(gl.getUniformLocation(mesh, "u_tint"), select[0], select[1], select[2]);
-                gl.uniform1f(gl.getUniformLocation(mesh, "u_tintAmount"), ids.has(d.id) ? 0.45 : d.id === hover ? 0.18 : 0);
-                gl.uniform1f(gl.getUniformLocation(mesh, "u_alpha"), voids ? VOID_ALPHA : 1);
+                const role = !ids.has(d.id) && roles ? ROLE_TINT[roles[d.id] ?? ""] : undefined; // related to the selection: parent, children, group-mates
+                const tint = role?.colour ?? select;
+                gl.uniform3f(at("u_tint"), tint[0], tint[1], tint[2]);
+                gl.uniform1f(at("u_tintAmount"), ids.has(d.id) ? 0.45 : role ? role.amount : d.id === hover ? 0.18 : 0);
+                gl.uniform1f(at("u_alpha"), voids ? VOID_ALPHA : 1);
                 gl.bindBuffer(gl.ARRAY_BUFFER, d.tri);
                 gl.enableVertexAttribArray(mPos);
                 gl.vertexAttribPointer(mPos, 3, gl.FLOAT, false, 24, 0);
@@ -1280,31 +1431,34 @@ export class ModelView {
                 gl.vertexAttribPointer(mNor, 3, gl.FLOAT, false, 24, 12);
                 const parts = d.layerColors.length && d.layerColors.reduce((n, x) => n + x.count * 3, 0) === d.triCount
                     ? d.layerColors.map(x => ({ count: x.count * 3, color: x.color })) : [{ count: d.triCount, color: d.color }];
-                let at = 0;
+                let first = 0;
                 for (const [index, part] of parts.entries()) {
                     const gradient = d.layerGradients?.[index] ?? d.gradient;
-                    gl.uniform1f(gl.getUniformLocation(mesh, "u_gradient"), gradient ? 1 : 0);
+                    gl.uniform1f(at("u_gradient"), gradient ? 1 : 0);
                     if (gradient) {
                         const top = hexRgb01(gradient.top), bottom = hexRgb01(gradient.bottom);
-                        gl.uniform3f(gl.getUniformLocation(mesh, "u_top"), top[0], top[1], top[2]);
-                        gl.uniform3f(gl.getUniformLocation(mesh, "u_bottom"), bottom[0], bottom[1], bottom[2]);
-                        gl.uniform1f(gl.getUniformLocation(mesh, "u_zMin"), d.zMin);
-                        gl.uniform1f(gl.getUniformLocation(mesh, "u_zMax"), d.zMax);
-                        gl.uniform1f(gl.getUniformLocation(mesh, "u_boundary"), gradient.position / 100);
-                        gl.uniform1f(gl.getUniformLocation(mesh, "u_fadeWidth"), gradient.fade_width / 100);
-                        gl.uniform1f(gl.getUniformLocation(mesh, "u_abrupt"), gradient.transition === "abrupt" ? 1 : 0);
+                        gl.uniform3f(at("u_top"), top[0], top[1], top[2]);
+                        gl.uniform3f(at("u_bottom"), bottom[0], bottom[1], bottom[2]);
+                        gl.uniform1f(at("u_zMin"), d.zMin);
+                        gl.uniform1f(at("u_zMax"), d.zMax);
+                        gl.uniform1f(at("u_boundary"), gradient.position / 100);
+                        gl.uniform1f(at("u_fadeWidth"), gradient.fade_width / 100);
+                        gl.uniform1f(at("u_abrupt"), gradient.transition === "abrupt" ? 1 : 0);
                     }
                     const hex = part.color && /^#[0-9a-f]{6}$/i.test(part.color) ? part.color : null;
                     const base = voids ? VOID_COLOR : hex
                         ? hexRgb01(hex)
                         : MATERIAL_COLOR[d.material ?? ""] ?? FALLBACK_COLOR;
-                    gl.uniform3f(gl.getUniformLocation(mesh, "u_color"), base[0], base[1], base[2]);
-                    gl.drawArrays(gl.TRIANGLES, at, part.count);
-                    at += part.count;
+                    gl.uniform3f(at("u_color"), base[0], base[1], base[2]);
+                    gl.drawArrays(gl.TRIANGLES, first, part.count);
+                    first += part.count;
                 }
             }
         };
-        paintSolids(false);
+        const widthPx = edgePixels(plan) * dpr;
+        gl.polygonOffset(edgeOffsetFactor(plan.edges ? widthPx : 0), 1); // faces yield to the edges drawn over them, as far as the line is wide
+        if (plan.faces !== "none")
+            paintSolids(false); // wireframe fills nothing
         if (!this.clean && this.drawables.some((d) => d.category === "void")) { // construction cutters appear only while editing, never in snapshots or exported frames
             gl.enable(gl.BLEND);
             gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
@@ -1314,17 +1468,30 @@ export class ModelView {
             gl.disable(gl.BLEND);
         }
         gl.disableVertexAttribArray(mNor);
-        gl.useProgram(line);
-        gl.enableVertexAttribArray(aPos);
-        for (const d of this.drawables) {
-            if (this.clean && d.category === "void")
-                continue;
-            const c = ids.has(d.id) ? select : ink;
-            gl.uniform4f(uColor, c[0], c[1], c[2], 1);
-            gl.bindBuffer(gl.ARRAY_BUFFER, d.edge);
-            gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
-            gl.drawArrays(gl.LINES, 0, d.edgeCount);
+        // edges: quads of the width the mode asks for (WebGL's own lines are always one pixel)
+        if (plan.edges && this.edges) {
+            const target = [Math.round(this.width * dpr), Math.round(this.height * dpr)];
+            for (const d of this.drawables) {
+                if (this.clean && d.category === "void")
+                    continue;
+                const c = ids.has(d.id) ? select : ink;
+                this.edges.draw(d.edge, d.edgeCount / 2, vp, target, widthPx, [c[0], c[1], c[2], 1]);
+            }
         }
+        else if (plan.edges) { // no edge renderer on this GPU: one-pixel lines
+            gl.useProgram(line);
+            gl.enableVertexAttribArray(aPos);
+            for (const d of this.drawables) {
+                if (this.clean && d.category === "void")
+                    continue;
+                const c = ids.has(d.id) ? select : ink;
+                gl.uniform4f(uColor, c[0], c[1], c[2], 1);
+                gl.bindBuffer(gl.ARRAY_BUFFER, d.edge);
+                gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
+                gl.drawArrays(gl.LINES, 0, d.edgeCount);
+            }
+        }
+        this.lastRender = { mode: visual.mode, shadows: !!shadowTex, edgePx: plan.edges ? widthPx : 0, shadowDraws: this.shadowDraws };
     }
     project(p) {
         if (!this.matrices)
@@ -1334,12 +1501,58 @@ export class ModelView {
             return null;
         return [((x / w + 1) / 2) * this.width, ((1 - y / w) / 2) * this.height];
     }
+    /** An arrow from each parent to its child for the selection's relationships, and a legend of what the tints mean. */
+    paintRelations(ctx) {
+        const roles = this.store.relationRoles;
+        if (!roles)
+            return;
+        const centre = (id) => {
+            const d = this.drawables.find((o) => o.id === id);
+            if (!d || !d.verts.length)
+                return null;
+            const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+            for (const v of d.verts)
+                for (let i = 0; i < 3; i++) {
+                    lo[i] = Math.min(lo[i] ?? 0, v[i] ?? 0);
+                    hi[i] = Math.max(hi[i] ?? 0, v[i] ?? 0);
+                }
+            return this.project([(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2]);
+        };
+        ctx.save();
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = "rgba(224, 140, 12, 0.95)";
+        ctx.fillStyle = "rgba(224, 140, 12, 0.95)";
+        ctx.setLineDash([6, 4]);
+        for (const [parent, child] of this.store.relationEdges) {
+            const a = centre(parent ?? ""), b = centre(child ?? "");
+            if (!a || !b)
+                continue;
+            ctx.beginPath();
+            ctx.moveTo(a[0], a[1]);
+            ctx.lineTo(b[0], b[1]);
+            ctx.stroke();
+            const ang = Math.atan2(b[1] - a[1], b[0] - a[0]);
+            ctx.setLineDash([]);
+            ctx.beginPath();
+            ctx.moveTo(b[0], b[1]);
+            ctx.lineTo(b[0] - 10 * Math.cos(ang - 0.4), b[1] - 10 * Math.sin(ang - 0.4));
+            ctx.lineTo(b[0] - 10 * Math.cos(ang + 0.4), b[1] - 10 * Math.sin(ang + 0.4));
+            ctx.closePath();
+            ctx.fill();
+            ctx.setLineDash([6, 4]);
+        }
+        ctx.restore();
+    }
     paintOverlay() {
         const ctx = this.octx;
         ctx.clearRect(0, 0, this.width, this.height);
         const font = this.css("--font-ui", "sans-serif");
         const ink = this.css("--ink", "#1a1d23"), select = this.css("--select", "#1a5fd1");
         this.paintPlacement(ctx, font, select);
+        if (!this.clean) {
+            this.paintRelations(ctx);
+            this.measure?.paint(ctx, font, select, this.css("--paper", "#fff"), ink);
+        }
         // wall rubber band
         if ((this.store.tool === "wall" || this.store.tool === "beam" || this.store.tool === "column" || this.store.tool === "section") && this.ground) {
             const g = this.project(this.ground);

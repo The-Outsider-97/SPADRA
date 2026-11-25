@@ -3,11 +3,14 @@ import { createClient, ApiError } from "../../../tools/web/src/api.js";
 import { openDialog, openMenu, promptDialog, toast } from "../../../tools/web/src/ui.js";
 import { h } from "../../../tools/web/src/dom.js";
 import { Emitter } from "../../../tools/web/src/util.js";
+import { normaliseVisual, updatedVisual } from "./visual_shading.js";
 import { fixesOf, oneLine, present, presentUnexpected } from "./errors.js";
 import { closedPolylinePoints, UNIT_MM } from "./geom2d.js";
 import { importDialog } from "./interchange.js";
 import { COMPONENT_KINDS, downpipeComponentsDialog, drainDialog } from "./gutters.js";
 import { cornerDialog } from "./curtainwall.js";
+import { relationshipEntries } from "./relationships_ui.js";
+import { mirrorElements, pasteElements, pasteProperties } from "./transfer_ui.js";
 const formatOf = (ref) => (ref.kind === "3d" ? "SGEO" : ref.kind === "schedule" ? "Schedule" : "SDRW");
 /** A true/false setting kept in this browser only (a convenience for this person; the project does not depend on it). */
 function readFlag(key, fallback) {
@@ -58,6 +61,8 @@ function readAutosaveMinutes() {
 export class Store {
     api = createClient({ slug: "spadra" });
     changed = new Emitter();
+    /** A 3D view's visualization settings changed (or are being previewed): only the picture and the panel need to follow; nothing is reloaded. */
+    visualChanged = new Emitter();
     /** The picture alone changed (the playhead moved); nothing in the project did. */
     frame = new Emitter();
     /** The playhead moved (the picture for it may still be on its way). */
@@ -125,6 +130,11 @@ export class Store {
     pendingOpeningSketch = null;
     /** Attribute clipboard is scoped to the currently open project; it stores IDs, never copied ownership. */
     attributeSource = null;
+    /** Elements copied with Copy Element, for Paste Element (scoped to the open project like the attribute clipboard). */
+    elementClip = null;
+    /** What the selection is related to, for the 3D view to tint: role by element id, and the parent → child pairs. Null when nothing is related. */
+    relationRoles = null;
+    relationEdges = [];
     /** Model-element commands are shared by the 2D and 3D viewports and Project Browser. The menu belongs to the clicked
      *  element, not whichever model item happened to be previously selected. The server owns every geometry operation. */
     openModelContextMenu(id, category, anchor, at = {}) {
@@ -133,15 +143,31 @@ export class Store {
             return;
         }
         const entries = [{ label: "Select element", icon: "select", run: () => { void this.select({ kind: "model", ids: [id] }); } }];
-        entries.push("separator", { label: "Copy Attributes", icon: "copy", run: () => {
+        if (this.scene?.objects.find((o) => o.id === id)?.group)
+            entries.push({ label: "Select only this element (not its group)", icon: "select", run: () => { void this.select({ kind: "model", ids: [id], member: true }); } });
+        const picked = this.selection?.kind === "model" && this.selection.ids.includes(id) ? this.selection.ids : [id];
+        const clip = this.attributeSource?.project === this.project?.id ? this.attributeSource : null;
+        entries.push("separator", { label: picked.length > 1 ? `Copy Element (${picked.length})` : "Copy Element", icon: "copy", run: () => {
                 if (!this.project)
                     return;
-                this.attributeSource = { id, category, project: this.project.id };
-                toast(`Copied ${category} attributes. Select the destination elements, then choose Paste Attributes.`, { kind: "info" });
+                this.elementClip = { ids: picked, project: this.project.id };
+                toast(`Copied ${picked.length === 1 ? "the element" : `${picked.length} elements`}. Choose Paste Element to make a copy.`, { kind: "info", timeoutMs: 2500 });
             } });
-        if (this.attributeSource?.category === category && this.attributeSource.project === this.project?.id) {
-            entries.push({ label: "Paste Attributes…", icon: "paste", run: () => { void this.pasteAttributes(id); } });
+        if (this.elementClip?.project === this.project?.id) {
+            const clipboard = this.elementClip;
+            entries.push({ label: "Paste Element…", icon: "paste", run: () => { void pasteElements(this, clipboard); } });
         }
+        entries.push({ label: picked.length > 1 ? `Mirror Element (${picked.length})…` : "Mirror Element…", icon: "mirror", run: () => { void mirrorElements(this, picked); } });
+        entries.push("separator", { label: "Copy Properties", icon: "copy", run: () => {
+                if (!this.project)
+                    return;
+                this.attributeSource = { id, category, project: this.project.id, name: this.scene?.objects.find((o) => o.id === id)?.name ?? category };
+                toast(`Copied the properties of this ${category}. Select the destination elements, then choose Paste Properties or Mirror Properties.`, { kind: "info" });
+            } });
+        if (clip && clip.category === category && !picked.every((p) => p === clip.id)) {
+            entries.push({ label: "Paste Properties…", icon: "paste", run: () => { void pasteProperties(this, clip, picked, "copy"); } }, { label: "Mirror Properties…", icon: "mirror", run: () => { void pasteProperties(this, clip, picked, "mirror"); } });
+        }
+        entries.push(...relationshipEntries(this, id));
         const edgePrompt = async (title) => {
             const value = await promptDialog({ title, label: "Boundary edge number (1, 2, …) or all", value: "all", confirmLabel: title,
                 validate: (s) => /^(all|[1-9]\d*)$/i.test(s.trim()) ? null : "Enter an edge number or all." });
@@ -183,93 +209,6 @@ export class Store {
             entries.push("separator", { label: "Add Opening Profile", icon: "rectangle", run: () => { void this.standardOpeningProfile(id, category); } }, { label: "Use Existing SDRW Profile…", icon: "polyline", run: () => { void this.chooseOpeningDrawingProfile(id); } }, { label: "Sketch New SDRW Profile…", icon: "polyline", run: () => { void this.startOpeningProfileSketch(id); } }, { label: "Import SDRW Profile into Drawing…", icon: "folder", run: () => { void this.importOpeningDrawingProfile(); } }, "separator", { label: "Replace Opening Profile…", icon: "rectangle", run: () => { void this.standardOpeningProfile(id, category, true); } }, { label: "Replace Opening Profile from SDRW…", icon: "polyline", run: () => { void this.chooseOpeningDrawingProfile(id, true); } }, { label: "Sketch Replacement Profile…", icon: "polyline", run: () => { void this.startOpeningProfileSketch(id, true); } }, { label: "Remove Opening Profile", icon: "close", run: () => { void this.run("model.remove_opening_profile", { opening: id }); } });
         }
         openMenu(anchor, entries, { label: `${category} actions` });
-    }
-    async pasteAttributes(id) {
-        const source = this.attributeSource;
-        if (!source || source.project !== this.project?.id)
-            return;
-        const targets = this.selection?.kind === "model" && this.selection.ids.includes(id) ? this.selection.ids : [id];
-        const categoryOf = new Map((this.scene?.objects ?? []).map((obj) => [obj.id, obj.category]));
-        const incompatible = targets.filter((target) => target !== source.id && categoryOf.has(target) && categoryOf.get(target) !== source.category);
-        const destinations = targets.filter((target) => target !== source.id && !incompatible.includes(target));
-        if (!destinations.length) {
-            toast("Select at least one destination other than the source.", { kind: "info" });
-            return;
-        }
-        const options = [
-            ["appearance", "Material, colour and conditional appearance"],
-            ["construction", "Construction layers (walls, floors, roofs)"],
-            ["classification", "BIM classification"],
-            ["custom", "Instance custom properties"],
-            ["formulas", "Parametric formulas"],
-            ["dimensions", "Compatible dimensions (may change geometry)"],
-        ];
-        const toggles = options.map(([key, label]) => {
-            const input = h("input", { attrs: { type: "checkbox", value: key } });
-            if (key === "appearance")
-                input.checked = true;
-            if (key === "construction" && !["wall", "roof", "floor"].includes(source.category))
-                input.disabled = true;
-            return { key, label, input };
-        });
-        const preview = h("div", { class: "muted" });
-        try {
-            const [from, to] = await Promise.all([
-                this.api.post("/properties", { model: source.id }),
-                this.api.post("/properties", { model: destinations[0] }),
-            ]);
-            const collect = (properties) => {
-                const result = new Map();
-                for (const group of [{ title: "General", rows: properties.top }, ...properties.groups]) {
-                    for (const row of group.rows)
-                        if (row.key)
-                            result.set(row.key, {
-                                label: row.label, group: group.title.toLowerCase(), value: String(row.expression ?? row.value ?? ""),
-                            });
-                }
-                return result;
-            };
-            const fromRows = collect(from), toRows = collect(to);
-            const updatePreview = () => {
-                const selected = new Set(toggles.filter(({ input }) => input.checked).map(({ key }) => key));
-                const differences = [];
-                for (const [key, row] of fromRows) {
-                    const dest = toRows.get(key);
-                    if (!dest || row.value === dest.value)
-                        continue;
-                    const group = row.group;
-                    const allowed = (selected.has("appearance") && (key.includes("material") || key.includes("color") || group.includes("appearance")))
-                        || (selected.has("dimensions") && ["height", "width", "thickness", "length", "pitch", "slope", "lean_angle", "lean_enabled", "lean_direction"].includes(key))
-                        || (selected.has("classification") && (group.includes("classification") || group.includes("omniclass") || group.includes("ifc")))
-                        || (selected.has("custom") && group.includes("custom"))
-                        || (selected.has("construction") && group.includes("layer"))
-                        || (selected.has("formulas") && row.value.startsWith("="));
-                    if (allowed)
-                        differences.push(`${row.label}: ${dest.value || "(empty)"} → ${row.value || "(empty)"}`);
-                }
-                preview.replaceChildren(h("strong", { text: "Preview · first destination" }), ...differences.slice(0, 12).map((line) => h("div", { text: line })), h("div", { text: differences.length > 12 ? `…and ${differences.length - 12} more changes` :
-                        differences.length ? "Layer definitions and material rules are also validated on Apply." :
-                            "No differing visible properties in the selected groups; non-scalar rules and layers are validated on Apply." }));
-            };
-            for (const { input } of toggles)
-                input.addEventListener("change", updatePreview);
-            updatePreview();
-        }
-        catch {
-            preview.textContent = "Property preview is unavailable. SPADRA will still validate the complete transfer before committing it.";
-        }
-        const body = h("div", {}, h("p", { text: `Apply properties from one ${source.category} to ${destinations.length} eligible destination(s)${incompatible.length ? ` (${incompatible.length} incompatible selection(s) excluded)` : ""}. Placement, IDs, hosts and shared type definitions stay unchanged.` }), ...toggles.map(({ label, input }) => h("label", { class: "checkbox-row" }, input, h("span", { text: label }))), preview);
-        const result = await openDialog({ title: "Paste compatible attributes", size: "narrow", body,
-            actions: [{ label: "Apply to destinations", kind: "primary", run: () => {
-                        const selected = toggles.filter(({ input }) => input.checked).map(({ key }) => key);
-                        if (!selected.length) {
-                            toast("Choose at least one attribute group.", { kind: "info" });
-                            return null;
-                        }
-                        return selected;
-                    } }] }).result;
-        if (result?.length)
-            await this.run("model.copy_attributes", { source: source.id, destinations, groups: result });
     }
     /** A roof edge member or drip edge: what it is decides the menu, so it is read first (one small request). */
     async accessoryContextMenu(id, category, anchor) {
@@ -638,6 +577,7 @@ export class Store {
         await this.loadActive();
         this.dropVanishedSelection();
         await this.loadProperties();
+        await this.loadRelations();
         await this.loadCheck();
         this.changed.emit();
     }
@@ -815,10 +755,46 @@ export class Store {
     /** The fixed grid spacing in the open project's drawing unit, or null when automatic. */
     gridSpacing() { return this.gridSpacingMm === null ? null : this.gridSpacingMm / (UNIT_MM[this.unit] ?? 1); }
     async select(selection) {
-        this.selection = selection;
+        this.selection = selection?.kind === "model" && !selection.member ? { ...selection, ids: this.expandGroups(selection.ids) } : selection; // a group is selected as one
         await this.loadProperties();
         await this.loadPose();
+        await this.loadRelations();
         this.changed.emit();
+    }
+    /** Each element together with the others in its outermost group (a group is selected, moved, turned and copied as one). Elements in no group are as given. */
+    expandGroups(ids) {
+        const objects = this.scene?.objects;
+        if (!objects || !objects.some((o) => o.group))
+            return ids;
+        const group = new Map(objects.map((o) => [o.id, o.group]));
+        const wanted = new Set(ids.map((i) => group.get(i)).filter((g) => !!g));
+        if (!wanted.size)
+            return ids;
+        const out = [...ids];
+        for (const o of objects)
+            if (o.group && wanted.has(o.group) && !out.includes(o.id))
+                out.push(o.id);
+        return out;
+    }
+    /** The relationships of the selection (what it follows, what follows it, its group), for tinting. Skipped when no element in the model is related to another. */
+    async loadRelations() {
+        const sel = this.selection;
+        const related = this.scene ? this.scene.objects.some((o) => o.parent || o.group) : true; // no scene loaded yet (a plan opened first): ask the server
+        if (!related || sel?.kind !== "model" || !sel.ids.length) {
+            this.relationRoles = null;
+            this.relationEdges = [];
+            return;
+        }
+        try {
+            const out = await this.api.post("/relationships", { ids: sel.ids });
+            const roles = Object.fromEntries(Object.entries(out.roles).filter(([, role]) => role !== "selected"));
+            this.relationRoles = Object.keys(roles).length ? roles : null;
+            this.relationEdges = out.edges;
+        }
+        catch {
+            this.relationRoles = null;
+            this.relationEdges = [];
+        }
     }
     // --------------------------------------------------------------------------------------------------------------- edits
     /** Apply one command. The revision the user was looking at is sent so a stale view is refused rather than silently overwritten. */
@@ -848,6 +824,63 @@ export class Store {
                 toast("Opening profile attached to the selected door or window.", { kind: "ok" });
         }
         return out;
+    }
+    // ------------------------------------------------------------------------------------------------------ 3D visualization
+    /** The 3D view whose settings apply now: the open 3D tab, otherwise the project's first 3D view. */
+    activeVisualId() {
+        const tab = this.tab;
+        if (tab?.ref.kind === "3d")
+            return tab.ref.id;
+        return flatten(this.tree).find((n) => n.view_kind === "3d")?.id ?? null;
+    }
+    visualPreview = null;
+    /** How the active 3D view is drawn: its stored settings (the defaults for a project that stores none), or the preview of a slider being dragged. */
+    activeVisual() {
+        const id = this.activeVisualId();
+        if (id && this.visualPreview?.id === id)
+            return this.visualPreview.visual;
+        const node = id ? flatten(this.tree).find((n) => n.id === id && n.view_kind === "3d") : undefined;
+        return normaliseVisual(node?.visual);
+    }
+    /** Show ``patch`` without saving it (a slider is being dragged). ``setVisual`` or ``endVisualPreview`` finishes it. */
+    previewVisual(patch) {
+        const id = this.activeVisualId();
+        if (!id)
+            return;
+        try {
+            this.visualPreview = { id, visual: updatedVisual(this.activeVisual(), patch) };
+        }
+        catch {
+            return;
+        }
+        this.visualChanged.emit();
+    }
+    endVisualPreview() { if (this.visualPreview) {
+        this.visualPreview = null;
+        this.visualChanged.emit();
+    } }
+    /** Save a change to the active 3D view's visualization. One undoable step; the camera, the selection and the model are not touched and the scene is not
+     *  read again: only the project tree (which carries the settings) is refreshed. Resolves to whether the server accepted it. */
+    async setVisual(patch) {
+        const id = this.activeVisualId();
+        if (!this.project || !id)
+            return false;
+        const rev = this.project.revision;
+        const out = await this.guard(() => this.api.post("/command", { op: "view.set_visual", params: { id, patch }, expected_revision: rev }), "That change", { op: "view.set_visual", params: { id, patch } });
+        this.visualPreview = null;
+        if (!out) {
+            this.visualChanged.emit();
+            return false;
+        }
+        this.project = out.project;
+        const data = await this.guard(() => this.api.get("/project/tree"));
+        if (data) {
+            this.project = data.project;
+            this.tree = data.tree.sections;
+            this.levels = data.levels;
+        }
+        this.visualChanged.emit();
+        return true;
     }
     async undo() { await this.step("/undo"); }
     async redo() { await this.step("/redo"); }

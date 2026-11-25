@@ -4,8 +4,10 @@ import { h } from "../../../tools/web/src/dom.js";
 import { promptDialog, toast } from "../../../tools/web/src/ui.js";
 import { addLayerDialog, hatchDialog, mirrorKeepDialog, numberPrompt } from "./dialogs.js";
 import { clamp } from "../../../tools/web/src/util.js";
-import { alongFrom, angleBetween, closedLoop, distToSegment, dist, entityDistance, entityBounds, fitBox, formatDimension, gripAt, grips, gridLines, gridSpec, hatchLoops, insideBox, mid, normaliseRect, orthoConstrain, pointInPolygon, polygonDistance, polygonsBounds, rotateAbout, roundAngle, segments, snapPoint, textBox, wallBand, wallCentreShift, } from "./geom2d.js";
+import { alongFrom, angleBetween, closedLoop, distToSegment, dist, entityDistance, entityBounds, fitBox, formatDimension, gripAt, grips, gridLines, gridSpec, hatchLoops, insideBox, mid, normaliseRect, orthoConstrain, pointInPolygon, polygonDistance, polygonsBounds, rotateAbout, roundAngle, segments, snapPoint, UNIT_MM, textBox, wallBand, wallCentreShift, } from "./geom2d.js";
 import { cssColor, withAlpha } from "./palette.js";
+import { mirrorElements } from "./transfer_ui.js";
+import { MeasureTool } from "./measure_ui.js";
 import { cornerDialog, curtainWallDialog } from "./curtainwall.js";
 import { downpipeComponentsDialog } from "./gutters.js";
 import { cutStyle, cutWeight, hatchFill, patternPath, levelLabel, markArrows, markLabel, itemContains, projectionAt, snapPolygons, visibleLevels } from "./projection.js";
@@ -17,14 +19,21 @@ const DRAG_PX = 4;
 const TOOL_KINDS = {
     offset: ["line", "polyline", "circle"], trim: ["line", "polyline"], extend: ["line", "polyline"], fillet: ["line"],
 };
+/** How strongly another level's geometry is tinted and outlined in a plan (opacity of the muted colour). */
+const HALFTONE_FILL = 0.2, HALFTONE_LINE = 0.55;
 const PAINT_ORDER = ["foundation", "floor", "roof", "room", "extrusion", "sweep", "generic", "stair", "wall", "curtainwall", "structural", "window", "door", "opening_profile", "column", "gutter", "downpipe", "drain", "flashing", "void", "grid"];
 const CURVE_TOOLS = new Set(["offset", "trim", "extend", "fillet", "hatch"]);
 const TURN_OFFSET_PX = 30;
 const PIVOTS = ["top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right"];
 const PIVOT_NAMES = { "top-left": "Top left", top: "Top", "top-right": "Top right", left: "Left", center: "Centre", right: "Right", "bottom-left": "Bottom left", bottom: "Bottom", "bottom-right": "Bottom right" };
+/** What a related element is tinted in the plan when something it is linked to or grouped with is selected (the same colours as the 3D view). */
+const ROLE_RGB = {
+    parent: [224, 140, 12, 0.34], ancestor: [224, 140, 12, 0.18], child: [31, 158, 140, 0.34], descendant: [31, 158, 140, 0.18], group: [148, 94, 209, 0.22],
+};
 export class DrawingView {
     store;
     el;
+    measureTool;
     canvas;
     ctx;
     hint;
@@ -94,6 +103,8 @@ export class DrawingView {
         this.wallHud = h("div", { class: "wall-hud", hidden: true }, heightLabel, thicknessLabel, h("label", {}, "Reference line", reference), h("label", {}, "Offset (mm)", offset), h("span", { class: "muted", text: "Click each corner · Shift keeps it straight · Esc ends", attrs: { title: "The path you draw is the reference line (near face = right of the path). Shift keeps it straight. Double-click or Esc ends." } }));
         this.buildFormHuds();
         this.el = h("div", { class: "canvas-wrap" }, this.canvas, this.layerControls, this.junctionControls, this.contextAnchor, this.wallHud, ...[...this.formHuds.values()].map((x) => x.el), this.hint);
+        this.measureTool = new MeasureTool({ store: this.store, el: this.el, flat: true, redraw: () => this.draw(), hit: () => null,
+            project: (p) => { const f = 1000 / (UNIT_MM[this.store.unit] ?? 1); return this.toScreen([p[0] * f, p[1] * f]); } });
         new ResizeObserver(() => this.resize()).observe(this.el);
         this.bind();
     }
@@ -267,11 +278,18 @@ export class DrawingView {
             }
         return out;
     }
+    /** Lower levels' outlines as snap references, only when the plan's "Lower levels" option is on (off by default). They are read-only: a snap to them
+     *  places a point, it never selects or moves them. */
+    contextPolygons() {
+        if (!this.data?.view_range?.snap_context)
+            return [];
+        return (this.data.context ?? []).flatMap((c) => c.rings);
+    }
     visible(e) { return this.data?.layers.find((l) => l.name === e.layer)?.visible !== false; }
     pointFor(e) {
         const [x, y] = this.local(e);
         const raw = this.toWorld(x, y);
-        const snap = snapPoint(raw, this.entities().filter((en) => this.visible(en)), SNAP_PX / this.scale, this.store.snapGrid ? this.grid().snap : null, [...(this.data?.model ?? []).map((w) => w.polygon), ...this.axisPolygons(), ...this.projectionPolygons()]);
+        const snap = snapPoint(raw, this.entities().filter((en) => this.visible(en)), SNAP_PX / this.scale, this.store.snapGrid ? this.grid().snap : null, [...(this.data?.model ?? []).map((w) => w.polygon), ...this.axisPolygons(), ...this.projectionPolygons(), ...this.contextPolygons()]);
         let point = snap.point;
         const last = this.pts[this.pts.length - 1] ?? this.anchor;
         if (e.shiftKey && last && (this.store.tool !== "select" || this.anchor) && this.store.tool !== "circle") {
@@ -423,6 +441,8 @@ export class DrawingView {
         const { world, snap } = this.pointFor(e);
         this.cursor = world;
         this.snap = snap;
+        if (this.store.tool === "measure")
+            this.measureTool.flatHover(this.metres(world));
         if (this.store.tool !== "select")
             this.canvas.style.setProperty("cursor", "crosshair"); // a drawing tool shows where it will act
         if (this.edit) {
@@ -498,9 +518,9 @@ export class DrawingView {
                 if (this.isModel(ids[0])) { // a wall moves in the model, in metres; the plan follows
                     const f = MM_PER[this.store.unit] / 1000;
                     const hangs = (id) => this.data?.model.find((w) => w.id === id)?.category === "gutter"; // a gutter hangs on its roof: it moves with the roof
-                    for (const id of ids)
-                        if (!hangs(id) && !(await this.store.run("model.move", { id, dx: dx * f, dy: dy * f })))
-                            break;
+                    const moving = ids.filter((id) => !hangs(id));
+                    if (moving.length)
+                        await this.store.run("model.move", { ids: moving, dx: dx * f, dy: dy * f }); // one command: an element that follows another, or shares its group, moves once and the drag is one undo step
                 }
                 else
                     await this.store.run("draw.move", { drawing: view, ids, dx, dy });
@@ -603,6 +623,9 @@ export class DrawingView {
                 break;
             case "mirror":
                 await this.mirrorClick(view, p);
+                break;
+            case "measure":
+                await this.measureTool.flatPoint(this.metres(p));
                 break;
             case "door":
             case "window": {
@@ -849,8 +872,10 @@ export class DrawingView {
     }
     /** Mirror the selected entities across a line given by two points. */
     async mirrorClick(view, p) {
+        const sel = this.store.selection;
+        const modelIds = sel?.kind === "model" ? sel.ids : [];
         const ids = this.selectedIds();
-        if (!ids.length) {
+        if (!ids.length && !modelIds.length) {
             toast("Select what to mirror first, then choose Mirror.", { kind: "info" });
             return;
         }
@@ -860,9 +885,17 @@ export class DrawingView {
         }
         const a = this.pts[0];
         this.pts = [];
+        if (Math.hypot(p[0] - a[0], p[1] - a[1]) < 1e-9) {
+            toast("Pick a second point away from the first.", { kind: "info" });
+            return;
+        }
         const keep = await mirrorKeepDialog();
         if (keep === null)
             return;
+        if (!ids.length) {
+            await mirrorElements(this.store, modelIds, { p1: a, p2: p, copy: keep });
+            return;
+        }
         await this.store.run("draw.mirror", { drawing: view, ids, p1: a, p2: p, copy: keep });
     }
     /** Hatch the closed shape under the click. */
@@ -1196,9 +1229,72 @@ export class DrawingView {
         this.updateHint();
         this.draw();
     }
+    /** Tint what the selection is linked to or grouped with, and draw an arrow from each parent to its child (those on this plan). */
+    paintRelations() {
+        const roles = this.store.relationRoles;
+        if (!roles || !this.data)
+            return;
+        const ctx = this.ctx, centres = new Map();
+        ctx.save();
+        for (const w of this.data.model) {
+            const rgb = ROLE_RGB[roles[w.id] ?? ""];
+            if (!rgb || !w.polygon.length)
+                continue;
+            ctx.beginPath();
+            w.polygon.forEach((q, i) => { const [x, y] = this.toScreen(q); if (i)
+                ctx.lineTo(x, y);
+            else
+                ctx.moveTo(x, y); });
+            ctx.closePath();
+            ctx.fillStyle = `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${rgb[3]})`;
+            ctx.fill();
+            ctx.strokeStyle = `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, 0.95)`;
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+        for (const w of this.data.model)
+            if (w.polygon.length) {
+                const b = polygonsBounds([w.polygon]);
+                if (b)
+                    centres.set(w.id, this.toScreen([(b[0][0] + b[1][0]) / 2, (b[0][1] + b[1][1]) / 2]));
+            }
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = "rgba(224, 140, 12, 0.95)";
+        ctx.fillStyle = "rgba(224, 140, 12, 0.95)";
+        ctx.setLineDash([6, 4]);
+        for (const [parent, child] of this.store.relationEdges) {
+            const a = centres.get(parent ?? ""), b = centres.get(child ?? "");
+            if (!a || !b)
+                continue;
+            ctx.beginPath();
+            ctx.moveTo(a[0], a[1]);
+            ctx.lineTo(b[0], b[1]);
+            ctx.stroke();
+            const ang = Math.atan2(b[1] - a[1], b[0] - a[0]);
+            ctx.setLineDash([]);
+            ctx.beginPath();
+            ctx.moveTo(b[0], b[1]);
+            ctx.lineTo(b[0] - 10 * Math.cos(ang - 0.4), b[1] - 10 * Math.sin(ang - 0.4));
+            ctx.lineTo(b[0] - 10 * Math.cos(ang + 0.4), b[1] - 10 * Math.sin(ang + 0.4));
+            ctx.closePath();
+            ctx.fill();
+            ctx.setLineDash([6, 4]);
+        }
+        ctx.restore();
+    }
+    /** A point of the drawing (its unit) as metres in the model, at the height of the plan's level, for the Measure tool. */
+    metres(p) {
+        const f = (UNIT_MM[this.store.unit] ?? 1) / 1000;
+        const level = this.store.levels.find((l) => l.id === this.data?.view.level_id);
+        return [p[0] * f, p[1] * f, level?.elevation ?? 0];
+    }
     async key(e) {
         if (e.key === " ") {
             this.spaceDown = true;
+            e.preventDefault();
+            return;
+        }
+        if (this.measureTool.key(e)) {
             e.preventDefault();
             return;
         }
@@ -1499,6 +1595,7 @@ export class DrawingView {
         const sel = new Set(this.allSelectedIds());
         if (this.data?.projection)
             this.paintProjection(this.data.projection, sel, k);
+        this.paintContext(k);
         for (const cat of PAINT_ORDER) {
             for (const w of this.data?.model ?? [])
                 if (w.category === cat)
@@ -1518,6 +1615,9 @@ export class DrawingView {
         this.syncLayerControls();
         this.syncJunctionControls();
         this.paintPreview(k);
+        this.paintRelations();
+        this.measureTool.setActive(this.store.tool === "measure");
+        this.measureTool.paint(ctx, getComputedStyle(document.documentElement).getPropertyValue("--font-ui") || "sans-serif", k.select, k.paper, k.ink);
         if (this.drag?.moved)
             this.paintMoveGhost(k);
         if (this.edit?.moved)
@@ -1534,6 +1634,62 @@ export class DrawingView {
         }
         if (this.snap && this.snap.kind !== "none" && this.cursor)
             this.paintSnap(this.snap, k);
+        ctx.restore();
+    }
+    /** Other levels' geometry inside the view depth, in halftone: a light tint and thin lines under everything the plan owns. It is drawn from
+     *  ``data.context``, a list that no hit test, selection, grip or edit ever reads, so it cannot be picked or changed from here. */
+    paintContext(k) {
+        const items = this.data?.context;
+        if (!items?.length)
+            return;
+        const ctx = this.ctx;
+        ctx.save();
+        ctx.setLineDash([]);
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
+        ctx.fillStyle = withAlpha(k.muted, HALFTONE_FILL);
+        for (const c of items) {
+            if (c.tris.length) {
+                ctx.beginPath();
+                for (const t of c.tris) {
+                    const a = this.toScreen([t[0] ?? 0, t[1] ?? 0]), b = this.toScreen([t[2] ?? 0, t[3] ?? 0]), d = this.toScreen([t[4] ?? 0, t[5] ?? 0]);
+                    ctx.moveTo(a[0], a[1]);
+                    ctx.lineTo(b[0], b[1]);
+                    ctx.lineTo(d[0], d[1]);
+                    ctx.closePath();
+                }
+                ctx.fill("nonzero");
+            }
+            else if (c.rings.length) {
+                ctx.beginPath();
+                for (const ring of c.rings) {
+                    ring.forEach((p, i) => { const [x, y] = this.toScreen(p); if (i)
+                        ctx.lineTo(x, y);
+                    else
+                        ctx.moveTo(x, y); });
+                    ctx.closePath();
+                }
+                ctx.fill("evenodd");
+            }
+        }
+        ctx.strokeStyle = withAlpha(k.muted, HALFTONE_LINE);
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        for (const c of items) {
+            for (const ring of c.rings) {
+                ring.forEach((p, i) => { const [x, y] = this.toScreen(p); if (i)
+                    ctx.lineTo(x, y);
+                else
+                    ctx.moveTo(x, y); });
+                ctx.closePath();
+            }
+            for (const l of c.lines) {
+                const a = this.toScreen([l[0] ?? 0, l[1] ?? 0]), b = this.toScreen([l[2] ?? 0, l[3] ?? 0]);
+                ctx.moveTo(a[0], a[1]);
+                ctx.lineTo(b[0], b[1]);
+            }
+        }
+        ctx.stroke();
         ctx.restore();
     }
     /** The '+' is anchored to the selected host in plans, sections and elevations.
@@ -2308,6 +2464,17 @@ export class DrawingView {
         };
         ctx.lineJoin = "round";
         ctx.lineCap = "round";
+        if (w.category === "wall" && w.cut === false) { // within the view range but not reached by the cut plane: seen below it, outlined and unhatched
+            trace();
+            ctx.setLineDash([7, 4]);
+            ctx.lineWidth = selected ? 2.2 : 1.2;
+            ctx.fillStyle = withAlpha(color, selected ? 0.22 : 0.07);
+            ctx.fill();
+            ctx.strokeStyle = color;
+            ctx.stroke();
+            ctx.setLineDash([]);
+            return;
+        }
         if (w.category === "wall") {
             this.paintWall(w.polygon, color, selected);
             if (w.bands?.length) { // a layered wall: every layer's band with its own hatch and edges
@@ -3141,6 +3308,7 @@ export class DrawingView {
     updateHint() {
         const n = this.pts.length;
         const hints = {
+            measure: "Measure on the plan: pick points (they snap to corners, ends and the grid). Enter finishes a path or closes an outline, Backspace undoes a pick, Esc starts again.",
             select: this.data?.projection ? "Click an element to select it. Sections and elevations are drawn from the model: change the model to change them." : "Click to select, drag a window to select several, drag an element to move it. Drag the square grips to stretch a wall or a section line, the round one to rotate. Click a wall's length to type a new one. Shift+double-click selects connected walls. Double-click a section line to open it; select the line and press Shift+F to reverse the actual cut direction.",
             line: n ? "Pick the next point. Shift keeps it horizontal or vertical. Esc ends the chain." : "Pick the first point of the line.",
             polyline: n ? "Pick the next point. Enter or double-click finishes, C closes it, Esc cancels." : "Pick the first point of the polyline.",
@@ -3154,7 +3322,7 @@ export class DrawingView {
             trim: "Click the part of a line or polyline to remove. It is cut back to the nearest crossing curves.",
             extend: "Click near the end of a line or open polyline to run it on to the next curve.",
             fillet: this.target ? "Click the second line (on the side to keep)." : "Click the first line near the end to keep. Radius 0 makes a sharp corner.",
-            mirror: this.selectedIds().length ? (n ? "Pick the second point of the mirror line." : "Pick the first point of the mirror line.") : "Select what to mirror first, then choose Mirror.",
+            mirror: this.selectedIds().length || this.store.selection?.kind === "model" ? (n ? "Pick the second point of the mirror line." : "Pick the first point of the mirror line.") : "Select what to mirror first, then choose Mirror.",
             hatch: "Click inside a closed shape (rectangle, closed polyline or circle) to hatch it.",
             door: "Click on a wall to place a door. Change its size in Properties.",
             window: "Click on a wall to place a window. Change its size and sill in Properties.",

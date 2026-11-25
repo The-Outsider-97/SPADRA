@@ -364,7 +364,7 @@ export function editCommand(p, key, value) {
         return { op: "view.set_schedule", params: { id: ref["view"], key, value } };
     if (p.kind === "view" && (key === "depth" || key === "angle"))
         return { op: "view.set_section", params: { id: ref["view"], [key]: value } };
-    if (p.kind === "view" && (key === "opening_direction" || key === "material_hatching"))
+    if (p.kind === "view" && (key === "opening_direction" || key === "material_hatching" || key === "snap_context"))
         return { op: "view.set_option", params: { id: ref["view"], key, value } };
     if (p.kind === "view" && key.startsWith("hatch:"))
         return { op: "hatch.set", params: { material: key.slice(6), pattern: value } };

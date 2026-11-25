@@ -1,9 +1,12 @@
 // A classic script placed immediately before the application's module entry point.
 (() => {
   const { name, logo, fallback, variant, subtitle } = document.currentScript.dataset;
-  const branded = variant === 'spadra';
+  // 'spadra' is the original branded layout (title, tagline, indeterminate bar). 'branded' is the same layout for applications that report real
+  // start-up stages: the status line follows the stages, the bar fills as they complete, and the screen fades out instead of vanishing.
+  const live = variant === 'branded';
+  const branded = variant === 'spadra' || live;
   const panel = document.createElement('dialog');
-  panel.className = branded ? 'slai-startup spadra-startup' : 'slai-startup';
+  panel.className = (branded ? 'slai-startup spadra-startup' : 'slai-startup') + (live ? ' slai-startup-live' : '');
   panel.setAttribute('aria-label', name + ' startup');
   const orb = document.createElement('div');
   orb.className = 'slai-startup-orb';
@@ -19,12 +22,14 @@
   const message = document.createElement('p');
   message.setAttribute('role', 'status');
   message.textContent = branded ? 'Loading ...' : 'Loading ' + name;
+  let meter = null;
   if (branded) {
     const content = document.createElement('section');
     content.className = 'spadra-startup-content';
     const progress = document.createElement('progress');
     progress.max = 1; // Indeterminate until the application actually reports measured progress.
     progress.setAttribute('aria-label', name + ' initialization progress');
+    meter = progress;
     const title = document.createElement('h1');
     title.textContent = name;
     const tagline = document.createElement('p');
@@ -45,12 +50,24 @@
     message.textContent = name + ' is taking longer than expected.';
     controls();
   }, 45000);
+  // Someone watching a stage that does not move should be told so long before the recovery buttons appear.
+  const slow = live ? setTimeout(() => {
+    if (!panel.classList.contains('failed')) message.textContent = 'Still starting. This is taking longer than usual ...';
+  }, 12000) : 0;
 
-  function dismiss() {
-    clearTimeout(timeout);
-    listeners.abort();
+  function finish() {
     panel.close();
     panel.remove();
+  }
+  function dismiss() {
+    clearTimeout(timeout);
+    clearTimeout(slow);
+    listeners.abort();
+    const still = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (live && !still) {
+      panel.classList.add('leaving');
+      setTimeout(finish, 200);
+    } else finish();
   }
   function controls() {
     if (panel.querySelector('button')) return;
@@ -64,6 +81,7 @@
   }
   function fail(detail) {
     clearTimeout(timeout);
+    clearTimeout(slow);
     if (panel.classList.contains('failed')) return;
     panel.classList.add('failed');
     message.setAttribute('role', 'alert');
@@ -73,15 +91,16 @@
   window.addEventListener('slai:startup-update', event => {
     if (panel.classList.contains('failed')) return;
     const { message: status, progress } = event.detail || {};
-    if (!branded && typeof status === 'string' && status.trim()) message.textContent = status;
+    if ((!branded || live) && typeof status === 'string' && status.trim()) message.textContent = status;
     if (!Number.isFinite(progress) || progress < 0 || progress > 1) return;
-    let meter = panel.querySelector('progress');
+    if (!meter) meter = panel.querySelector('progress');
     if (!meter) {
       meter = document.createElement('progress');
       meter.max = 1;
       meter.setAttribute('aria-label', name + ' startup progress');
       panel.append(meter);
     }
+    if (live && meter.hasAttribute('value') && progress < meter.value) return;   // the bar never runs backwards
     meter.value = progress;
   }, options);
   window.addEventListener('slai:ready', () => {
