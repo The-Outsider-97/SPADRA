@@ -149,7 +149,7 @@ Its intended differentiator is the combination of:
 | Command (from the SLAI checkout) | What it does |
 | --- | --- |
 | `python -m applications.SPADRA` | Starts SPADRA on loopback (default port 8770) and opens the browser (`--no-browser` to skip). Refuses to start, with the reason, if Python, a required package, the SLAI checkout or the built web client is missing. |
-| `python -m applications.SPADRA --check` | Reports Python, environment, SLAI checkout, packages, web client and the five agents, then exits 0 only when SPADRA can run. |
+| `python -m applications.SPADRA --check` | Reports Python, environment, SLAI checkout, packages, web client and the agents SPADRA uses, then (for information only) which of SLAI's other agents import on this computer, and exits 0 only when SPADRA can run. |
 | `python -m applications.SPADRA --build` | Builds the web client with the shared static build (`npm run build`; on Windows `npm.cmd`) and checks that the output exists. |
 | `python -m applications.SPADRA --dev` | As the first row, but rebuilds the web client first when it is missing or older than its sources. |
 | `python -m applications.SPADRA.bundle` | Writes a **source bundle** (zip) of SPADRA, the shared tools and the SLAI libraries it uses, with the built client. It is not an executable or installer: unpack it and run the first row with a Python that satisfies `requirements.txt`. |
@@ -266,6 +266,35 @@ manual edit (all steps or none, undoable), and the approval goes through SLAI's 
 stored in the project (`commits` in the manifest) under its idempotency key, so a repeated request returns the same receipt and never runs twice,
 and a stale proposal is refused rather than applied. Requires the planning adapters in `src/agents/planning/`.
 
+## Links, groups, attachments, measurements, property transfer and pictures
+
+* **Link / Chain / Unlink** (Modifier ribbon, or right-click an element): an element has at most one transform-parent. Moving or rotating a parent moves its children by
+  the same transformation, down the whole chain, in a fixed order; a link that would make a loop is refused, and linking to a new parent re-parents. Unlinking in the
+  middle of a chain keeps the rest of the chain. Linked elements are tinted by role (parent, child, both) and the parent-to-child arrows are drawn in the 3D view and on the plan.
+* **Group / Ungroup**: a group (2D or 3D, nestable, named) is selected, moved, rotated and copied as one; its members keep their own identity and geometry (nothing is
+  merged), and a member that is also linked is not moved twice. Ctrl-click picks one member without the group.
+* **Attach / Detach**: attach elements to a host so they follow it; Detach can keep the place or restore the earlier one. The Relationships panel lists every link,
+  group and attachment and the chain an element belongs to.
+* **Measure** (Analyze ribbon, key U, 3D view and plan views): in a plan, pick points (they snap to wall corners, ends and the grid) for a distance, length, angle, area,
+  perimeter, radius or coordinates. In 3D: distance, horizontal and vertical distance, length (edge or path), angle, radius, diameter, area, perimeter, volume, thickness,
+  clearance, coordinates and slope. Picks snap to corners, edges and faces; the unit and number of decimals can be chosen. The figures are worked out exactly from the
+  model's geometry on the server; where the geometry is ambiguous (a non-planar face, points that are not on one circle, an open solid) SPADRA says so instead of
+  giving a number. A result can be kept: it is stored in the project, follows the elements it refers to, and shows "lost" when one of them is gone.
+* **Mirror Element** (right-click an element, Modifier ribbon, or the Mirror tool on a plan with elements selected): mirrors elements across a vertical plane given as a
+  fixed X, a fixed Y or two plan points, keeping the originals (a mirrored copy) or flipping them. A wall keeps its doors and windows with their hinge sides swapped, a
+  roof keeps its slope, columns, beams, grids, floors and rooms follow; shapes that are not the same when mirrored (stairs, handed profiles) are refused and left as they
+  were, and each element is reported. Copies join the groups and links of their originals.
+* **Copy / Mirror / Paste Properties**, and **Copy / Paste Element**, are separate entries in the context menu. Properties are copied between existing elements of a
+  compatible kind, by group (general, dimensions, construction, appearance, formulas, classification, custom, modifiers, connections); no geometry is duplicated, and identity, placement,
+  host and level stay as they were. Mirror Properties swaps sides by meaning (left/right, hand of a door, which end), or across a reference plane given by two plan points (along
+  the element's length: its sides; square to it: its ends; any other angle is refused). Modifiers copy chamfer and bend (a bend turns the other way when mirrored); connections
+  copy a wall's top and base attachment and a roof's end connections. Every target is reported as applied, skipped
+  or failed, and a target that fails is left unchanged.
+* **Save as a picture** (Snapshot menu): an off-screen 3D render, independent of what the viewport is showing, at 1080p, 1440p or 4K or a custom size, with
+  anti-aliasing, shadows, ambient occlusion and tone mapping, as PNG or JPEG, with progress and Cancel. It never changes the view or the project.
+
+Details and limits: [docs/RELATIONSHIPS_MEASURE_TRANSFER.md](docs/RELATIONSHIPS_MEASURE_TRANSFER.md).
+
 ## Not implemented or not verified
 
 * DXF and IFC need `ezdxf` and `ifcopenshell` (`requirements-interop.txt`), STEP needs Open CASCADE (`OCP`) and DWG a separately licensed ODA converter; where one
@@ -276,6 +305,8 @@ and a stale proposal is refused rather than applied. Requires the planning adapt
 * Arrays: up to 300 copies each (the engine's cost is quadratic), radial about a vertical axis only, no nested arrays, and a copy's identity changes when its source
   changes (a tag or animation track on a copy is lost then; it is kept when only the count or spacing changes). Foundations, grids, gutters and voids: see their
   sections above and `docs/SPADRA_completion_report.md` for what each does not do.
+
+* Links, groups, measurements, property transfer, Mirror Element and snapshots: see the limits in [docs/RELATIONSHIPS_MEASURE_TRANSFER.md](docs/RELATIONSHIPS_MEASURE_TRANSFER.md).
 
 ## Specifications, reconstruction and impact previews
 

@@ -23,6 +23,7 @@ from src.utils.spatial_formats.common.errors import SpatialFormatError
 from . import geometry as G
 from . import sfb as SF
 from . import classifications as CL
+from . import viewrange as VR
 
 NS = "spadra"
 MATERIALS = ("Concrete", "Timber", "Glass", "Masonry", "Steel", "Plasterboard")
@@ -2732,6 +2733,10 @@ def set_property(project: Any, oid: str, key: str, value: Any, *, from_formula: 
     if not from_formula:
         from . import parametric_properties as PP
         PP.remove_formula(project, oid, key)
+    if key.startswith("profile:"):
+        from . import profile_params as PR
+        PR.set_value(project, oid, key, value)
+        return
     if key.startswith("material_rule:"):
         from . import parametric_properties as PP
         PP.set_material_rule(project, oid, key.split(":", 1)[1], value)
@@ -3376,41 +3381,81 @@ def _wall_piece(fr: Mapping[str, Any], x0: float, x1: float, f: float, cut_heigh
              (fr["start"][1] + s * x + c * (y / math.cos(theta) + cut_height * math.tan(theta))) * f] for x, y in corners]
 
 
+# What a lower storey may contribute to a plan as halftone context: the physical, solid categories. Rooms, grids, openings (they follow their host wall),
+# construction cutters and the rest are not geometry a plan should show from another level.
+CONTEXT_CATEGORIES = ("wall", "floor", "roof", "foundation", "structural", "stair", "curtainwall", "generic", "extrusion", "sweep")
+
+
 def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | None = None, show_opening: bool = True, show_hatching: bool = True,
-               top_elevation: float | None = None, bottom_elevation: float | None = None, depth_elevation: float | None = None) -> list[dict[str, Any]]:
+               top_elevation: float | None = None, bottom_elevation: float | None = None, depth_elevation: float | None = None,
+               context: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """What the model shows on the plan of a level, in drawing units (``f`` converts metres). Read from parameters on every call, so it
-    can never disagree with the 3D model."""
+    can never disagree with the 3D model.
+
+    The view range (``viewrange.py``) decides what is drawn: elements on the level, within the range, are drawn normally (cut where the cut plane passes
+    through them, otherwise as seen beyond it); an element of any level through which the cut plane passes is cut; and an element of *another* level that
+    lies in the range without being cut is not an item of this plan at all: with ``context`` given (a list), its clipped plan footprint is appended to it
+    as halftone reference geometry, kept apart from the returned items so nothing that selects, snaps or edits ever sees it."""
     out: list[dict[str, Any]] = []
     walls: dict[str, dict[str, Any]] = {}
     corner_table: dict[str, _WallRow] | None = None
-    cut_z = level_elevation(project, level_id) + CUT_HEIGHT if cut_elevation is None else float(cut_elevation)
     level_z = level_elevation(project, level_id)
-    top_z = cut_z + 1.5 if top_elevation is None else float(top_elevation)
-    bottom_z = level_z - 0.2 if bottom_elevation is None else float(bottom_elevation)
-    depth_z = level_z - 1.0 if depth_elevation is None else float(depth_elevation)
-    if top_z < cut_z - 1e-9 or bottom_z > cut_z + 1e-9 or depth_z > bottom_z + 1e-9:
-        raise BadRequest("Plan view range must satisfy top ≥ cut plane ≥ bottom ≥ view depth")
+    cut_z = level_z + CUT_HEIGHT if cut_elevation is None else float(cut_elevation)
+    top_z = cut_z + VR.DEFAULT_RANGE_TOP if top_elevation is None else float(top_elevation)
+    bottom_z = level_z + VR.DEFAULT_RANGE_BOTTOM if bottom_elevation is None else float(bottom_elevation)
+    depth_z = level_z + VR.DEFAULT_RANGE_DEPTH if depth_elevation is None else float(depth_elevation)
+    rng = VR.ViewRange(level_z, 0.0, cut_z, top_z - cut_z, bottom_z - level_z, depth_z - level_z)       # the offsets here are from zero: cut_z is absolute
+    if (problem := rng.problem()):
+        raise BadRequest(problem, hint="Change the view height, depth, top or bottom so that depth ≤ bottom ≤ cut plane ≤ top")
     # The single world transform map is reused for every relevant host. Model
     # elevation, not the level name, determines whether a cut intersects it.
     matrices = None
-    def visible_geometry(oid: str, on_level: bool) -> tuple[bool, list[list[list[float]]]]:
+
+    def mesh_of(oid: str) -> tuple[list[Any], list[Any], float, float] | None:
         nonlocal matrices
         from . import documentation as DOC
         if matrices is None:
             matrices = project.model._model.world_transforms()
         verts, faces = DOC.world_mesh(project, oid, matrices)
         if not verts:
+            return None
+        return verts, faces, min(v[2] for v in verts), max(v[2] for v in verts)
+
+    def add_context(oid: str, obj: Mapping[str, Any], cat: str, meta: Mapping[str, Any], verts: list[Any], faces: list[Any]) -> None:
+        """Another level's geometry that lies in this plan's range without being cut: its footprint within the range, as halftone reference geometry."""
+        if context is None or cat not in CONTEXT_CATEGORIES:
+            return
+        if cat == "generic" and obj.get("family_id") is None:                         # generated cladding is drawn with its wall
+            return
+        low, high = VR.extent(verts) or (0.0, 0.0)
+        shape = VR.footprint(verts, faces, depth_z, top_z)
+        if shape:
+            context.append({"id": oid, "category": cat, "name": obj["name"], "level": m(meta, "level"), "z": [round(low, 6), round(high, 6)], **shape.payload(f)})
+
+    def visible_geometry(oid: str, on_level: bool, obj: Mapping[str, Any] | None = None, cat: str = "", meta: Mapping[str, Any] | None = None) -> tuple[bool, list[list[list[float]]]]:
+        found = mesh_of(oid)
+        if found is None:
             return False, []
-        low, high = min(v[2] for v in verts), max(v[2] for v in verts)
-        if high < depth_z - 1e-9 or low > top_z + 1e-9:
+        verts, faces, low, high = found
+        kind = rng.classify(low, high, on_level=on_level)
+        if kind == VR.CONTEXT and obj is not None and meta is not None:
+            add_context(oid, obj, cat, meta, verts, faces)
+        if kind not in (VR.CUT, VR.PROJECTED):
             return False, []
-        crosses = low + 1e-8 < cut_z < high - 1e-8
-        # The associated level's own elements may be projected within its view
-        # range (including overhead beams); unrelated storeys do not leak in.
-        if not crosses and not (on_level and high >= depth_z and low <= top_z + 1e-9):
-            return False, []
-        cuts = DOC.horizontal_cut_loops(verts, faces, cut_z) if crosses else []
+        from . import documentation as DOC
+        cuts = DOC.horizontal_cut_loops(verts, faces, cut_z) if kind == VR.CUT else []
         return True, [[[x * f, y * f] for x, y in loop] for loop in cuts]
+
+    def projected_wall(oid: str, obj: Mapping[str, Any], meta: Mapping[str, Any], fr: Mapping[str, Any]) -> dict[str, Any] | None:
+        """A wall of this level that is in the range but not cut: seen beyond the cut plane, not hatched, still the wall to select and edit."""
+        found = mesh_of(oid)
+        if found is None or fr["length"] < 1e-9 or rng.classify(found[2], found[3], on_level=True) == VR.HIDDEN:
+            return None
+        ref_a, ref_b = wall_reference_line(meta)
+        return {"id": oid, "category": "wall", "name": obj["name"], "polygon": _wall_piece(fr, 0.0, fr["length"], f, 0.0), "cut": False, "overhead": found[2] >= cut_z,
+                "axis": {"a": [fr["start"][0] * f, fr["start"][1] * f], "b": [fr["end"][0] * f, fr["end"][1] * f], "thickness": fr["thickness"] * f},
+                "reference": {"a": [ref_a[0] * f, ref_a[1] * f], "b": [ref_b[0] * f, ref_b[1] * f], "kind": str(m(meta, "reference", "centre")), "offset": float(m(meta, "reference_offset", 0.0)) * 1000},
+                "joins": list(m(meta, "joins") or ())}
 
     wall_cuts: dict[str, float] = {}
     auto_room_spaces: list[dict[str, Any]] | None = None
@@ -3456,6 +3501,12 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
             frame = wall_frame(project, oid)
             relative_cut = cut_z - frame["base"]
             if not 0.0 <= relative_cut < frame["height"]:
+                if m(meta, "level") == level_id:                                   # its own level's wall, in range but below or above the cut: seen beyond it
+                    item = projected_wall(oid, obj, meta, frame)
+                    if item:
+                        out.append(item)
+                elif context is not None and (found := mesh_of(oid)) is not None and rng.classify(found[2], found[3], on_level=False) == VR.CONTEXT:
+                    add_context(oid, obj, cat, meta, found[0], found[1])         # another level's wall in the range: halftone, never an item of this plan
                 continue
             wall_cuts[oid] = relative_cut
         elif cat != "room":
@@ -3464,7 +3515,7 @@ def plan_items(project: Any, level_id: str, f: float, *, cut_elevation: float | 
             # entire Project Browser fail. Geometry validation is separate.
             if obj.get("geometry") is None:
                 continue
-            visible, cut_polygons = visible_geometry(oid, m(meta, "level") == level_id)
+            visible, cut_polygons = visible_geometry(oid, m(meta, "level") == level_id, obj, cat, meta)
             if not visible:
                 continue
         elif m(meta, "level") != level_id:
@@ -3882,6 +3933,12 @@ def properties(project: Any, oid: str, relations: bool = False) -> dict[str, Any
             {"key": "color", "label": "Element color override", "type": "color", "value": m(meta, "color") or "", "text": shared},
             {"key": "material_color", "label": f"Shared {material} color", "type": "color", "value": shared},
         ]})
+    if out.get("kind") == "model":
+        from . import profile_params as PR
+        pg = PR.group(project, oid)
+        if pg:
+            at = next((i for i, g in enumerate(out["groups"]) if g["title"] == "Appearance"), len(out["groups"]))
+            out["groups"].insert(at, pg)
     if out.get("kind") == "model" and (material or m(meta, "category") == "curtainwall"):
         from . import parametric_properties as PP
         out["groups"].append(PP.material_rule_group(project, meta))

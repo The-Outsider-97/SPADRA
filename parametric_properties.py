@@ -51,6 +51,21 @@ def _alias(key: str) -> str:
     return re.sub(r"[^A-Za-z0-9_]", "_", key)
 
 
+def _label_alias(row: Mapping[str, Any]) -> str:
+    """The name a person reads in Properties, as a formula name: ``Depth``, ``Base_above_level``."""
+    return re.sub(r"[^A-Za-z0-9]+", "_", str(row.get("label") or "")).strip("_")
+
+
+def _labels(project: Any, oid: str) -> dict[str, str]:
+    """Editable property key -> the formula name of its Properties label (where that is a usable, different name)."""
+    out = {}
+    for key, row in _rows(project, oid).items():
+        a = _label_alias(row)
+        if a and a[0].isalpha() and a != key:
+            out[key] = a
+    return out
+
+
 def _context(project: Any, oid: str) -> tuple[dict[str, Mapping[str, Any]], dict[str, SP.Quantity]]:
     fields = _rows(project, oid)
     variables: dict[str, SP.Quantity] = {}
@@ -62,6 +77,12 @@ def _context(project: Any, oid: str) -> tuple[dict[str, Mapping[str, Any]], dict
             variables[_alias(key)] = value
     if "pitch" in variables:
         variables["slopeAngle"] = variables["pitch"]
+    for key, a in _labels(project, oid).items():                                       # "Depth" works as well as "depth"
+        if a not in variables and key in variables:
+            variables[a] = variables[key]
+    from . import profile_params as PR
+    for name, q in PR.variables(project, oid).items():                                 # the profile's own parameters
+        variables.setdefault(name, q)
     from .relations import effective_custom, CUSTOM_UNITS
     for name, definition in effective_custom(project, oid).items():
         value, raw = definition["type"], definition["value"]
@@ -70,10 +91,14 @@ def _context(project: Any, oid: str) -> tuple[dict[str, Mapping[str, Any]], dict
                 unit = CUSTOM_UNITS.get(value, "")
                 kind, scale = _UNITS.get(unit, (value, 1.0))
                 variables[name] = SP.Quantity(float(raw) / scale, SP.PARAMETER_DIMENSIONS[kind])
+    for name, q in PR.variables(project, oid).items():                                 # a plain name, unless the element already has one of that name
+        plain = name[len("profile_"):]
+        if plain not in variables:
+            variables[plain] = q
     return fields, variables
 
 
-def _ordered(formulas: Mapping[str, str], valid: set[str]) -> list[str]:
+def _ordered(formulas: Mapping[str, str], valid: set[str], labels: Mapping[str, str] | None = None) -> list[str]:
     if len(formulas) > MAX_FORMULAS_PER_ELEMENT:
         raise BadRequest(f"An element supports at most {MAX_FORMULAS_PER_ELEMENT} formula-driven dimensions")
     dependencies: dict[str, set[str]] = {}
@@ -87,7 +112,7 @@ def _ordered(formulas: Mapping[str, str], valid: set[str]) -> list[str]:
         unknown = uses - valid - {"slopeAngle"}
         if unknown:
             raise BadRequest(f"Formula for {key} refers to unknown parameter(s): {', '.join(sorted(unknown))}")
-        dependencies[key] = {target for target in formulas if target in uses or _alias(target) in uses}
+        dependencies[key] = {target for target in formulas if target in uses or _alias(target) in uses or (labels or {}).get(target) in uses}
         if "slopeAngle" in uses and "pitch" in formulas:
             dependencies[key].add("pitch")
     pending, order = dict(dependencies), []
@@ -122,7 +147,7 @@ def set_formula(project: Any, oid: str, key: str, raw: str) -> None:
         raise BadRequest("Enter a formula after =")
     formulas = dict(E.m(E.meta_of(project, oid), "formulas") or {})
     formulas[key] = expr
-    _ordered(formulas, set(variables))
+    _ordered(formulas, set(variables), _labels(project, oid))
     project.manifest["has_property_formulas"] = True
     E._attach(project, oid, {"formulas": formulas})
     recompute(project, oid)
@@ -140,7 +165,8 @@ def recompute(project: Any, oid: str) -> None:
     if not formulas:
         return
     fields, variables = _context(project, oid)
-    for key in _ordered(formulas, set(variables)):
+    labels = _labels(project, oid)
+    for key in _ordered(formulas, set(variables), labels):
         try:
             result = SP.evaluate_expression(formulas[key], variables)
         except SpatialFormatError as exc:
@@ -151,6 +177,8 @@ def recompute(project: Any, oid: str) -> None:
             fields, variables = _context(project, oid)
         variables[key] = result
         variables[_alias(key)] = result
+        if key in labels:
+            variables[labels[key]] = result
         if key == "pitch":
             variables["slopeAngle"] = result
 

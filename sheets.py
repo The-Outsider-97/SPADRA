@@ -343,11 +343,19 @@ def to_sldc(project: Any, sheet_id: Any, preview_png: bytes | None = None, previ
         envelope["preview_asset"] = sheet_asset.id
         blocks = [S.make_figure(sheet_asset, f"Complete drawing sheet {data['number']}", width_mm=data["width"], height_mm=data["height"],
                                 placement={"mode": "floating", "anchor": "page", "x_mm": 0, "y_mm": 0, "wrap": "none"}) | {"section": "drawing-sheet"}]
+        # Each 3D snapshot's own picture is stored with the sheet (to give the sheet back on import). An SLDC package refuses an asset that no figure shows,
+        # so the full-resolution pictures follow the sheet page in a section of their own rather than being dropped or the whole export failing.
+        pictures = [figures[vp["id"]] for vp in data["viewports"] if vp.get("kind") == "snapshot" and vp["id"] in figures]
+        if pictures:
+            blocks += [S.make_block("heading", f"3D pictures on sheet {data['number']}", attributes={"level": 1}) | {"section": "sheet-pictures"}]
+            blocks += [fig | {"section": "sheet-pictures"} for fig in pictures]
     else:
         blocks = _blocks(project, data, figures)  # Legacy programmatic exports without a browser-provided visual.
     # SLDC page sections retain the actual sheet size instead of the reader's A4 default.
     sections = [{"id": "drawing-sheet", "page": {"width_mm": data["width"], "height_mm": data["height"],
                                                    "margins_mm": {"top": 0, "right": 0, "bottom": 0, "left": 0}}}]
+    if preview_png is not None and any(vp.get("kind") == "snapshot" for vp in data["viewports"]):
+        sections.append({"id": "sheet-pictures", "page": {"width_mm": 210, "height_mm": 297, "margins_mm": {"top": 20, "right": 20, "bottom": 20, "left": 20}}})
     try:
         package = S.new_package(f"Sheet {data['number']} {data['name']}".strip(), blocks, assets=assets, sections=sections,
                                 metadata={"project": project.name, "sheet": data["number"], "paper": data["paper"], "model_revision": str(project.revision)},

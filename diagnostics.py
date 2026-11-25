@@ -25,6 +25,8 @@ CATEGORIES: dict[str, dict[str, str]] = {
     "limit_exceeded": {"category": "Limit", "recovery": "Use a smaller file or fewer items, or split the work."},
     "dependency_missing": {"category": "Not installed", "recovery": "This needs a library or SLAI agent that is not installed here. Nothing was changed."},
     "storage_error": {"category": "Disk", "recovery": "Check that the folder exists, has room and can be written to, then try again."},
+    "profiler_error": {"category": "Not allowed", "recovery": "Nothing was changed."},
+    "profiler_conflict": {"category": "Conflict", "recovery": "Nothing was changed. The message says what is in the way."},
     "forbidden": {"category": "Not allowed", "recovery": "This was refused by the application."},
     "unauthorized": {"category": "Signed out", "recovery": "Reopen SPADRA from the link it printed when it started."},
     "spadra_backup_damaged": {"category": "Damaged file", "recovery": "Choose an older backup."},

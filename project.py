@@ -50,6 +50,7 @@ from . import attachments as AT
 from . import bimdata as BD
 from . import requirements as RQ
 from . import layers as LY
+from . import measurements as MS
 from . import reports as RP
 from . import sheetviews as SV
 from . import quantities as Q
@@ -76,6 +77,9 @@ from . import gutters as GU
 from . import curtainwall as CW
 from . import sheets as SH
 from . import checks as CK
+from . import relationships as RS
+from . import viewrange as VR
+from . import visualization as VZ
 
 PROJECT_FORMAT = "spadra.project"
 PROJECT_VERSION = 1
@@ -107,6 +111,22 @@ def _point(value: Any, label: str) -> tuple[float, float]:
     if not isinstance(value, (list, tuple)) or len(value) != 2:
         raise BadRequest(f"{label} must be a point [x, y]")
     return (_finite(value[0], f"{label}.x"), _finite(value[1], f"{label}.y"))
+
+
+def _plane(value: Any, factor: float) -> list[tuple[float, float]] | None:
+    """A reference plane given as two plan points in drawing units, in metres; ``None`` when there is none."""
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise BadRequest("plane must be two points [[x, y], [x, y]]")
+    a, b = (_point(value[0], "plane point 1"), _point(value[1], "plane point 2"))
+    return [(a[0] * factor, a[1] * factor), (b[0] * factor, b[1] * factor)]
+
+
+def _list(value: Any, label: str) -> list[Any]:
+    if not isinstance(value, list):
+        raise BadRequest(f"{label} must be a list")
+    return value
 
 
 def _ids(value: Any, label: str = "ids") -> list[str]:
@@ -462,7 +482,7 @@ class Project:
         manifest_before = _clone(self.manifest)
         self._touched = {}
         self._running_key = key
-        model_edit = key == "model" and op.split(".")[0] not in ("anim", "project", "report", "bim", "script")
+        model_edit = key == "model" and op.split(".")[0] not in ("anim", "project", "report", "bim", "script", "measure")
         try:
             if model_edit:
                 DL.bind(self)                                           # dimensions drawn on wall faces are linked to them before the model changes
@@ -482,6 +502,7 @@ class Project:
                 AT.reconcile(self)                                      # walls attached to a roof or extended to a level follow it, and stand on their floor
                 CW.reconcile(self)                                      # curtain walls follow the walls their ends are on, and their corners follow their neighbours
                 AR.reconcile(self)                                      # rooms follow the walls that enclose them, inside the same command
+                RS.reconcile(self)                                      # links and groups drop what the command deleted (nothing is left dangling)
                 AN.sync_tags(self)                                      # tags follow their elements inside the same command
                 DL.sync(self)                                           # dimensions on wall faces follow the faces (a layer added, a wall moved)
         except Exception as exc:
@@ -566,7 +587,10 @@ class Project:
         views = self.manifest["views"]
 
         def node(kind: str, view: Mapping[str, Any]) -> dict[str, Any]:
-            return {"id": view["id"], "label": view["name"], "view_kind": kind, "open": {"kind": kind if kind in ("3d", "schedule") else "drawing", "id": view["id"]}}
+            row = {"id": view["id"], "label": view["name"], "view_kind": kind, "open": {"kind": kind if kind in ("3d", "schedule") else "drawing", "id": view["id"]}}
+            if kind == "3d":
+                row["visual"] = VZ.normalise(view.get("visual"))               # always complete and valid, whatever the file held
+            return row
         groups = {"3d": [], "plan": [], "section": [], "elevation": [], "schedule": []}
         for v in views:
             groups.setdefault(v["kind"], []).append(node(v["kind"], v))
@@ -627,7 +651,7 @@ class Project:
             elif e["kind"] == "hatch":
                 item["strokes"] = hatch_strokes(e["geometry"])
             entities.append(item)
-        overlay = self.plan_overlay(view_id)
+        overlay, context = self.plan_layers(view_id)
         view = self.view(view_id)
         f = 1000.0 / MM_PER[self.manifest["unit"]]
         projection = D.project_view(self, view, f) if view["kind"] in ("section", "elevation") else None
@@ -641,7 +665,7 @@ class Project:
             ys = [p[1] for w in overlay for p in w["polygon"]] + [q[1] for m in marks for q in (m["a"], m["b"])] + ([bounds[0][1], bounds[1][1]] if bounds else [])
             bounds = [[min(xs), min(ys)], [max(xs), max(ys)]]
         return {"view": self.view(view_id), "unit": doc.unit, "revision": self.revision, "doc_revision": doc.revision, "layers": doc.layers(),
-                "entities": entities, "model": overlay, "bounds": bounds, "projection": projection,
+                "entities": entities, "model": overlay, "context": context, "view_range": self.view_range(view_id), "bounds": bounds, "projection": projection,
                 "section_marks": marks}
 
     def schedule(self, view_id: str) -> dict[str, Any]:
@@ -650,21 +674,42 @@ class Project:
             raise NotFound(f"'{view['name']}' is not a schedule")
         return {"view": view, "revision": self.revision, **D.view_schedule(self, view)}
 
-    def plan_overlay(self, view_id: str) -> list[dict[str, Any]]:
-        """What the model contributes to a floor plan: walls (cut around their openings), doors and windows with their symbols, floors and
-        beams on the view's level, in the drawing's unit. Read from the elements' own parameters each time, so the plan can never disagree
-        with the 3D model."""
+    def view_range(self, view_id: str) -> dict[str, Any] | None:
+        """A floor plan's resolved view range (see ``viewrange.py``): each boundary as the offset it is edited as and as an absolute elevation, in metres.
+        None for a view that has none."""
         view = self.view(view_id)
         if view["kind"] != "plan" or not view.get("level_id"):
-            return []
+            return None
+        reference = view.get("cut_reference_level") or view["level_id"]
+        rng = VR.from_view(view, level_z=self.level(view["level_id"])["elevation"], reference_z=self.level(reference)["elevation"])
+        out = rng.describe(reference_level=reference, level=view["level_id"])
+        out["reference_name"] = self.level(reference)["name"]
+        out["level_name"] = self.level(view["level_id"])["name"]
+        out["snap_context"] = bool(view.get("snap_to_context", False))
+        return out
+
+    def plan_layers(self, view_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """What the model contributes to a floor plan, in two layers kept apart on purpose: the **items** (walls, doors, windows, floors, beams and the
+        rest that this plan shows and the person can select and edit, cut or seen beyond the cut) and the **context** (other levels' geometry that lies
+        within the view depth, as halftone footprints: reference only, never an item). Both are read from the elements' own parameters each time, so
+        the plan can never disagree with the 3D model, and neither is stored: a level that moves or an element that is resized changes them."""
+        view = self.view(view_id)
+        if view["kind"] != "plan" or not view.get("level_id"):
+            return [], []
         reference = view.get("cut_reference_level") or view["level_id"]
         cut_elevation = self.level(reference)["elevation"] + float(view.get("cut_offset", 1.5))
         base_elevation = self.level(view["level_id"])["elevation"]
-        return E.plan_items(self, view["level_id"], 1000.0 / MM_PER[self.manifest["unit"]], cut_elevation=cut_elevation, show_opening=bool(view.get("show_opening_direction", True)),
-                            show_hatching=bool(view.get("show_material_hatching", True)),
-                            top_elevation=cut_elevation + float(view.get("range_top", 1.5)),
-                            bottom_elevation=base_elevation + float(view.get("range_bottom", -0.2)),
-                            depth_elevation=base_elevation + float(view.get("range_depth", -1.0)))
+        context: list[dict[str, Any]] = []
+        items = E.plan_items(self, view["level_id"], 1000.0 / MM_PER[self.manifest["unit"]], cut_elevation=cut_elevation, show_opening=bool(view.get("show_opening_direction", True)),
+                             show_hatching=bool(view.get("show_material_hatching", True)),
+                             top_elevation=cut_elevation + float(view.get("range_top", 1.5)),
+                             bottom_elevation=base_elevation + float(view.get("range_bottom", -0.2)),
+                             depth_elevation=base_elevation + float(view.get("range_depth", -1.0)), context=context)
+        return items, context
+
+    def plan_overlay(self, view_id: str) -> list[dict[str, Any]]:
+        """The items of a floor plan (walls, doors, windows, floors, beams ...): what can be selected and edited. The halftone context is ``plan_layers``'."""
+        return self.plan_layers(view_id)[0]
 
     def scene_data(self, max_vertices: int = 400_000, time: float | None = None) -> dict[str, Any]:
         """Every drawable object with world-space vertices. With ``time`` (seconds) the scene is the animation evaluated at that time
@@ -674,6 +719,7 @@ class Project:
         objects, total = [], 0
         evaluated = D.evaluated_meshes(self)
         raw = self.model._model                                                # the native SGEO scene: one pass answers for every object
+        related = RS.scene_flags(self)                                         # who follows whom, who is grouped with whom (empty when unused)
         matrices = raw.world_transforms()                                      # (asking per object re-validates the whole scene each time)
         for oid in all_ids(self.model, has_geometry=True):
             obj = self.model.get(oid)
@@ -704,6 +750,11 @@ class Project:
                 appearance = layer_gradients[0] if len(layer_gradients) == 1 else None
             elif appearance and appearance["mode"] == "solid":
                 layer_colors = [{"count": len(mesh["faces"]), "color": appearance["top"]}]
+            if not (appearance and appearance["mode"] == "gradient"):
+                from . import edge_colors as EC
+                painted = EC.face_runs(category, meta, verts, mesh["faces"], (appearance["top"] if appearance else None) or E.appearance_color(self, meta, oid) or E.MATERIAL_COLORS["Concrete"])
+                if painted:                                                       # a coloured profile line colours only the faces made from it
+                    layer_colors = painted
             ridge = E.roof_ridge(meta) if category == "roof" else None
             ridge_handle = None
             if ridge:
@@ -729,7 +780,8 @@ class Project:
                             "layer_gradients": layer_gradients,
                             "layer_colors": layer_colors,
                             "ridge_handle": ridge_handle,
-                            "layer_points": self._layer_points(category, meta, verts, mesh["faces"])})
+                            "layer_points": self._layer_points(category, meta, verts, mesh["faces"]),
+                            **related.get(oid, {})})
         # Derived geometry, not the source's unmodified bounding box,
         # defines camera fit and zoom extent.
         points = [vertex for item in objects for vertex in item["vertices"]]
@@ -1166,6 +1218,7 @@ class Project:
         level_ids = {l["id"] for l in self.manifest["levels"]}
         view_ids = {v["id"] for v in self.manifest["views"]}
         issues.extend(E.check(self))
+        issues.extend(E.issue("error", i["element"], i["message"], "associations") for i in RS.validate(self))      # links and groups
         issues.extend(CK.coordination(self))
         issues.extend(BD.issues(self))
         issues.extend(RQ.issues(self))
@@ -1257,11 +1310,13 @@ def _entity_properties(project: Project, view_id: str, eid: str) -> dict[str, An
             "groups": groups}
 
 
-VIEW_OPTIONS = {"opening_direction": "show_opening_direction", "material_hatching": "show_material_hatching"}
+VIEW_OPTIONS = {"opening_direction": "show_opening_direction", "material_hatching": "show_material_hatching", "snap_context": "snap_to_context"}
 
 
 def _editable_view(project: Project, vid: Any) -> dict[str, Any]:
     view = project.view(text(vid, "id", 80))
+    if view["kind"] == "3d" and sum(1 for v in project.manifest["views"] if v["kind"] == "3d") > 1:
+        return view                                                   # an extra 3D view can be renamed and deleted; the project always keeps one
     if view["kind"] not in ("section", "elevation", "schedule"):
         raise BadRequest(f"'{view['name']}' is a {view['kind']} view; it is made from the levels and cannot be edited or deleted here")
     return view
@@ -1299,10 +1354,19 @@ def _view_properties(project: Project, vid: str) -> dict[str, Any]:
              "choices": [{"value": level["id"], "label": level["name"]} for level in project.manifest["levels"]]},
             {"key": "cut_offset", "label": "Offset", "type": "number", "unit": "mm", "value": offset * 1000},
             {"label": "Absolute cut height", "type": "readonly", "value": f"{(project.level(reference)['elevation'] + offset) * 1000:g} mm"}]})
+        level_z = project.level(view["level_id"])["elevation"]
+        rng = VR.from_view(view, level_z=level_z, reference_z=project.level(reference)["elevation"])
+        absolute = lambda label, z: {"label": label, "type": "readonly", "value": f"{z * 1000:,.0f} mm"}          # noqa: E731
         groups.append({"title": "View range", "rows": [
-            {"key": "range_top", "label": "Above cut plane", "type": "number", "unit": "mm", "value": float(view.get("range_top", 1.5)) * 1000},
-            {"key": "range_bottom", "label": "Bottom from plan level", "type": "number", "unit": "mm", "value": float(view.get("range_bottom", -0.2)) * 1000},
-            {"key": "range_depth", "label": "Depth from plan level", "type": "number", "unit": "mm", "value": float(view.get("range_depth", -1.0)) * 1000}]})
+            {"key": "range_top", "label": "Top (above cut plane)", "type": "number", "unit": "mm", "value": float(view.get("range_top", 1.5)) * 1000},
+            {"key": "range_bottom", "label": "Bottom (from plan level)", "type": "number", "unit": "mm", "value": float(view.get("range_bottom", -0.2)) * 1000},
+            {"key": "range_depth", "label": "View depth (from plan level)", "type": "number", "unit": "mm", "value": float(view.get("range_depth", -1.0)) * 1000},
+            absolute("Top, absolute", rng.top_z), absolute("Bottom, absolute", rng.bottom_z), absolute("View depth, absolute", rng.depth_z),
+            {"label": "Rule", "type": "readonly", "value": "view depth ≤ bottom ≤ cut plane ≤ top"}]})
+        groups.append({"title": "Lower levels", "rows": [
+            {"key": "snap_context", "label": "Snap to lower-level geometry", "type": "choice", "value": "shown" if view.get("snap_to_context", False) else "hidden",
+             "choices": [{"value": "shown", "label": "On (read-only reference)"}, {"value": "hidden", "label": "Off"}]},
+            {"label": "Note", "type": "readonly", "value": "Geometry of other levels inside the view depth is drawn in halftone and cannot be selected or edited from this plan."}]})
     if kind == "section":
         fr = D.frame_of(view)
         here, there = D.compass(fr.fx, fr.fy), D.compass(-fr.fx, -fr.fy)
@@ -1954,111 +2018,37 @@ class _Commands:
     @staticmethod
     @command(_model_target("Copy compatible element attributes"))
     def model__copy_attributes(project: Project, p: dict[str, Any]) -> dict[str, Any]:
-        """One undoable, all-or-nothing instance transfer; IDs and hosts never move."""
-        from . import parametric_properties as PP
-        from . import relations as RL
-        source = text(p.get("source"), "source", 80)
-        if not E.alive(project, source):
-            raise NotFound(f"Source element {source} does not exist")
-        source_category = E.category(project, source)
-        destinations = list(dict.fromkeys(text(i, "destination", 80) for i in (p.get("destinations") or [])))
-        if not destinations or len(destinations) > 500:
-            raise BadRequest("Select between 1 and 500 destination elements")
-        if source in destinations:
-            raise BadRequest("A source cannot also be a destination")
-        groups = set(p.get("groups") or ())
-        allowed = {"appearance", "construction", "formulas", "classification", "custom", "dimensions"}
-        if not groups or groups - allowed:
-            raise BadRequest("Choose one or more supported attribute groups")
-        for dest in destinations:
-            if not E.alive(project, dest) or E.category(project, dest) != source_category:
-                raise BadRequest(f"{dest} is not a compatible {source_category} destination")
-        src_meta = E.meta_of(project, source)
-        source_rows = {row["key"]: row for section in ([{"rows": E.properties(project, source)["top"]}] + E.properties(project, source)["groups"])
-                       for row in section["rows"] if row.get("key")}
-        dimensions = {"height", "width", "thickness", "length", "pitch", "slope", "lean_angle", "lean_enabled", "lean_direction",
-                      "frame_width", "frame_depth", "mullion_depth", "transom_depth", "overhang"}
-        transferred: dict[str, list[str]] = {}
-        for dest in destinations:
-            changed: list[str] = []
-            source_layers = LY.stack(project, source) if source_category in LY.LAYERED else []
-            layer_ids: dict[str, str] = {}
-            if "construction" in groups:
-                if source_category not in LY.LAYERED:
-                    raise BadRequest(f"{source_category} elements do not have construction layers")
-                layers = []
-                for row in source_layers:
-                    if row["openings"] == "selected" and row["opening_ids"]:
-                        raise BadRequest("This construction references specific source openings; choose the destination's cuts first")
-                    copied = _clone(row)
-                    copied["id"] = new_id()[:8]
-                    layer_ids[row["id"]] = copied["id"]
-                    copied.pop("offset", None)
-                    layers.append(copied)
-                LY._store(project, dest, layers)
-                E.regenerate(project, dest)
-                changed.append("construction")
-            if "appearance" in groups:
-                # The source's instance overrides are copied. Material palette
-                # definitions in the project or shared family types are not.
-                for key in ("material", "color"):
-                    if E.m(src_meta, key) is not None:
-                        if key == "material" and "construction" in groups:
-                            continue                                # LY._store already assigned the first layer's material
-                        E.set_property(project, dest, key, E.m(src_meta, key))
-                        changed.append(key)
-                for key in ("material_rule", "layer_material_rules"):
-                    if E.m(src_meta, key) is not None:
-                        rule = _clone(E.m(src_meta, key))
-                        if key == "layer_material_rules" and rule:
-                            if not layer_ids:
-                                target_layers = LY.stack(project, dest) if source_category in LY.LAYERED else []
-                                if len(source_layers) != len(target_layers):
-                                    raise BadRequest("Copy the construction layers too before transferring layer-specific material rules")
-                                layer_ids = {s["id"]: d["id"] for s, d in zip(source_layers, target_layers)}
-                            rule = {layer_ids[k]: v for k, v in rule.items() if k in layer_ids}
-                        E._attach(project, dest, {key: rule})
-                        changed.append(key)
-            if "dimensions" in groups:
-                for key in dimensions:
-                    if key == "thickness" and "construction" in groups:
-                        continue
-                    row = source_rows.get(key)
-                    if row and row.get("type") in ("number", "choice"):
-                        E.set_property(project, dest, key, row["value"])
-                        changed.append(key)
-            if "classification" in groups:
-                for key, row in source_rows.items():
-                    if (E.SF.is_field(key) or E.CL.is_field(key)) and row.get("value") is not None:
-                        E.set_property(project, dest, key, row["value"])
-                        changed.append(key)
-            if "custom" in groups:
-                for name, value in RL.custom_of(src_meta).items():
-                    kind = (E.m(src_meta, "custom_types") or {}).get(name)
-                    RL.set_custom(project, dest, name, value, kind)
-                    changed.append(f"custom:{name}")
-            if "formulas" in groups:
-                formulas = dict(E.m(src_meta, "formulas") or {})
-                current = dict(E.m(E.meta_of(project, dest), "formulas") or {})
-                current.update(formulas)
-                PP._ordered(current, set(PP._context(project, dest)[1]))
-                E._attach(project, dest, {"formulas": current})
-                if current:
-                    project.manifest["has_property_formulas"] = True
-                    PP.recompute(project, dest)
-                changed.extend(f"formula:{key}" for key in formulas)
-            transferred[dest] = changed
-        return {"source": source, "category": source_category, "destinations": transferred}
+        """One undoable, all-or-nothing instance transfer; IDs and hosts never move. The original Paste Attributes: an incompatible destination
+        refuses the whole request (``model.paste_properties`` skips it instead and reports)."""
+        from . import property_transfer as PT
+        return PT.transfer(project, text(p.get("source"), "source", 80), [text(i, "destination", 80) for i in (p.get("destinations") or [])],
+                           list(p.get("groups") or ()), incompatible="refuse")
+
+    @staticmethod
+    @command(_model_target("Paste properties"))
+    def model__paste_properties(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Copy (``mode: copy``) or mirror (``mode: mirror``, across ``axis``: side, length or both, or across a reference ``plane``: two plan points in drawing
+        units, vertical plane through them) the properties of ``source`` onto existing compatible ``destinations``. Nothing is created. Incompatible targets are skipped and a target that fails is put back; each is reported with its reason."""
+        from . import property_transfer as PT
+        return PT.transfer(project, text(p.get("source"), "source", 80), [text(i, "destination", 80) for i in (p.get("destinations") or [])],
+                           list(p.get("groups") or PT.GROUPS), mode=text(p.get("mode", "copy"), "mode", 10), axis=text(p.get("axis", "side"), "axis", 10),
+                           plane=_plane(p.get("plane"), MM_PER[project.manifest["unit"]] / 1000.0))
 
     @staticmethod
     @command(_model_target("Move element"))
     def model__move(project: Project, p: dict[str, Any]) -> dict[str, Any]:
-        oid = text(p.get("id"), "id", 80)
-        if not E.alive(project, oid):
-            raise NotFound(f"Element {oid} does not exist")
+        """Move one element (``id``) or several (``ids``) by (dx, dy, dz) metres. The elements linked below them follow, and so does the whole group
+        of any element in one (``scope: "member"`` moves it alone, for editing inside a group). Each element moves once, whatever the relations."""
+        ids = _ids(p["ids"], "ids") if p.get("ids") is not None else [text(p.get("id"), "id", 80)]
+        for oid in ids:
+            if not E.alive(project, oid):
+                raise NotFound(f"Element {oid} does not exist")
         dx, dy, dz = (_finite(p.get(k, 0.0), k, 1e6) for k in ("dx", "dy", "dz"))
-        E.move(project, oid, dx, dy, dz)                         # an element's position is its parameters, so they move, not just the geometry
-        return {"id": oid}
+        scope = text(p.get("scope", "group"), "scope", 10)
+        if scope not in ("group", "member"):
+            raise BadRequest("scope must be group or member")
+        moved = RS.apply_move(project, ids, dx, dy, dz, groups=scope == "group")     # an element's position is its parameters, so they move, not just the geometry
+        return {"id": ids[0], "ids": ids, "moved": moved}
 
     @staticmethod
     @command(_model_target("Stretch wall"))
@@ -2111,8 +2101,14 @@ class _Commands:
         f = MM_PER[project.manifest["unit"]] / 1000.0
         centre = tuple(c * f for c in _point(p.get("centre"), "centre"))
         angle = math.radians(number(p.get("angle"), "angle", -360, 360))
+        scope = text(p.get("scope", "group"), "scope", 10)
+        if scope not in ("group", "member"):
+            raise BadRequest("scope must be group or member")
+        if RS.in_use(project):
+            turned = RS.apply_turn(project, ids, angle, centre, groups=scope == "group")      # linked children and group-mates turn with them, each exactly once
+            return {"ids": ids, "turned": turned}
         E.rotate_many(project, ids, angle, centre)
-        return {"ids": ids}
+        return {"ids": ids, "turned": ids}
 
     @staticmethod
     @command(_model_target("Delete element"))
@@ -2122,8 +2118,95 @@ class _Commands:
             raise NotFound(f"Element {oid} does not exist")
         going = {oid, *(E.hosted(project, oid) if E.m(E.meta_of(project, oid), "category") == "wall" else []), *GU.dependents(project, oid)}
         project.forget_animation(going)
+        notes = RS.on_delete(project, oid)                       # what followed it follows its parent now; nothing is deleted with it or left dangling
         E.remove(project, oid)
-        return {"deleted": oid}
+        return {"deleted": oid, "notes": notes}
+
+    # -- relationships: links, chains and groups -------------------------------------------------------------------------
+    @staticmethod
+    @command(_model_target("Link elements"))
+    def rel__link(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Make ``parent`` the transform-parent of ``ids`` (re-parenting those that had one). ``inherit``: translate and/or rotate. Nothing moves."""
+        return RS.link(project, _ids(p.get("ids"), "ids"), text(p.get("parent"), "parent", 80), p.get("inherit"))
+
+    @staticmethod
+    @command(_model_target("Chain elements"))
+    def rel__chain(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """``ids`` in order: each element follows the one before it."""
+        return RS.chain(project, _ids(p.get("ids"), "ids"), p.get("inherit"))
+
+    @staticmethod
+    @command(_model_target("Insert into chain"))
+    def rel__insert(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        return RS.insert(project, text(p.get("id"), "id", 80), text(p.get("after"), "after", 80), [text(i, "adopt", 80) for i in (p.get("adopt") or [])], p.get("inherit"))
+
+    @staticmethod
+    @command(_model_target("Change what a link inherits"))
+    def rel__set_inherit(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        return RS.set_inherit(project, _ids(p.get("ids"), "ids"), p.get("inherit"))
+
+    @staticmethod
+    @command(_model_target("Unlink elements"))
+    def rel__unlink(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Remove each element's link to its parent; ``descendants``: branch (its children stay with it), reparent (they take its parent) or release."""
+        parent = p.get("parent")
+        return RS.unlink(project, _ids(p.get("ids"), "ids"), text(p.get("descendants", "branch"), "descendants", 10), text(parent, "parent", 80) if parent else None)
+
+    @staticmethod
+    @command(_model_target("Add measurement"))
+    def measure__add(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Keep a measurement with the project (it is checked first, never drives anything, and follows the geometry it references)."""
+        return MS.add(project, text(p.get("kind"), "kind", 20), _list(p.get("refs"), "refs"), label=p.get("label"), unit=p.get("unit"),
+                      precision=p.get("precision"), origin=p.get("origin"))
+
+    @staticmethod
+    @command(_model_target("Edit measurement"))
+    def measure__edit(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        return MS.edit(project, text(p.get("id"), "id", 80), label=p.get("label"), unit=p.get("unit"), precision=p.get("precision"))
+
+    @staticmethod
+    @command(_model_target("Remove measurement"))
+    def measure__remove(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        return MS.remove(project, text(p.get("id"), "id", 80))
+
+    @staticmethod
+    @command(_model_target("Group elements"))
+    def rel__group(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        name, within = p.get("name"), p.get("within")
+        return RS.group(project, _ids(p.get("ids"), "ids"), text(name, "name", 80) if name else None, text(within, "within", 80) if within else None)
+
+    @staticmethod
+    @command(_model_target("Ungroup"))
+    def rel__ungroup(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        return RS.ungroup(project, _ids(p.get("groups"), "groups"))
+
+    @staticmethod
+    @command(_model_target("Edit group"))
+    def rel__set_group(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        return RS.set_group(project, text(p.get("group"), "group", 80), p.get("name"), p["pivot"] if "pivot" in p else "keep")
+
+    @staticmethod
+    @command(_model_target("Attach"))
+    def rel__attach(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Attach ``ids`` to a ``group``, as children of a ``parent``, or into a chain (``after`` [, ``adopt``]). Placement is not changed."""
+        ids = _ids(p.get("ids"), "ids")
+        if p.get("group"):
+            return RS.attach_to_group(project, text(p.get("group"), "group", 80), ids)
+        if p.get("after"):
+            if len(ids) != 1:
+                raise BadRequest("Insert one element at a time into a chain")
+            return RS.insert(project, ids[0], text(p.get("after"), "after", 80), [text(i, "adopt", 80) for i in (p.get("adopt") or [])], p.get("inherit"))
+        if p.get("parent"):
+            return RS.link(project, ids, text(p.get("parent"), "parent", 80), p.get("inherit"))
+        raise BadRequest("Say what to attach to: a group, a parent, or a place in a chain")
+
+    @staticmethod
+    @command(_model_target("Detach"))
+    def rel__detach(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Detach ``ids`` from their group, their parent or both (``scope``); ``descendants`` settles what followed them. Placement is not changed."""
+        if p.get("groups"):
+            return {"detached": [RS.detach_group(project, text(g, "group", 80))["detached"] for g in _ids(p["groups"], "groups")]}
+        return RS.detach(project, _ids(p.get("ids"), "ids"), text(p.get("scope", "both"), "scope", 10), text(p.get("descendants", "branch"), "descendants", 10))
 
     @staticmethod
     @command(_model_target("Add door"))
@@ -2215,6 +2298,29 @@ class _Commands:
     def model__add_sweep(project: Project, p: dict[str, Any]) -> dict[str, Any]:
         """A profile swept along the plan path ``points`` (drawing units): ``shape`` with ``width``/``height`` in mm, or a ``section`` of [u, v] metres."""
         return {"id": FX.add_sweep(project, p, MM_PER[project.manifest["unit"]] / 1000.0)}
+
+    @staticmethod
+    @command(_model_target("Send profile to SPADRA"))
+    def profiler__send(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Build an extrusion, void, sweep, revolve or opening profile from a prepared Profiler ``payload`` (see ``profiler.transfer.prepare``). All or nothing."""
+        from .profiler import transfer as PT
+        payload = p.get("payload")
+        if not isinstance(payload, dict) or payload.get("kind") not in PT.KINDS or not isinstance(payload.get("command"), dict):
+            raise BadRequest("payload must be a prepared Profiler hand-off")
+        return PT.create(project, payload, MM_PER[project.manifest["unit"]] / 1000.0)
+
+    @staticmethod
+    @command(_model_target("Update from profile"))
+    def profiler__resync(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Re-apply a prepared Profiler ``payload`` to the object ``id`` that was made from a profile earlier."""
+        from .profiler import transfer as PT
+        payload = p.get("payload")
+        if not isinstance(payload, dict) or payload.get("kind") not in PT.KINDS or not isinstance(payload.get("command"), dict):
+            raise BadRequest("payload must be a prepared Profiler hand-off")
+        oid = text(p.get("id"), "id", 80)
+        if not E.alive(project, oid):
+            raise NotFound(f"Element {oid} does not exist")
+        return PT.update(project, oid, payload, MM_PER[project.manifest["unit"]] / 1000.0)
 
     @staticmethod
     @command(_model_target("Define design specification"))
@@ -2441,11 +2547,36 @@ class _Commands:
         if not isinstance(ids, list) or not ids or len(ids) > 500:
             raise BadRequest("ids must be a list of 1 to 500 elements")
         spec = AY.parse(p, MM_PER[project.manifest["unit"]] / 1000.0)
-        result = AY.make(project, [text(i, "id", 80) for i in ids], spec)
+        sources = [text(i, "id", 80) for i in ids]
+        result = AY.make(project, sources, spec)
         if p.get("persistent") is False:
             AY.release(project, result["array"])
             result["array"] = None
+            # Plain copies keep the structure the originals have among themselves: a copied linked set follows its own copied parent, a copied group is a group.
+            sources = [oid for oid in dict.fromkeys(sources) if not (E.category(project, oid) in E.OPENINGS and E.m(E.meta_of(project, oid), "host") in sources)]
+            made, structure = result["ids"], {"links": 0, "groups": []}
+            for at in range(0, len(made), max(len(sources), 1)):
+                done = RS.clone_structure(project, dict(zip(sources, made[at:at + len(sources)])))
+                structure = {"links": structure["links"] + done["links"], "groups": structure["groups"] + done["groups"]}
+            if structure["links"] or structure["groups"]:
+                result["structure"] = structure
         return result
+
+    @staticmethod
+    @command(_model_target("Mirror elements"))
+    def model__mirror(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Mirror elements across the vertical plane through the plan line ``p1`` → ``p2`` (drawing units). ``copy`` (default true) makes mirrored copies and
+        keeps the originals; false reflects the elements themselves (and the elements that follow them). Each element is mirrored by its own meaning (a wall's
+        doors and windows go with it and keep their hinge sides, a roof keeps its slope) and is refused, and left as it was, when its mirror image would be a
+        different shape. ``scope`` "member" mirrors the selected elements only, not the rest of their group."""
+        from . import mirroring as MR
+        ids = p.get("ids")
+        if not isinstance(ids, list) or not ids:
+            raise BadRequest("ids must be a list of elements")
+        f = MM_PER[project.manifest["unit"]] / 1000.0
+        a, b = (_point(p.get("p1"), "p1"), _point(p.get("p2"), "p2"))
+        return MR.mirror(project, [text(i, "id", 80) for i in ids], (a[0] * f, a[1] * f), (b[0] * f, b[1] * f), keep=p.get("copy", True) is not False,
+                         groups=p.get("scope") != "member")
 
     @staticmethod
     @command(_model_target("Edit array"))
@@ -3131,6 +3262,22 @@ class _Commands:
         return {"id": vid, "name": name}
 
     @staticmethod
+    @command(_model_target("New 3D view"))
+    def view__add_3d(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Another 3D view of the same model. It starts with the visualization of the view it is made from (the first 3D view unless ``source`` names one) and
+        keeps its own from then on: each 3D view has its own mode, shadows and sun."""
+        views = project.manifest["views"]
+        source = project.view(text(p["source"], "source", 80)) if p.get("source") else next((v for v in views if v["kind"] == "3d"), None)
+        if source is not None and source["kind"] != "3d":
+            raise BadRequest(f"'{source['name']}' is not a 3D view")
+        taken = {v["name"].lower() for v in views}
+        name = text(p["name"], "name", 80) if p.get("name") else next(f"3D View {n}" for n in range(2, 10_000) if f"3d view {n}" not in taken)
+        _unique_view_name(project, name)
+        vid = new_id()
+        views.append({"id": vid, "kind": "3d", "name": name, "visual": VZ.normalise(source.get("visual") if source else None)})
+        return {"id": vid, "name": name}
+
+    @staticmethod
     @command(_model_target("Schedule custom columns and filters"))
     def view__set_schedule(project: Project, p: dict[str, Any]) -> dict[str, Any]:
         view = _editable_view(project, p.get("id"))
@@ -3219,34 +3366,44 @@ class _Commands:
         if view["kind"] != "plan":
             raise BadRequest("Only a floor plan has a plan cut plane")
         key = choice_of(p.get("key"), ("cut_reference", "cut_offset", "range_top", "range_bottom", "range_depth"), "key")
+        level_z = project.level(view["level_id"])["elevation"]
         if key == "cut_reference":
             reference = text(p.get("value"), "reference level", 80)
             project.level(reference)
             view["cut_reference_level"] = reference
             view["cut_offset"] = 0.0 if reference != view["level_id"] else 1.5
-        elif key == "cut_offset":
-            view["cut_offset"] = number(p.get("value"), "cut offset (mm)", -1000000, 1000000) / 1000.0
+            ref_z = project.level(reference)["elevation"]
+            current = VR.from_view(view, level_z=level_z, reference_z=ref_z)
         else:
+            ref_z = project.level(view.get("cut_reference_level") or view["level_id"])["elevation"]
             value = number(p.get("value"), f"{key} (mm)", -1000000, 1000000) / 1000.0
-            if key == "range_top" and value < 0:
-                raise BadRequest("Top of view range must be at or above the cut plane")
-            if key == "range_bottom" and value > 0:
-                raise BadRequest("Bottom of view range cannot exceed the associated plan level")
-            if key == "range_depth" and value > float(view.get("range_bottom", -0.2)):
-                raise BadRequest("View depth cannot be above the bottom of the view range")
-            if key == "range_bottom" and value < float(view.get("range_depth", -1.0)):
-                raise BadRequest("View range bottom cannot be below the view depth")
+            try:
+                current = VR.with_change(VR.from_view(view, level_z=level_z, reference_z=ref_z), key, value)
+            except VR.ViewRangeError as error:
+                raise BadRequest(str(error), hint="The view range must satisfy depth ≤ bottom ≤ cut plane ≤ top") from None
             view[key] = value
-        # Reject an impossible range immediately, while command rollback still
-        # protects the project, rather than failing on the next viewport load.
-        ref = view.get("cut_reference_level") or view["level_id"]
-        cut_z = project.level(ref)["elevation"] + float(view.get("cut_offset", 1.5))
-        base_z = project.level(view["level_id"])["elevation"]
-        bottom_z = base_z + float(view.get("range_bottom", -0.2))
-        depth_z = base_z + float(view.get("range_depth", -1.0))
-        if not (depth_z <= bottom_z <= cut_z):
-            raise BadRequest("Plan view range must satisfy view depth ≤ bottom ≤ cut plane")
-        return {"id": view["id"], "reference": ref, "offset": view.get("cut_offset", 1.5)}
+        # The whole range is checked after every change, while command rollback still protects the project, so an impossible range never reaches a viewport.
+        try:
+            current.validate()
+        except VR.ViewRangeError as error:
+            raise BadRequest(str(error), hint="The view range must satisfy depth ≤ bottom ≤ cut plane ≤ top") from None
+        return {"id": view["id"], "reference": view.get("cut_reference_level") or view["level_id"], "offset": view.get("cut_offset", 1.5), "view_range": current.describe()}
+
+    @staticmethod
+    @command(_model_target("3D visualization"))
+    def view__set_visual(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """How a 3D view is drawn (mode, Lined edge thickness, shadows, sun): a setting of the view, never of the model. ``patch`` holds only what changes."""
+        view = project.view(text(p.get("id"), "id", 80))
+        if view["kind"] != "3d":
+            raise BadRequest(f"'{view['name']}' is a {view['kind']} view; only a 3D view has a visualization mode")
+        patch = p.get("patch")
+        if not isinstance(patch, dict) or not patch:
+            raise BadRequest("Say what to change in the visualization")
+        try:
+            view["visual"] = VZ.updated(view.get("visual"), patch)
+        except VZ.VisualError as error:
+            raise BadRequest(str(error)) from None
+        return {"id": view["id"], "visual": view["visual"]}
 
     @staticmethod
     @command(_model_target("View option"))

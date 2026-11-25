@@ -143,9 +143,9 @@ def simulate_beam(project: Any, oid: str, p: Mapping[str, Any]) -> dict[str, Any
     request = {"operation": "rollout", "model": model, "initial_state": {"x": x0, "v": 0.0}, "actions": [force] * steps, "time_step": dt, "mode": "deterministic",
                "seed": 0, "parameters": {"k": stiffness, "m": mass, "c": damping, "h": dt},
                "metadata": {"project": project.manifest["id"], "revision": project.revision, "element": oid, "scenario": prm["scenario"]}}
-    with _lock:
+    with _lock, HUB.timed("Simulation Agent", "rollout") as call:
         run = sim.perform_task(request)
-    HUB.record("Simulation Agent", "rollout", run.get("run_id"))
+        call["request_id"] = run.get("run_id")
     HUB.record("STEM Agent", "numerical_methods.rk4 (one call per step)", None)
     HUB.record("STEM Agent", "parametric.evaluate_serializable", freq.get("request_id"))
     steps_out = run["trajectory"]["steps"]

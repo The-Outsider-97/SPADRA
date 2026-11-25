@@ -219,6 +219,28 @@ def check_agents() -> list[Finding]:
     return out
 
 
+def check_other_agents() -> Finding:
+    """For information: which SLAI agents SPADRA does not use import on *this* computer. Each agent's module is imported and nothing is built or started.
+    It answers "could SPADRA use that agent here?" from the computer in front of you, which a reason written on the machine SPADRA was built on cannot."""
+    from .agent_hub import HUB, SPECS
+    importable: list[str] = []
+    blocked: dict[str, list[str]] = {}                  # the same error for several agents is said once
+    for spec in SPECS:
+        if spec.integrated:
+            continue
+        name = spec.label.removesuffix(" Agent")
+        seen = HUB.probe(spec.key)
+        if seen["importable"]:
+            importable.append(name)
+        else:
+            text = " ".join(str(seen["error"]).split())
+            blocked.setdefault(text[:140] + ("..." if len(text) > 140 else ""), []).append(name)
+    detail = f"import here: {', '.join(importable) or 'none'}"
+    if blocked:
+        detail += ". Do not import here: " + "; ".join(f"{', '.join(names)} -> {error}" for error, names in blocked.items())
+    return Finding("Other SLAI agents (SPADRA does not use them)", "ok", detail)
+
+
 def check_commit_adapters() -> Finding:
     """Whether SLAI's commit adapters are importable. Approving an assistant proposal goes through them, so without them it is refused (with this reason)."""
     from ..tools.commit_host import planning_types
@@ -239,6 +261,7 @@ def check_environment(root: Path | None, client_dir: Path, *, app_dir: Path = HE
         found.append(check_commit_adapters())
     if agents and root is not None:
         found += check_agents()
+        found.append(check_other_agents())
     return found
 
 

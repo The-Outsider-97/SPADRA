@@ -12,6 +12,7 @@ from ..tools.errors import BadRequest
 from ..tools.validation import number, text
 
 from . import elements as E
+from .agent_hub import HUB
 from .engineering_bridge import BRIDGE, ENGINE_MATERIAL
 
 LOAD_TYPES = ("udl", "point_center", "point_end")
@@ -82,8 +83,10 @@ def analyze_beam(project: Any, oid: str, p: Mapping[str, Any]) -> dict[str, Any]
     span = math.dist(start, end)
     section = section_of(meta)
     width, depth = section["width_m"], section["depth_m"]
-    result = BRIDGE.beam_response(span_m=span, load=load_kn * 1000.0, load_type=load_type, support=support,
-                                  second_moment_m4=float(section["second_moment_m4"]), youngs_modulus_pa=modulus_pa)
+    with HUB.timed("STEM Agent", "engineering_analysis.beam_response") as call:           # a real agent call: it is listed and timed like every other
+        result = BRIDGE.beam_response(span_m=span, load=load_kn * 1000.0, load_type=load_type, support=support,
+                                      second_moment_m4=float(section["second_moment_m4"]), youngs_modulus_pa=modulus_pa)
+        call["request_id"] = result.get("request_id")
     return {"id": oid, "name": project.model.get(oid)["name"], "agent": "SLAI STEM Agent", "method": result["method"],
             "inputs": {"span_m": span, "width_m": width, "depth_m": depth, "profile": section["profile"], "section_source": section["source"], "area_m2": section["area_m2"], "material": material, "support": support, "load_type": load_type,
                        "load": load_kn, "load_unit": "kN/m" if load_type == "udl" else "kN",

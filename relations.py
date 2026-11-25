@@ -378,7 +378,8 @@ def augment(project: Any, oid: str, out: dict[str, Any], relations: bool = False
     from . import bimdata as BD
     out["groups"].extend(BD.groups_for(project, oid))
     out["groups"].append(custom_group(project, oid))
-    links = related(project, oid) if relations else []
+    from . import relationships as RS
+    links = RS.rows(project, oid) + (related(project, oid) if relations else [])
     if links:
         out["groups"].append({"title": "Relationships", "rows": links})
     return out

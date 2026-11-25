@@ -82,8 +82,9 @@ def evaluate(project: Any | None, p: Mapping[str, Any]) -> dict[str, Any]:
         raise BadRequest(f"Give at most {MAX_PARAMETERS} parameters")
     params = {text(k, "parameter name", 40): _quantity(v, f"parameter {k}") for k, v in raw.items()}
     exprs = {text(k, "formula name", 40): text(v, f"formula {k}", 500) for k, v in formulas.items()}
-    out = STEM.task("parametric", "evaluate_serializable", args=[exprs, params])
-    HUB.record("STEM Agent", "parametric.evaluate_serializable", out["request_id"])
+    with HUB.timed("STEM Agent", "parametric.evaluate_serializable") as call:
+        out = STEM.task("parametric", "evaluate_serializable", args=[exprs, params])
+        call["request_id"] = out["request_id"]
     return {"kind": "formulas", "inputs": {"formulas": exprs, "parameters": params}, "results": {k: _clean(v) for k, v in out["result"].items()}, "agent": "SLAI STEM Agent",
             "request_id": out["request_id"], "revision": None if project is None else project.revision, "note": NOTE}
 
@@ -118,8 +119,9 @@ def check_constraints(project: Any | None, p: Mapping[str, Any]) -> dict[str, An
             sent.append(f"{text(rule.get('left'), 'left', 150)} {op} {text(right, 'right', 150)}")
         else:
             sent.append(text(rule, "constraint", 300))
-    out = STEM.task("parametric", "validate_constraints", args=[sent, params])
-    HUB.record("STEM Agent", "parametric.validate_constraints", out["request_id"])
+    with HUB.timed("STEM Agent", "parametric.validate_constraints") as call:
+        out = STEM.task("parametric", "validate_constraints", args=[sent, params])
+        call["request_id"] = out["request_id"]
     return {"kind": "constraints", "inputs": {"constraints": sent, "parameters": params}, "feasible": bool(out["result"]["feasible"]), "results": out["result"]["constraints"],
             "agent": "SLAI STEM Agent", "request_id": out["request_id"], "revision": None if project is None else project.revision, "note": NOTE}
 

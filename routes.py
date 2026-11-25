@@ -684,6 +684,69 @@ def calculator_measure(app: SpadraApp, req: Request) -> Any:
         return C.measure(app.require(), [text(i, "id", 80) for i in ids])
 
 
+@router.route("POST", "/api/properties/transfer-info")
+def properties_transfer_info(app: SpadraApp, req: Request) -> Any:
+    """What a source element can hand over (which property groups have values), for the Paste Properties dialog."""
+    from . import property_transfer as PT
+    with app.lock:
+        return PT.describe(app.require(), text(req.json().get("source"), "source", 80))
+
+
+# ----------------------------------------------------------------------------------------------------------- relationships
+@router.route("POST", "/api/relationships")
+def relationships_for(app: SpadraApp, req: Request) -> Any:
+    """What a selection is related to (parents, children, group-mates) with the role of each, for the viewports to tint."""
+    from . import relationships as RS
+    ids = req.json().get("ids")
+    if not isinstance(ids, list):
+        raise BadRequest("ids must be a list of element ids")
+    with app.lock:
+        return RS.highlight(app.require(), [text(i, "id", 80) for i in ids])
+
+
+@router.route("GET", "/api/relationships/tree")
+def relationships_tree(app: SpadraApp, req: Request) -> Any:
+    from . import relationships as RS
+    with app.lock:
+        return RS.tree(app.require())
+
+
+# ----------------------------------------------------------------------------------------------------------- measurements
+@router.route("POST", "/api/measure")
+def measure_now(app: SpadraApp, req: Request) -> Any:
+    """One temporary measurement: nothing is stored and nothing in the project changes."""
+    from . import measurements as MS
+    body = req.json()
+    with app.lock:
+        return MS.measure(app.require(), text(body.get("kind"), "kind", 20), body.get("refs") or [], unit=body.get("unit"), precision=body.get("precision"),
+                          origin=body.get("origin"))
+
+
+@router.route("POST", "/api/measure/snap")
+def measure_snap(app: SpadraApp, req: Request) -> Any:
+    """What the pointer can snap to on an element: its nearest vertex, edge and face."""
+    from . import measurements as MS
+    body = req.json()
+    with app.lock:
+        return MS.nearest_features(app.require(), text(body.get("id"), "id", 80), body.get("point"), float(body.get("radius", 0.05)))
+
+
+@router.route("GET", "/api/measure/list")
+def measure_list(app: SpadraApp, req: Request) -> Any:
+    """The kept measurements, each against the model as it is now (a reference that is gone says so)."""
+    from . import measurements as MS
+    with app.lock:
+        return {"measurements": MS.evaluate_all(app.require())}
+
+
+@router.route("GET", "/api/measure/element")
+def measure_element(app: SpadraApp, req: Request) -> Any:
+    """Every figure that applies to one element, and the reason for each that does not."""
+    from . import measurements as MS
+    with app.lock:
+        return MS.figures(app.require(), text(req.query.get("id"), "id", 80), req.query.get("unit"))
+
+
 # ----------------------------------------------------------------------------------------------------------- classifications
 @router.route("GET", "/api/classifications")
 def classification_info(app: SpadraApp, req: Request) -> Any:
@@ -1258,3 +1321,14 @@ def ils(app: SpadraApp, req: Request) -> Any:
     with app.lock:
         project = app.require()
         return {"config": RQ.ils_config(project), "report": RQ.ils_report(project)}
+
+
+# ----------------------------------------------------------------------------------------------------------------- plug-ins and Profiler
+@router.route("GET", "/api/plugins")
+def plugins(app: SpadraApp, req: Request) -> Any:
+    from . import plugins as PL
+    return PL.registry()
+
+
+from .profiler import api as _profiler_api                              # noqa: E402  (registers /api/profiler/* on this router)
+_profiler_api.register(router)

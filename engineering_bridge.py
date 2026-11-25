@@ -15,14 +15,11 @@ so and the capability stays off.
 """
 from __future__ import annotations
 
-import importlib
 import threading
 from typing import Any, Mapping
 
 from ..tools.errors import BadRequest, DependencyMissing
-
-AGENT_MODULE = "src.agents.stem_agent"
-MEMORY_MODULE = "src.agents.collaborative.shared_memory"
+from .agent_hub import HUB
 
 #: SPADRA beam material → the engine's own material name, where the engine has one. Anything else needs a modulus from the person.
 ENGINE_MATERIAL = {"Steel": "structural_steel_a36"}
@@ -41,13 +38,16 @@ class EngineeringBridge:
             if self._tried:
                 return
             self._tried = True
+            agent = HUB.load("stem")                                       # the hub's one STEM Agent (built with a SharedMemory of its own, see agent_hub._build_stem)
+            if agent is None:
+                self._reason = HUB.reason("stem")
+                return
             try:
-                memory = importlib.import_module(MEMORY_MODULE).SharedMemory()
-                self._agent = importlib.import_module(AGENT_MODULE).STEMAgent(memory, None)
-                _ = self._agent.engineering.civil.BEAM_CASES               # fail now, not on the first request, if the engine is not what we expect
+                _ = agent.engineering.civil.BEAM_CASES                     # fail now, not on the first request, if the engine is not what we expect
             except Exception as exc:
-                self._agent = None
                 self._reason = f"{type(exc).__name__}: {exc}"
+                return
+            self._agent = agent
 
     @property
     def available(self) -> bool:

@@ -13,13 +13,11 @@ animation stays unavailable: nothing here falls back to a copy of the agent's jo
 """
 from __future__ import annotations
 
-import importlib
 import threading
 from typing import Any, Mapping
 
 from ..tools.errors import BadRequest, Conflict, DependencyMissing
-
-AGENT_MODULE = "src.agents.animation_agent"
+from .agent_hub import HUB
 
 #: The agent's own answers to a request it refuses, mapped to the application's error classes.
 _CONFLICT_NAMES = {"AnimationRevisionConflictError", "ConflictError"}
@@ -40,12 +38,8 @@ class AnimationBridge:
             if self._tried:
                 return
             self._tried = True
-            try:
-                agent_cls = importlib.import_module(AGENT_MODULE).AnimationAgent
-                self._agent = agent_cls()
-            except Exception as exc:                                            # a missing module, dependency or configuration file
-                self._agent = None
-                self._reason = f"{type(exc).__name__}: {exc}"
+            self._agent = HUB.load("animation")                                 # the hub's one Animation Agent (built without a shared memory, see agent_hub._build_animation)
+            self._reason = None if self._agent is not None else HUB.reason("animation")   # a missing module, dependency or configuration file
 
     @property
     def available(self) -> bool:

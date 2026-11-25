@@ -84,8 +84,9 @@ def optimize_beam(project: Any, oid: str, p: Mapping[str, Any]) -> dict[str, Any
                "objectives": {"volume_m3": {"sense": "minimize", "function": lambda a: volume(a[variable + "_mm"])}},
                "constraints": [{"name": "max_deflection_m", "sense": "<=", "rhs": limit, "function": lambda a: deflection(a[variable + "_mm"])}]}
     agent = HUB.require("optimization")
-    answer = agent.optimize({"problem": problem, "max_evaluations": MAX_EVALUATIONS, "time_limit_seconds": 30})
-    HUB.record("Optimization Agent", "optimize", answer.get("run_id"))
+    with HUB.timed("Optimization Agent", "optimize") as call:
+        answer = agent.optimize({"problem": problem, "max_evaluations": MAX_EVALUATIONS, "time_limit_seconds": 30})
+        call["request_id"] = answer.get("run_id")
     HUB.record("STEM Agent", f"engineering_analysis.beam_response ({evaluations['n']} evaluations for the constraint)", None)
     solution = answer.get("solution") or {}
     values = solution.get("decision_variables") or {}
