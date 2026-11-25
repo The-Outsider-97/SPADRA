@@ -147,7 +147,8 @@ describe("extrude, void, sweep and array in a browser", () => {
     await clickAt([0, -1500]); await clickAt([4000, -1500]); await clickAt([4000, -3500]);              // below the content, clear of the option strip
     await page.keyboard.press("Enter"); await settle();
     const [s] = await items("sweep");
-    assert.ok(s?.path?.length === 3, `the sweep's path is on the plan (${JSON.stringify((await drawing()).model.map((m) => [m.category, m.path?.length]))})`);
+    const where = async () => JSON.stringify({ viewport: page.viewportSize(), statusbar: await page.locator('.statusbar').first().boundingBox(), rangeFields: await page.locator('.range-fields').first().boundingBox().catch(() => null), ribbon: await page.locator('.ribbon').first().boundingBox(), menubar: await page.locator('.menubar').first().boundingBox(), canvas: await canvas().boundingBox(), clicks: await Promise.all([[0, -1500], [4000, -1500], [4000, -3500]].map(screen)), toast: await page.locator(".toast, [role='status'], [role='alert']").allTextContents(), onPlan: (await drawing()).model.map((m) => [m.category, m.path?.length]), inContext: ((await drawing()).context ?? []).map((m) => m.category) });
+    assert.ok(s?.path?.length === 3, `the sweep's path is on the plan (${await where()})`);
     const p = await props(s.id);
     assert.equal(row(p, "width").value, 200);
     await command("model.set_property", { id: s.id, key: "width", value: 400 });
