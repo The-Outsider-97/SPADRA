@@ -32,7 +32,7 @@ export const ACTIONS: readonly ActionDef[] = [
   tool("mirror", "Mirror", "flip"), tool("rotate", "Rotate", "turn"), tool("offset", "Offset", "parallel"), tool("trim", "Trim", "cut"), tool("extend", "Extend"),
   tool("fillet", "Fillet", "round corner"), tool("door", "Door"), tool("window", "Window"), tool("floor", "Floor", "slab"), tool("roof", "Roof"),
   tool("column", "Column"), tool("beam", "Beam"), tool("room", "Room", "space"), tool("section", "Section", "cut"), tool("stair", "Stair", "steps"),
-  tool("tag", "Tag", "annotate"), tool("extrude", "Extrude", "push pull"),
+  tool("tag", "Tag", "annotate"), tool("extrude", "Extrude", "push pull"), tool("measure", "Measure", "distance angle area ruler radius volume"),
 ];
 const ACTION_IDS = new Set(ACTIONS.map((a) => a.id));
 export const actionById = (id: string): ActionDef | undefined => ACTIONS.find((a) => a.id === id);
@@ -92,7 +92,7 @@ const SPADRA_KEYS: Record<string, readonly string[]> = {
   "file.save": ["Ctrl+S"], "file.saveAs": ["Ctrl+Shift+S"], "file.open": ["Ctrl+O"], "edit.undo": ["Ctrl+Z"], "edit.redo": ["Ctrl+Shift+Z", "Ctrl+Y"],
   "view.fit": ["F"], "view.to2d": ["2"], "view.to3d": ["3"], "view.grid": ["F7"], "view.snap": ["F9"], "ui.search": ["/"], "ui.shortcuts": ["?", "F1"],
   "tool.select": ["V"], "tool.line": ["L"], "tool.polyline": ["P"], "tool.rectangle": ["R"], "tool.circle": ["O"], "tool.dimension": ["D"], "tool.text": ["T"], "tool.wall": ["W"],
-  "tool.grid": ["G"], "tool.hatch": ["H"], "tool.mirror": ["M"], "tool.rotate": ["Q"],
+  "tool.grid": ["G"], "tool.hatch": ["H"], "tool.mirror": ["M"], "tool.rotate": ["Q"], "tool.measure": ["U"],
 };
 
 export const PRESETS: readonly Preset[] = [

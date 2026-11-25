@@ -300,7 +300,7 @@ export function editCommand(p: Pick<Properties, "kind" | "ref">, key: string, va
   if (p.kind === "view" && key === "name") return { op: "view.rename", params: { id: ref["view"], name: value } };
   if (p.kind === "view" && (key === "custom_columns" || key === "custom_filters")) return { op: "view.set_schedule", params: { id: ref["view"], key, value } };
   if (p.kind === "view" && (key === "depth" || key === "angle")) return { op: "view.set_section", params: { id: ref["view"], [key]: value } };
-  if (p.kind === "view" && (key === "opening_direction" || key === "material_hatching")) return { op: "view.set_option", params: { id: ref["view"], key, value } };
+  if (p.kind === "view" && (key === "opening_direction" || key === "material_hatching" || key === "snap_context")) return { op: "view.set_option", params: { id: ref["view"], key, value } };
   if (p.kind === "view" && key.startsWith("hatch:")) return { op: "hatch.set", params: { material: key.slice(6), pattern: value } };
   if (p.kind === "view" && key === "looking") return value === "flip" ? { op: "view.flip_section", params: { id: ref["view"] } } : null;
   if (p.kind === "entity" && key === "tag_field") return { op: "draw.tag_field", params: { drawing: ref["drawing"], id: ref["entity"], field: value } };

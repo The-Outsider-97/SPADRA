@@ -17,22 +17,31 @@ import { optimizeDialog, scriptsDialog, stairDesignDialog } from "./parametric_u
 import { reconstructDialog } from "./reconstruct_ui.js";
 import { propertiesDialog, recoverDialog } from "./project_dialogs.js";
 import { appearanceDialog, arrayDialog, releaseArray, modifierDialog, ensureClean, newProjectDialog, numberPrompt, openProjectDialog, reviewDialog } from "./dialogs.js";
+import { mirrorElements } from "./transfer_ui.js";
 import { downpipeDialog, drainageDialog, drainDialog, gutterDialog, roofEndDialog } from "./gutters.js";
 import { curtainWallDialog } from "./curtainwall.js";
 import { foundationDialog, foundationReportDialog, reinforceDialog } from "./foundations.js";
 import { renderProperties } from "./properties.js";
+import { ViewRangeFields } from "./view_range_ui.js";
 import { ScheduleView } from "./schedule.js";
 import { SheetView } from "./sheet.js";
 import { flatten, openable, store, type Tool } from "./store.js";
 import { formatGridSize, UNIT_MM } from "./geom2d.js";
 import { DrawingView } from "./view2d.js";
 import { ModelView } from "./view3d.js";
+import { snapshotDialog } from "./snapshot_ui.js";
+import { attachDialog, chainDialog, detachDialog, groupDialog, linkDialog, relationshipsPanel, ungroup, unlinkDialog } from "./relationships_ui.js";
+import { defaultSettings, renderSnapshot, sizeFor, SnapshotUnavailable } from "./snapshot_render.js";
 import { Timeline } from "./timeline.js";
+import { openProfiler } from "./profiler_ui.js";
 
-const MENUS = ["File", "Edit", "View", "Insert", "Model", "Modifier", "Annotate", "Analyze", "Collaborate"] as const;
+/** One entry of GET /api/plugins: what a plug-in or editor really is in this installation. */
+interface PluginInfo { ribbon: string; id: string; label: string; state: "ready" | "separate" | "unavailable" | "missing"; detail?: string; reason?: string; run?: string; notes?: string[]; opens?: string }
+
+const MENUS = ["File", "Edit", "View", "Insert", "Model", "Modifier", "Annotate", "Analyze", "Plug-ins", "Editor", "Collaborate"] as const;
 type MenuName = (typeof MENUS)[number];
 
-interface ToolDef { id: string; label: string; icon: string; tool?: Tool; run?: () => void | Promise<void>; implemented: boolean; note?: string }
+interface ToolDef { id: string; label: string; icon: string; image?: string; tool?: Tool; run?: () => void | Promise<void>; implemented: boolean; note?: string }
 const T = (id: string, label: string, icon: string, implemented: boolean, extra: Partial<ToolDef> = {}): ToolDef => ({ id, label, icon, implemented, ...extra });
 const NOT_YET = "Not implemented yet.";
 /** A control that is shown for the layout but does nothing yet, with the reason (or where the same thing is done today). */
@@ -40,6 +49,8 @@ const nope = (id: string, label: string, icon: string, note?: string): ToolDef =
 
 export class Shell {
   private menu: MenuName = "Model";
+  private plugins: PluginInfo[] | null = null;
+  private pluginsFailed = "";
   private readonly chords = new ChordReader(keymap);
   private chordTimer = 0;
   private readonly browser = new Browser(store);
@@ -55,6 +66,15 @@ export class Shell {
   private readonly tabs = h("div", { class: "doc-tabs", attrs: { role: "tablist", "aria-label": "Open views" } });
   private readonly props = h("div", { class: "panel-body" });
   private readonly status = h("footer", { class: "statusbar" });
+  /** View Height and View Depth beside the grid controls of a floor plan: the plan's own view range, edited in place (see view_range_ui.ts). */
+  private readonly rangeFields = new ViewRangeFields({
+    unit: () => store.unit,
+    apply: async (edit) => {
+      const id = store.drawing?.view.id;
+      return !!id && !!(await store.run("view.set_cut_plane", { id, key: edit.key, value: edit.value }));
+    },
+    showAll: () => { void store.select(null).then(() => { this.props.scrollTop = 0; this.props.querySelector<HTMLElement>("input, select, button")?.focus(); }); },
+  });
   private readonly toastEl = h("aside", { class: "assistant", hidden: true, attrs: { role: "status" } });
   private readonly area = h("div", { class: "canvas-area" });
   private readonly empty = h("div", { class: "empty-stage", text: "Open a view from the Project Browser." });
@@ -109,6 +129,7 @@ export class Shell {
     window.addEventListener("beforeunload", (e) => { if (store.project?.dirty) { e.preventDefault(); } });
     store.startAutosave();
     this.render();
+    void this.loadPlugins();
   }
 
   // ---------------------------------------------------------------------------------------------------------- commands
@@ -149,18 +170,36 @@ export class Shell {
     if (made?.id) await store.openTab({ kind, id: made.id }, made.name ?? "View");
   }
 
+  /** The picture placed on a sheet, as base64 PNG: drawn offscreen at 1920 px with shadows and occlusion; the view's own picture where that cannot be done. */
+  private async sheetPicture(): Promise<string | null> {
+    const input = this.model.snapshotInput();
+    if (input && input.items.length) {
+      const { width, height } = sizeFor(1920, this.model.viewAspect());
+      try {
+        const blob = await renderSnapshot(input, { ...defaultSettings(width, height), overlays: { edges: true, grid: false, axes: false } });
+        const url = await new Promise<string>((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(String(r.result)); r.onerror = () => reject(r.error); r.readAsDataURL(blob); });
+        return url;
+      } catch (error) {
+        if (!(error instanceof SnapshotUnavailable)) throw error;
+      }
+    }
+    return this.model.snapshot();
+  }
+
   /** Take a picture of the 3D view as it is now and put it on a sheet (an existing one, or a new one). */
   private snapshotMenu(anchor: HTMLElement): void {
     const sheets = (flatten(store.tree).find((n) => n.id === "sheets")?.children ?? []).filter((n) => n.open?.kind === "sheet");
     const place = async (sheet: string, title: string): Promise<void> => {
-      const picture = this.model.snapshot();
+      const picture = await this.sheetPicture();
       if (!picture) { toast("The 3D view could not draw a picture. It needs WebGL 2, which this browser does not provide.", { kind: "error" }); return; }
       const out = await store.run("sheet.place_snapshot", { id: sheet, data: picture, camera: this.model.cameraDirection(), title });
       if (!out) return;
       const node = flatten(store.tree).find((n) => n.open?.id === sheet);
       if (node?.open) await store.openTab(node.open, node.label);
     };
-    const entries: MenuEntry[] = [...sheets.map((n): MenuEntry => ({ label: `On sheet ${n.label}`, icon: "page", run: () => { void place(n.open?.id ?? "", ""); } })),
+    const entries: MenuEntry[] = [{ label: "Save as a picture…", icon: "cube", run: () => { void snapshotDialog(() => this.model.snapshotInput(), this.model.viewAspect(), store.project?.name ?? "spadra"); } },
+      "separator",
+      ...sheets.map((n): MenuEntry => ({ label: `On sheet ${n.label}`, icon: "page", run: () => { void place(n.open?.id ?? "", ""); } })),
       { label: "On a new sheet…", icon: "page", run: () => {
         void (async () => {
           const name = await promptDialog({ title: "New sheet", label: "Sheet name", placeholder: "3D views", confirmLabel: "Create and place" });
@@ -232,6 +271,7 @@ export class Shell {
   private shortcut(e: KeyboardEvent): void {
     const field = (x: unknown): boolean => x instanceof HTMLInputElement || x instanceof HTMLSelectElement || x instanceof HTMLTextAreaElement;
     if (field(e.target) || recordingKey || e.defaultPrevented) return;
+    if (e.target instanceof Element && e.target.closest(".pf-root")) return;   // keys typed in the Profiler window belong to Profiler, not to the model behind it
     const token = tokenOf(e);
     if (!token) return;
     const step = this.chords.feed(token, performance.now());
@@ -288,7 +328,7 @@ export class Shell {
 
   /** Select a tool by its key. The tool may live on another tab (Grid is under Insert, Tag under Annotate): show that tab so the pressed tool is visible. */
   private pickTool(tool: Tool): void {
-    const home = ([this.menu, "Model", "Modifier", "Insert", "Annotate"] as const).find((m) => this.tools(m).flat().some((d) => d.tool === tool && d.implemented));
+    const home = ([this.menu, "Model", "Modifier", "Insert", "Annotate", "Analyze"] as const).find((m) => this.tools(m).flat().some((d) => d.tool === tool && d.implemented));
     if (home) { this.menu = home; store.setTool(tool); this.drawing.reset(); return; }
     store.setStatus(`${actionById(`tool.${tool}`)?.label ?? tool} is not available in this view.`);
   }
@@ -366,6 +406,32 @@ export class Shell {
     const out = await store.run("model.make_void", { ids: sel.ids, void: true });
     const done = (out?.result as { ids?: string[] } | undefined)?.ids;
     if (done) store.setStatus(`${done.length} extrusion${done.length === 1 ? "" : "s"} made into void${done.length === 1 ? "" : "s"}. Properties shows what each one cuts.`);
+  }
+
+
+  /** Ask the server what the Plug-ins and Editor entries really are here. Until it answers (or if it cannot) nothing is offered as usable. */
+  private async loadPlugins(): Promise<void> {
+    try { this.plugins = (await store.api.get<{ plugins: PluginInfo[] }>("/plugins")).plugins; this.pluginsFailed = ""; }
+    catch (error) { this.plugins = []; this.pluginsFailed = error instanceof Error ? error.message : "The list of plug-ins could not be read."; }
+    this.render();
+  }
+
+  private pluginTools(menu: "Plug-ins" | "Editor"): ToolDef[][] {
+    const ids = menu === "Plug-ins" ? ["profiler", "modeller", "cadcon", "modelpainter"] : ["animation", "presentator"];
+    const icons: Record<string, string> = { profiler: "pf-profiler", modeller: "cube", cadcon: "layout", modelpainter: "settings", animation: "clock", presentator: "page" };
+    return [ids.map((id) => {
+      const info = this.plugins?.find((p) => p.id === id);
+      const label = info?.label ?? { profiler: "Profiler", modeller: "Modeller", cadcon: "CADCon", modelpainter: "ModelPainter", animation: "Animation", presentator: "Presentator" }[id]!;
+      const icon = icons[id] ?? "settings";
+      if (!info) return T(id, label, icon, false, { note: this.pluginsFailed || "Checking what is installed…" });
+      if (info.state === "ready") {
+        if (id === "profiler") return T(id, label, icon, true, { run: () => { void openProfiler(); }, note: `${info.detail ?? "2D profile editor"}${info.notes?.length ? " " + info.notes.join(" ") : ""}` });
+        if (id === "animation") return T(id, label, icon, !!store.project, { run: () => { this.goto3D(); store.setStatus("The animation timeline is at the bottom of the 3D view."); }, note: store.project ? info.detail ?? "" : "Open a project first." });
+        return T(id, label, icon, false, { note: info.detail ?? "" });
+      }
+      if (info.state === "separate") return T(id, label, icon, false, { note: `${info.detail ?? ""}${info.run ? ` Start it with: ${info.run}` : ""}` });
+      return T(id, label, icon, false, { note: info.reason ?? "Not available in this installation." });
+    })];
   }
 
   private tools(menu: MenuName = this.menu): ToolDef[][] {
@@ -458,7 +524,9 @@ export class Shell {
              note: "Inline straight chamfer along one edge of a selected face or subface" })],
           [T("bend", "Bend", "bend", modelPick || (onDrawing && drawings.length === 1), { run: choose("bend"),
              note: "Controlled nonlinear deformation around an axis and span" })],
-          [T("array", "Array", "array", !!store.project, { run: () => arrayDialog(store),
+          [T("mirrorelement", "Mirror", "mirror", models.length > 0 && (kind === "3d" || onPlan), { run: () => { if (kind === "drawing") { store.setTool("mirror"); toast("Pick the two points of the mirror line in the plan.", { kind: "info", timeoutMs: 3000 }); } else void mirrorElements(store, models); },
+              note: "Mirror the selected elements across a vertical plane: copies by default, doors and windows go with their wall" }),
+           T("array", "Array", "array", !!store.project, { run: () => arrayDialog(store),
               note: "Repeat the selection along X, Y, Z or around a centre" }),
            T("releasearray", "Release array", "array", !!store.project, { run: () => releaseArray(store),
               note: "Detach the selected linked pattern and retain its copies" })],
@@ -466,6 +534,20 @@ export class Shell {
            T("void", "Void", "void", onPlan, { tool: "void" }),
            T("sweep", "Sweep", "sweep", onPlan, { tool: "sweep" }),
            T("makevoid", "Make void", "void", !!store.project, { run: () => this.makeVoid() })],
+          [T("link", "Link", "link-chain", !!store.project && models.length >= 2, { run: () => { void linkDialog(store, models.slice(0, -1), models[models.length - 1]); },
+              note: "Select the elements to follow, then the parent last: the children then move and rotate with it" }),
+           T("chain", "Chain", "link-chain", !!store.project && models.length >= 2, { run: () => { void chainDialog(store, models); },
+              note: "Link the selection in the order picked: each element follows the one before it" }),
+           T("unlink", "Unlink", "unlink", !!store.project && models.length >= 1, { run: () => { void unlinkDialog(store, models); },
+              note: "Release the selected elements from their parent or children, keeping their place" })],
+          [T("group", "Group", "group", !!store.project && models.length >= 2, { run: () => { void groupDialog(store, models); },
+              note: "Select, move, rotate and copy the selection as one; every member keeps its own identity" }),
+           T("ungroup", "Ungroup", "ungroup", !!store.project && models.length >= 1, { run: () => { void ungroup(store, models); },
+              note: "Dissolve the selected group; the members stay where they are" })],
+          [T("attach", "Attach", "attach", !!store.project && models.length >= 2, { run: () => { void attachDialog(store, models); },
+              note: "Attach the selection to a host element so it follows it" }),
+           T("detach", "Detach", "detach", !!store.project && models.length >= 1, { run: () => { void detachDialog(store, models); },
+              note: "Detach the selection from its host, keeping its place or going back to where it was" })],
         ];
       }
       case "Analyze": {
@@ -473,7 +555,10 @@ export class Shell {
         const engineering = !!store.boot?.capabilities.engineering;
         const simulation = !!store.boot?.capabilities.simulation, optimization = !!store.boot?.capabilities.optimization, calculator = !!store.boot?.capabilities.calculator;
         const picked = store.selection?.kind === "model" ? store.selection.ids : [];
-        return [[T("check", "Check model", "check-circle", !!store.project, { run: async () => { await store.loadCheck(); reviewDialog(store); } }),
+        return [[T("measure", "Measure", "ruler", kind === "3d" || (kind === "drawing" && !store.drawing?.projection), { tool: "measure", note: kind === "3d" ? "Distance, length, angle, radius, area, perimeter, volume, thickness, clearance, coordinates and slope, with snapping, units and precision" : "Pick points on the plan for a distance, length, angle, area, perimeter, radius or coordinates; Keep stores the figure with the project" }),
+          T("relations", "Relationships", "link-chain", !!store.project, { run: () => { void relationshipsPanel(store, picked[0]); },
+            note: "Every link, group and attachment in the project, with the chain each element belongs to" }),
+          T("check", "Check model", "check-circle", !!store.project, { run: async () => { await store.loadCheck(); reviewDialog(store); } }),
           T("connections", "Connections", "check-circle", !!store.project, { run: () => { void connectionsDialog(store); }, note: "Rainwater, roof edges and curtain-wall corners: findings from the model's geometry, corrections proposed for review" }),
           T("report", "Report", "report", !!store.project, { run: () => newReportDialog(store), note: "A snapshot of the project as an SLDC document" }),
           T("rebuild", "Rebuild", "refresh", !!store.project, { run: async () => { const job = await store.runJob("rebuild", {}, { refresh: true }); if (job?.status === "done") store.setStatus("Model rebuilt"); }, note: "Regenerate every element from its parameters" }),
@@ -489,6 +574,7 @@ export class Shell {
           [T("assistant", "Assistant", "info", !!store.project && !!store.boot?.capabilities.assistant, { run: () => { void this.assistant.toggle(); }, note: "Ask about the model or describe a change" }),
             T("agents", "Agents", "list", true, { run: () => { void agentsDialog(store); }, note: "Which SLAI agents SPADRA uses, and why the others are not" })]];
       }
+      case "Plug-ins": case "Editor": return this.pluginTools(menu);
       case "Collaborate": return [[nope("share", "Share", "link"), nope("comment", "Comments", "note")]];
       case "File": return [];
       default: break;
@@ -519,7 +605,7 @@ export class Shell {
         [T("print", "Print / PDF", "print", true, { run: () => this.sheet.print(), note: "Print the sheet, or choose Save as PDF in the print dialog" })]];
     }
     return [[sel],
-      [T("mirror", "Mirror", "mirror", kind === "drawing", { tool: "mirror" }),
+      [T("mirror", "Mirror", "mirror", kind === "drawing", { tool: "mirror", note: "Mirror drawing objects, or the selected model elements across a vertical plane (pick two points of the plan)" }),
        T("hatch", "Hatch", "hatch", kind === "drawing", { tool: "hatch" }),
        T("extend", "Extend", "extend", kind === "drawing", { tool: "extend" }),
        T("rotate", "Rotate", "rotate", onPlan, { tool: "rotate" })],
@@ -571,7 +657,7 @@ export class Shell {
   }
 
   private renderRibbon(): void {
-    const names = this.menu === "Modifier" ? ["Boolean & Cutting", "Edge & Topology", "Deformation", "Transform & Pattern", "Form & Volume"] : [];
+    const names = this.menu === "Modifier" ? ["Boolean & Cutting", "Edge & Topology", "Deformation", "Transform & Pattern", "Form & Volume", "", "Links", "Groups", "Hosts"] : [];
     const groups = this.tools().map((g, index) => h("div", { class: "group" },
       ...[names[index] ? h("span", { class: "ribbon-group-title", text: names[index] }) : null],
       ...g.map((d) => {
@@ -579,7 +665,7 @@ export class Shell {
       return h("button", {
         class: "tool", type: "button", disabled: !d.implemented, attrs: { "aria-pressed": d.tool ? String(pressed) : undefined, title: d.implemented ? `${d.note || d.label}${this.keyHint(d)}` : `${d.label}: ${d.note ?? NOT_YET}` },
         on: { click: () => { if (d.tool) { store.setTool(d.tool); this.drawing.reset(); } else void d.run?.(); } },
-      }, glyph(d.icon), h("span", { text: d.label }));
+      }, d.image ? h("img", { class: "tool-image", attrs: { src: d.image, alt: "", width: 24, height: 24 } }) : glyph(d.icon), h("span", { text: d.label }));
     })));
     const kind = store.tab?.ref.kind;
     const is3d = kind === "3d";
@@ -592,7 +678,13 @@ export class Shell {
       this.sideButton("info", "SLAI Assistant", !!store.project && !!store.boot?.capabilities.assistant, () => { void this.assistant.toggle(); }),
       this.sideButton("check-circle", "Check the model", !!store.project, () => { void store.loadCheck().then(() => reviewDialog(store)); }),
       this.sideButton("settings", "Appearance", true, () => appearanceDialog()));
-    replace(this.ribbon, h("div", { class: "tool-groups" }, groups), h("div", { class: "spacer" }), modeSwitch, side);
+    const strip = h("div", { class: "tool-groups" }, groups);
+    // A ribbon wider than the window scrolls sideways; the wheel does that too, so the buttons past the edge can always be reached.
+    strip.addEventListener("wheel", (e: WheelEvent) => {
+      if (strip.scrollWidth <= strip.clientWidth || Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+      strip.scrollLeft += e.deltaY; e.preventDefault();
+    }, { passive: false });
+    replace(this.ribbon, strip, h("div", { class: "spacer" }), modeSwitch, side);
   }
 
   private sideButton(icon: string, label: string, enabled: boolean, run: () => void): HTMLButtonElement {
@@ -641,6 +733,7 @@ export class Shell {
   }
 
   private renderStatus(): void {
+    if (this.rangeFields.editing()) return;                                                       // rebuilding the bar would take the keyboard from a field being typed in
     const kind = store.tab?.ref.kind;
     const sel = store.selection;
     const count = sel?.kind === "model" || sel?.kind === "drawing" ? sel.ids.length : 0;
@@ -648,9 +741,11 @@ export class Shell {
     const mode = kind === "3d" ? (this.model.cam.ortho ? "Orthographic" : "Perspective") : kind === "sheet" ? "Sheet / 2D" : kind === "schedule" ? "Schedule" : kind === "drawing" ? `${store.tab?.title ?? ""} / 2D` : "";
     const modeBtn = kind === "3d" ? h("button", { type: "button", on: { click: () => this.model.setOrtho(!this.model.cam.ortho) }, attrs: { title: "Switch projection" } }, mode) : h("span", { text: mode });
     const gl = this.model.stats;
+    this.rangeFields.update(kind === "drawing" ? store.drawing?.view_range ?? null : null);
     replace(this.status,
       h("span", { text: store.status }), h("div", { class: "spacer" }),
       jobChip(store), this.syncIndicator(),
+      store.project && kind === "drawing" && store.drawing?.view_range ? this.rangeFields.el : null,
       store.project && (kind === "3d" || kind === "drawing") ? this.gridReadout(kind) : null,
       store.project && (kind === "3d" || kind === "drawing") ? h("button", { type: "button", class: "snap-toggle", text: "Grid snap", attrs: { "aria-pressed": String(store.snapGrid), title: `Snap the pointer to the grid${keymap.bindings("view.snap")[0] ? ` (${keymap.bindings("view.snap")[0]})` : ""}. Snapping to ends, midpoints and intersections stays on.` },
         on: { click: () => store.setSnapGrid(!store.snapGrid) } }) : null,

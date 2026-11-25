@@ -22,6 +22,8 @@ export type OpenRef = { kind: "3d" | "drawing" | "sheet" | "schedule"; id: strin
 /** One row of the Project Browser. What clicking it does is stated by the server: open a view, select an element, open a dialog, or show a report. */
 export interface TreeNode {
   id: string; label: string; detail?: string; view_kind?: View["kind"];
+  /** A 3D view's visualization settings (mode, edge thickness, shadows, sun), as the server stores them; see visual_shading.ts. */
+  visual?: import("./visual_shading.js").Visual;
   open?: OpenRef; select?: { model: string };
   /** A dialog to open (``families``) and what it is about. */
   dialog?: string; ref?: string;
@@ -139,9 +141,21 @@ export interface Projection {
 }
 /** A section's cut line on a plan: its end points, which way it looks (a unit vector) and how far. */
 export interface SectionMark { id: string; name: string; a: Pt; b: Pt; look: Pt; looking: string; depth: number }
+/** Geometry of another level that lies inside a floor plan's view depth: a halftone footprint for reference. It is not a model item, so it is never
+ *  selected, edited or deleted from the plan. ``tris`` are flat triangles (x0,y0,x1,y1,x2,y2), ``rings`` closed outlines filled even-odd, ``lines`` edges (x0,y0,x1,y1). */
+export interface ContextItem { id: string; category: string; name: string; level: string; z: [number, number]; tris: number[][]; rings: Pt[][]; lines: number[][] }
+/** A floor plan's resolved view range in metres: each boundary as the offset it is edited as and as the absolute elevation it is (see viewrange.py). */
+export interface ViewRange {
+  level: string; level_name: string; reference_level: string; reference_name: string; level_z: number; reference_z: number;
+  /** The cut plane above its reference level (the status bar's View Height) and the depth below the plan's level (the status bar's View Depth). */
+  height: number; depth: number; top_above_cut: number; bottom_offset: number; depth_offset: number; bottom: number;
+  cut_z: number; top_z: number; bottom_z: number; depth_z: number; valid: boolean; snap_context: boolean;
+}
 export interface DrawingData {
   view: View; unit: string; revision: number; doc_revision: number; layers: Layer[]; entities: Entity[]; model: PlanWall[]; bounds: [Pt, Pt] | null;
   projection: Projection | null; section_marks: SectionMark[];
+  /** Other levels' geometry within the view depth (halftone, read-only) and the plan's view range. Both are absent for views that are not floor plans. */
+  context?: ContextItem[]; view_range?: ViewRange | null;
 }
 
 export interface ScheduleColumn { key: string; label: string; unit: string; total: boolean; align: "left" | "right" }
@@ -150,7 +164,7 @@ export interface ScheduleData {
   totals: Record<string, number>; count: number; note: string;
 }
 
-export interface SceneObject { id: string; name: string; category: string; material: string | null; color?: string | null; layer_colors?: Array<{ count: number; color: string | null }>;
+export interface SceneObject { id: string; name: string; category: string; material: string | null; /** The element this one follows (a link) and the outermost group it is in. */ parent?: string; group?: string; color?: string | null; layer_colors?: Array<{ count: number; color: string | null }>;
   gradient?: { mode: "gradient"; top: string; bottom: string; transition: "fade" | "abrupt"; position: number; fade_width: number } | null;
   layer_gradients?: Array<SceneObject["gradient"]> | null;
   ridge_handle?: { point: Pt3; across: Pt; offset_mm: number } | null; vertices: Pt3[]; faces: number[][]; layer_points?: Array<{ side: string; point: Pt3 }>;
