@@ -26,6 +26,7 @@ from .optimization_bridge import status as OPTIMIZATION_STATUS
 from .simulation_bridge import status as SIMULATION_STATUS
 from .spatial_bridge import BRIDGE as SPATIAL
 from .project import SUFFIX, Project, slug
+from .provenance_bridge import SpadraProvenance
 from .utils.spadra_errors import StartupError
 from .utils.config_loader import DEFAULT_PORT, Plan, builtin_plan, config_file, load_settings_values
 
@@ -69,6 +70,8 @@ class SpadraApp:
         self.diagnostics = Diagnostics(settings.data_dir / "diagnostics.log")
         self.jobs = JobManager(self, self.diagnostics)
         self.commits = SpadraCommits(self)
+        self.provenance = SpadraProvenance(settings.data_dir)
+        self.history_check: dict[str, Any] | None = None      # what opening the project found about its saved history (verified, damaged, none)
 
     # ------------------------------------------------------------------------------------------------------------- lifecycle
     def _adopt(self, project: Project) -> Project:
@@ -85,6 +88,8 @@ class SpadraApp:
         if not discard:
             self._refuse_if_unsaved()
         self.project = self._adopt(Project.create(name, unit=unit, undo_depth=self.settings.undo_depth))
+        self.provenance.on_new(self.project)
+        self.history_check = {"state": "new"}
         return self.project
 
     def open_project(self, path: str, *, discard: bool = False) -> Project:
@@ -92,6 +97,9 @@ class SpadraApp:
             self._refuse_if_unsaved()
         folder = self._resolve(path)
         self.project = self._adopt(Project.open(folder, undo_depth=self.settings.undo_depth))
+        self.history_check = self.provenance.on_open(self.project)
+        if self.history_check.get("state") == "damaged":
+            self.project.warnings.append("The saved history of this project does not match its record: open the History view for details")
         self.remember(folder)
         return self.project
 
@@ -103,6 +111,9 @@ class SpadraApp:
         if source is None:
             raise BadRequest("This project has not been saved, so it has no backups")
         self.project = self._adopt(Project.recover(source, backup_id, undo_depth=self.settings.undo_depth))
+        self.provenance.attach(self.project)
+        self.provenance.record(self.project, "spadra.project.recover", payload={"backup": backup_id, "from": str(source.name)}, event_id=f"{self.project.manifest['id']}:recover")
+        self.history_check = {"state": "recovered", "detail": "A recovered copy starts a new history; the original project's history is unchanged."}
         return self.project
 
     def save_project(self, path: str | None, name: str | None, *, save_as: bool = False) -> dict[str, Any]:
@@ -175,7 +186,7 @@ class SpadraApp:
             "capabilities": {"drawing2d": True, "model3d": True, "walls": True, "sheets": "manifest", "exportSvg": True, "exportGlb": True,
                              "exportStl": True, "sections": True, "elevations": True, "schedules": True, "animation": BRIDGE.available, "engineering": ENGINEERING.available, "assistant": True,
                              "simulation": SIMULATION_STATUS()["available"], "optimization": OPTIMIZATION_STATUS()["available"], "spatial": SPATIAL.status()["available"],
-                             "calculator": ENGINEERING.available},
+                             "calculator": ENGINEERING.available, "history": self.provenance.available},
             "storage": {"dataDir": str(self.settings.data_dir), "projectsDir": str(self.projects_dir)},
             "plan": self.settings.plan.to_dict(),
             "errors": {code: dict(info) for code, info in CATEGORIES.items()},

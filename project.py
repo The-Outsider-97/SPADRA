@@ -162,6 +162,9 @@ class Project:
     snapshots: dict[str, bytes] = field(default_factory=dict, repr=False)  # the pictures of 3D snapshots placed on sheets (PNG, by viewport id), written to snapshots/ on save
     _cache: dict = field(default_factory=dict, repr=False)                  # derived data keyed by revision (cleared whenever the revision moves)
     _saved_manifest_hash: str | None = field(default=None, repr=False)        # disk version this session may safely replace
+    observers: list = field(default_factory=list, repr=False)               # called with a plain event dict after a command, undo or redo (history recording); never copied to a scratch project
+    provenance: Any = field(default=None, repr=False)                       # the application's history recorder, when one is attached (see provenance_bridge.py)
+    _prov_id: str | None = field(default=None, repr=False)                  # the project id the history ledger was last written under (differs from the id after Save As)
 
     # ------------------------------------------------------------------------------------------------------------ lifecycle
     @classmethod
@@ -302,6 +305,10 @@ class Project:
             files[rel] = {"sha256": sha256_hex(data), "revision": self.revision}
         self.manifest["files"] = files
         self.manifest["modified"] = _now()
+        if self.provenance is not None:                              # the history is copied beside the project and its chain head recorded in the manifest
+            entry = self.provenance.snapshot_for_save(self, target)
+            if entry is not None:
+                self.manifest["provenance"] = entry
         atomic_write_json(target / "project.json", self.manifest)
         self._saved_manifest_hash = sha256_hex((target / "project.json").read_bytes())
         for old in (target / "reports").glob("*.sldc") if (target / "reports").is_dir() else ():          # a deleted report's file goes once the manifest no longer lists it
@@ -398,6 +405,7 @@ class Project:
         if target.exists() and any(target.iterdir()):
             raise Conflict(f"{target} already exists", hint="Save As never overwrites another folder; choose another name")
         before = (self.manifest["id"], self.manifest["name"], self.root, self.dirty, self.manifest.get("files"), self.manifest.get("modified"), self.manifest.get("commits"))
+        prov_before = (self._prov_id, self.manifest.get("provenance"))
         self.manifest["id"] = new_id()
         self.manifest["commits"] = {}                                # the copy is a different project; commits of this one were decided for this one
         if name:
@@ -406,6 +414,11 @@ class Project:
             return self.save(target)
         except BaseException:
             self.manifest["id"], self.manifest["name"], self.root, self.dirty = before[:4]
+            self._prov_id = prov_before[0]
+            if prov_before[1] is None:
+                self.manifest.pop("provenance", None)
+            else:
+                self.manifest["provenance"] = prov_before[1]
             self.manifest["commits"] = before[6] or {}
             if before[4] is None:
                 self.manifest.pop("files", None)
@@ -466,6 +479,14 @@ class Project:
             raise NotFound(f"View {view_id} has no drawing") from None
 
     # ---------------------------------------------------------------------------------------------------------------- commands
+    def _notify(self, event: dict[str, Any]) -> None:
+        """Tell the observers (history) what just happened. An observer that fails is ignored: recording must never undo or block a modelling step."""
+        for fn in list(self.observers):
+            try:
+                fn(self, event)
+            except Exception:                                           # noqa: BLE001
+                pass
+
     def execute(self, op: str, params: Mapping[str, Any] | None = None, *, expected_revision: int | None = None) -> dict[str, Any]:
         """Apply one command atomically. Raises ``Conflict`` for a stale revision, ``BadRequest``/``NotFound`` for a bad one;
         on any failure the project is exactly as it was."""
@@ -474,6 +495,8 @@ class Project:
         if handler is None:
             raise BadRequest(f"Unknown command '{op}'", details={"commands": sorted(self._commands)})
         if expected_revision is not None and int(expected_revision) != self.revision:
+            if self.observers:
+                self._notify({"kind": "command.rejected", "op": op, "at": self.revision, "error": "Conflict", "message": f"stale revision: expected {expected_revision}, now {self.revision}", "raw_params": params})
             raise Conflict(f"The project changed (now revision {self.revision}; this change was made for {expected_revision})",
                            hint="Review the current project and try again")
         key, label = handler.target(self, params)                       # type: ignore[attr-defined]
@@ -482,7 +505,7 @@ class Project:
         manifest_before = _clone(self.manifest)
         self._touched = {}
         self._running_key = key
-        model_edit = key == "model" and op.split(".")[0] not in ("anim", "project", "report", "bim", "script", "measure")
+        model_edit = key == "model" and op.split(".")[0] not in ("anim", "project", "report", "bim", "script", "measure", "regulation")
         try:
             if model_edit:
                 DL.bind(self)                                           # dimensions drawn on wall faces are linked to them before the model changes
@@ -507,16 +530,21 @@ class Project:
                 DL.sync(self)                                           # dimensions on wall faces follow the faces (a layer added, a wall moved)
         except Exception as exc:
             self._rollback(key, before, manifest_before)
+            if self.observers:
+                self._notify({"kind": "command.rejected", "op": op, "at": self.revision, "error": type(exc).__name__, "message": str(exc)[:300], "raw_params": params})
             if isinstance(exc, (G.GeometryError, SpatialFormatError)):   # the document or the geometry refused: a bad request, not a crash
                 raise BadRequest(str(exc)) from exc
             raise
         extra, self._touched = self._touched, {}
+        revision_before = self.revision
         self.manifest["revision"] = self.revision + 1
         self.undo_stack.append(Undo(label, key, before, manifest_before, extra))
         del self.undo_stack[:-self.undo_depth]
         self.redo_stack.clear()
         self.dirty = True
         self._cache.clear()
+        if self.observers:
+            self._notify({"kind": "command", "op": op, "label": label, "before": revision_before, "after": self.revision, "raw_params": params, "result": result})
         return {"revision": self.revision, "result": result}
 
     def touch(self, key: str) -> None:
@@ -550,9 +578,12 @@ class Project:
         for k, doc in entry.extra.items():
             self._restore(k, doc)
         revision, commits = self.manifest["revision"], self.manifest.get("commits", {})
+        provenance = self.manifest.get("provenance")
         self.manifest = _clone(entry.manifest)                       # structure goes back with the document; the revision only ever moves forward
         self.manifest["revision"] = revision
         self.manifest["commits"] = commits                           # and so do the receipts of commits that happened: undoing a change must not forget it was committed
+        if provenance is not None:                                   # history is never undone: the chain head stays what was last saved
+            self.manifest["provenance"] = provenance
         self._cache.clear()
         return Undo(entry.label, entry.key, current, current_manifest, current_extra)
 
@@ -560,18 +591,24 @@ class Project:
         if not self.undo_stack:
             raise BadRequest("Nothing to undo")
         entry = self.undo_stack.pop()
+        revision_before = self.revision
         self.redo_stack.append(self._swap(entry))
         self.manifest["revision"] = self.revision + 1
         self.dirty = True
+        if self.observers:
+            self._notify({"kind": "undo", "label": entry.label, "before": revision_before, "after": self.revision})
         return {"revision": self.revision, "label": entry.label}
 
     def redo(self) -> dict[str, Any]:
         if not self.redo_stack:
             raise BadRequest("Nothing to redo")
         entry = self.redo_stack.pop()
+        revision_before = self.revision
         self.undo_stack.append(self._swap(entry))
         self.manifest["revision"] = self.revision + 1
         self.dirty = True
+        if self.observers:
+            self._notify({"kind": "redo", "label": entry.label, "before": revision_before, "after": self.revision})
         return {"revision": self.revision, "label": entry.label}
 
     def _register(self) -> None:
@@ -833,9 +870,25 @@ class Project:
                 best[side] = (area, point)
         return [{"side": side, "point": best[side][1]} for side in names if side in best]
 
+    def _still_look(self, max_vertices: int) -> dict[str, dict[str, Any]]:
+        """How the still scene paints each object (layer colours and gradients, profile-coloured faces, component parts, handles), by element id, kept per revision.
+        An animated scene moves the same faces, so it takes its paint from here instead of repeating the rules."""
+        cached = getattr(self, "_still_look_cache", None)
+        if cached and cached[0] == self.revision:
+            return cached[1]
+        look: dict[str, dict[str, Any]] = {}
+        try:
+            for o in self.scene_data(max_vertices)["objects"]:
+                look[o["id"]] = {"faces": len(o["faces"]), "look": {k: o[k] for k in ("gradient", "layer_gradients", "layer_colors", "components", "door_handles", "ridge_handle") if k in o}}
+        except LimitExceeded:
+            look = {}
+        self._still_look_cache = (self.revision, look)
+        return look
+
     def _animated_scene(self, max_vertices: int, time: float) -> dict[str, Any]:
         from src.utils.spatial_formats.sgeo.tessellation import tessellate
         evaluated = AB.BRIDGE.evaluate(self.model, time)
+        still = self._still_look(max_vertices)
         objects, total = [], 0
         for oid in evaluated.geometric_ids():                                    # visible objects that have geometry, at this time
             state = evaluated.get_object_state(oid)
@@ -853,11 +906,17 @@ class Project:
             layer_colors, layer_gradients = scoped_layers if scoped_layers is not None else ([], None)
             if scoped_layers is not None:
                 appearance = layer_gradients[0] if len(layer_gradients) == 1 else None
-            objects.append({"id": oid, "name": obj["name"], "category": meta.get(f"{NS}:category", "generic"),
-                            "material": meta.get(f"{NS}:material"), "color": E.appearance_color(self, meta, oid),
-                            "gradient": appearance if appearance and appearance["mode"] == "gradient" else None,
-                            "layer_gradients": layer_gradients, "layer_colors": layer_colors,
-                            "vertices": verts, "faces": mesh["faces"]})
+            category = meta.get(f"{NS}:category", "generic")
+            item = {"id": oid, "name": obj["name"], "category": category,
+                    "material": meta.get(f"{NS}:material"), "color": E.appearance_color(self, meta, oid),
+                    "gradient": appearance if appearance and appearance["mode"] == "gradient" else None,
+                    "layer_gradients": layer_gradients, "layer_colors": layer_colors,
+                    "vertices": verts, "faces": mesh["faces"]}
+            look = still.get(oid)
+            if look and look["faces"] == len(mesh["faces"]):                       # the same faces as the still scene: keep how it is painted (layers, profile colours, parts, handles)
+                item.update({k: v for k, v in look["look"].items()})
+                item["layer_points"] = self._layer_points(category, meta, verts, mesh["faces"])
+            objects.append(item)
         bounds = None
         if objects:
             lo = [min(v[i] for o in objects for v in o["vertices"]) for i in range(3)]
@@ -1213,7 +1272,7 @@ class Project:
 
     def check(self) -> dict[str, Any]:
         """Deterministic consistency checks over real project data: references, hosting, parameters, associations, geometry candidates and
-        documentation. Nothing here is a regulatory or structural verification."""
+        documentation. Nothing here is a structural verification; regulation screening appears only when the project turned it on, as warnings that cite their source."""
         issues: list[dict[str, str]] = []
         level_ids = {l["id"] for l in self.manifest["levels"]}
         view_ids = {v["id"] for v in self.manifest["views"]}
@@ -1222,6 +1281,8 @@ class Project:
         issues.extend(CK.coordination(self))
         issues.extend(BD.issues(self))
         issues.extend(RQ.issues(self))
+        from .regulations import engine as REG
+        issues.extend(REG.issues(self))                                  # regulation screening, only when the project turned it on (see regulations/)
         for view in self.manifest["views"]:
             if view["kind"] not in NO_DRAWING and view["id"] not in self.drawings:
                 issues.append(E.issue("error", view["id"], f"View '{view['name']}' has lost its drawing", "references"))
@@ -2151,6 +2212,16 @@ class _Commands:
         """Remove each element's link to its parent; ``descendants``: branch (its children stay with it), reparent (they take its parent) or release."""
         parent = p.get("parent")
         return RS.unlink(project, _ids(p.get("ids"), "ids"), text(p.get("descendants", "branch"), "descendants", 10), text(parent, "parent", 80) if parent else None)
+
+    @staticmethod
+    @command(_model_target("Regulation settings"))
+    def regulation__configure(project: Project, p: dict[str, Any]) -> dict[str, Any]:
+        """Turn regulation assistance on or off and change its settings (jurisdiction, project status, building function, reference date, warning margin, dataset pin).
+        The project is not edited; the settings are part of its manifest, so this is undoable and recorded in the history like any command."""
+        from .regulations import config as RCFG
+        cfg = RCFG.normalise(project, p)
+        RCFG.store(project, cfg)
+        return {"regulation": cfg}
 
     @staticmethod
     @command(_model_target("Add measurement"))
@@ -3283,9 +3354,15 @@ class _Commands:
         view = _editable_view(project, p.get("id"))
         if view["kind"] != "schedule" or view["category"] == "family" or D.SCHEDULES[view["category"]].get("summary"):
             raise BadRequest("Custom filters apply to category schedules")
-        key = choice_of(p.get("key"), ("custom_columns", "custom_filters"), "schedule setting")
+        key = choice_of(p.get("key"), ("custom_columns", "custom_filters", "hidden_columns"), "schedule setting")
         raw = p.get("value")
-        if key == "custom_columns":
+        if key == "hidden_columns":
+            known = {c["key"] for c in D.COLUMNS[view["category"]]} | {"*empty*"}
+            names = [s.strip() for s in (raw if isinstance(raw, list) else str(raw or "").split(",")) if str(s).strip()]
+            if any(n not in known for n in names):
+                raise BadRequest("Name columns of this schedule by key, or '*empty*' for every empty column", details={"columns": sorted(known)})
+            view[key] = list(dict.fromkeys(names))
+        elif key == "custom_columns":
             names = [s.strip() for s in str(raw or "").split(",") if s.strip()]
             if len(names) > 20 or len(set(names)) != len(names) or any(not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,39}", n) for n in names):
                 raise BadRequest("List up to 20 distinct custom property names, separated by commas")

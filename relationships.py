@@ -267,23 +267,29 @@ def _check_end(project: Any, oid: str, role: str) -> None:
         raise BadRequest(f"{oid} cannot be the {role} of a link: {why}")
 
 
-def link(project: Any, child_ids: Sequence[str], parent_id: str, inherit: Any = None) -> dict[str, Any]:
-    """Make ``parent_id`` the transform-parent of every child. A child that already has a parent is re-parented. Nothing moves. All or nothing."""
+def check_link(project: Any, child_ids: Sequence[str], parent_id: str) -> list[str]:
+    """Everything ``link`` refuses, without changing anything: a missing or derived end, linking to itself, a circular dependency. Returns the children."""
     children = _ids(child_ids, "children")
-    inh = _inherit(inherit)
     _check_end(project, parent_id, "parent")
     for c in children:
         if c == parent_id:
             raise BadRequest("An element cannot be linked to itself")
         _check_end(project, c, "child")
-    state = _state(project, True)
-    kids = _children_map(state)
+    kids = _children_map(_state(project))
     below = set(_descend(kids, children))
     for c in children:
         if parent_id in below or parent_id in kids.get(c, ()) or c in ancestors(project, parent_id):
             names = _names(project)
             raise BadRequest(f"Linking {_label(project, c, names)} under {_label(project, parent_id, names)} would make a circular dependency: "
                              f"{_label(project, parent_id, names)} already follows {_label(project, c, names)}")
+    return children
+
+
+def link(project: Any, child_ids: Sequence[str], parent_id: str, inherit: Any = None) -> dict[str, Any]:
+    """Make ``parent_id`` the transform-parent of every child. A child that already has a parent is re-parented. Nothing moves. All or nothing."""
+    inh = _inherit(inherit)
+    children = check_link(project, child_ids, parent_id)
+    state = _state(project, True)
     changed, kept, replaced = [], [], {}
     for c in children:
         old = state["links"].get(c)
@@ -879,6 +885,16 @@ def highlight(project: Any, ids: Sequence[str]) -> dict[str, Any]:
         for o in g["members"]:
             roles.setdefault(o, "group")
     return {"roles": roles, "edges": edges, "groups": list(shown.values())}
+
+
+def structure(project: Any) -> dict[str, Any]:
+    """A read-only picture of the relationships for browsers and reports: ``links`` (child -> {parent, inherit}), ``groups`` (id -> {id, name, parent, members}),
+    ``member`` (element -> its innermost group) and ``names`` (element id -> name). Nothing in it is shared with the project."""
+    state = _state(project)
+    groups, member = _group_index(state)
+    return {"links": {c: {"parent": l["parent"], "inherit": list(l["inherit"])} for c, l in state["links"].items()},
+            "groups": {gid: {"id": gid, "name": g["name"], "parent": g.get("parent"), "members": list(g["members"])} for gid, g in groups.items()},
+            "member": dict(member), "names": _names(project)}
 
 
 def tree(project: Any) -> dict[str, Any]:

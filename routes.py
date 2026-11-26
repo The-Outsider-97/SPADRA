@@ -711,6 +711,39 @@ def relationships_tree(app: SpadraApp, req: Request) -> Any:
         return RS.tree(app.require())
 
 
+# ------------------------------------------------------------------------------------------------------------------ element browser
+@router.route("GET", "/api/element-browser")
+def element_browser(app: SpadraApp, req: Request) -> Any:
+    """The model's elements as one hierarchy (``search``, ``category`` and ``kind`` as comma-separated lists, ``sort``, ``descending``). Read-only."""
+    from . import element_browser as EB
+    q = req.query
+    split = lambda key: [t for t in str(q.get(key) or "").split(",") if t]                  # noqa: E731
+    with app.lock:
+        return EB.build(app.require(), search=str(q.get("search") or ""), categories=split("category"), kinds=split("kind"), sort=str(q.get("sort") or "name"),
+                        descending=str(q.get("descending") or "").lower() in ("1", "true", "yes"))
+
+
+@router.route("GET", "/api/element-browser/inspect/{id}")
+def element_browser_inspect(app: SpadraApp, req: Request) -> Any:
+    """Where an element sits and why, what it follows, hosts and is cut by (a void: the classification of everything it meets). Read-only."""
+    from . import element_browser as EB
+    with app.lock:
+        return EB.inspect(app.require(), text(req.params["id"], "id", 80))
+
+
+@router.route("POST", "/api/element-browser/drop-plan")
+def element_browser_drop_plan(app: SpadraApp, req: Request) -> Any:
+    """What a drop would run (an existing ``rel.*`` command and its parameters), refused with that command's own message when it would be refused. Changes nothing."""
+    from . import element_browser as EB
+    body = req.json()
+    ids = body.get("ids")
+    if not isinstance(ids, list):
+        raise BadRequest("ids must be a list of element ids")
+    target = body.get("target")
+    with app.lock:
+        return EB.plan_drop(app.require(), [text(i, "id", 80) for i in ids], text(target, "target", 80) if target else None, text(body.get("mode"), "mode", 10))
+
+
 # ----------------------------------------------------------------------------------------------------------- measurements
 @router.route("POST", "/api/measure")
 def measure_now(app: SpadraApp, req: Request) -> Any:
@@ -1323,6 +1356,54 @@ def ils(app: SpadraApp, req: Request) -> Any:
         return {"config": RQ.ils_config(project), "report": RQ.ils_report(project)}
 
 
+# ----------------------------------------------------------------------------------------------------------------- history (provenance)
+def _query_int(raw: Any, label: str, default: int, low: int, high: int) -> int:
+    """A whole number from a query string (which always arrives as text)."""
+    if raw in (None, ""):
+        return default
+    try:
+        return integer(int(str(raw)), label, low, high)
+    except ValueError as exc:
+        raise BadRequest(f"{label} must be a whole number from {low} to {high}") from exc
+
+
+@router.route("GET", "/api/provenance/status")
+def provenance_status(app: SpadraApp, req: Request) -> Any:
+    with app.lock:
+        return {**app.provenance.status(app.project), "opened": app.history_check}
+
+
+@router.route("GET", "/api/provenance/events")
+def provenance_events(app: SpadraApp, req: Request) -> Any:
+    with app.lock:
+        project = app.require()
+        q = req.query
+        return app.provenance.events(project, kind=q.get("kind") or None, element=q.get("element") or None, actor_type=choice(q["actor"], ("human", "ai", "system"), "actor") if q.get("actor") else None,
+                                     after=_query_int(q.get("after"), "after", 0, 0, 2**31), limit=_query_int(q.get("limit"), "limit", 200, 1, 1000))
+
+
+@router.route("GET", "/api/provenance/element/{id}")
+def provenance_element(app: SpadraApp, req: Request) -> Any:
+    with app.lock:
+        return app.provenance.element(app.require(), text(req.params["id"], "id", 80))
+
+
+@router.route("POST", "/api/provenance/verify")
+def provenance_verify(app: SpadraApp, req: Request) -> Any:
+    with app.lock:
+        return app.provenance.verify(app.require())
+
+
+@router.route("POST", "/api/provenance/export")
+def provenance_export(app: SpadraApp, req: Request) -> Any:
+    body = req.json()
+    with app.lock:
+        redact = body.get("redact") or []
+        if not isinstance(redact, list) or not all(isinstance(x, str) and len(x) <= 40 for x in redact) or len(redact) > 20:
+            raise BadRequest("redact must be a short list of field names")
+        return app.provenance.export(app.require(), redact)
+
+
 # ----------------------------------------------------------------------------------------------------------------- plug-ins and Profiler
 @router.route("GET", "/api/plugins")
 def plugins(app: SpadraApp, req: Request) -> Any:
@@ -1332,3 +1413,5 @@ def plugins(app: SpadraApp, req: Request) -> Any:
 
 from .profiler import api as _profiler_api                              # noqa: E402  (registers /api/profiler/* on this router)
 _profiler_api.register(router)
+from .regulations import api as _regulation_api                         # noqa: E402  (registers /api/regulation/* on this router)
+_regulation_api.register(router)

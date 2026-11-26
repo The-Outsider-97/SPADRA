@@ -377,16 +377,48 @@ def _reconcile_boolean_voids(project: Any, vs: Sequence[Mapping[str, Any]]) -> i
     (pockets, oblique intersections, roofs, beams, etc.) use SLAI's existing
     manifold evaluator without replacing the source geometry. A cutter's ID is
     recorded on the target so moving/removing the cutter can restore it.
+
+    The cutting policy (switch, policy, targets, host, excluded elements and
+    categories) is the *only* thing that decides whether a void cuts an element,
+    whatever way a Boolean modifier got there. So the modifiers a void owns are
+    taken from the model itself, not only from what an element's metadata says:
+
+    * a Boolean modifier that really targets the element and has a void as its
+      operand but is missing from the metadata (a project saved by an older
+      build, or a copy) is adopted, and then kept or removed by the policy;
+    * a second modifier for the same void on the same element is a duplicate cut
+      and is removed;
+    * a metadata entry that names a modifier belonging to *another* element or
+      to another void (copies and array items inherit their source's metadata)
+      is dropped without touching that modifier, and the copy gets its own.
     """
     active = [v for v in vs if E.alive(project, v["id"]) and
               (E.category(project, v["id"]) == "void" or v.get("swept"))]
+    active_ids = {v["id"] for v in active}
     updated = 0
+    all_modifiers = project.model.modifiers()
+    by_id = {m["id"]: m for m in all_modifiers}
+    boolean_on: dict[str, list[Mapping[str, Any]]] = {}                           # element id -> its whole-element Boolean modifiers that have a void operand
+    for m in all_modifiers:
+        target, operands = m.get("target") or {}, m.get("operands") or []
+        if m.get("kind") == "sgeo.boolean" and "subelement" not in target and len(operands) == 1:
+            boolean_on.setdefault(target.get("item_id"), []).append(m)
     for oid in E.element_ids(project):
         cat = E.category(project, oid)
         if cat in CU.NEVER_HIT or E.m(E.meta_of(project, oid), "void_mode") or not project.model.get(oid).get("geometry"):
             continue
         meta = E.meta_of(project, oid)
-        existing = dict(E.m(meta, "void_boolean_modifiers") or {})
+        recorded = dict(E.m(meta, "void_boolean_modifiers") or {})
+        existing: dict[str, str] = {}
+        for m in boolean_on.get(oid, []):
+            vid = m["operands"][0].get("item_id")
+            if vid not in active_ids and recorded.get(vid) != m["id"]:
+                continue                                                          # someone else's Boolean (not a void's): not ours to manage
+            if vid in existing:
+                project.model.remove_modifier(m["id"])                          # a duplicate cut of the same void
+                updated += 1
+                continue
+            existing[vid] = m["id"]
         desired: set[str] = set()
         if active:
             # Check the unmodified source mesh. Testing evaluated geometry
@@ -397,10 +429,9 @@ def _reconcile_boolean_voids(project: Any, vs: Sequence[Mapping[str, Any]]) -> i
             for v in active:
                 if v["id"] not in covered and CU.applies(v, oid, cat)[0] and CU.touches(project, oid, v):
                     desired.add(v["id"])
-        known_modifiers = {m["id"] for m in project.model.modifiers()}
         for vid, mid in list(existing.items()):
-            if vid not in desired or mid not in known_modifiers:
-                if mid in known_modifiers:
+            if vid not in desired or vid not in active_ids:
+                if mid in by_id:
                     project.model.remove_modifier(mid)
                     updated += 1
                 del existing[vid]
@@ -410,7 +441,7 @@ def _reconcile_boolean_voids(project: Any, vs: Sequence[Mapping[str, Any]]) -> i
                 evaluation_policy={"mode": "tolerance_controlled", "absolute": 1e-6})
             existing[vid] = mid
             updated += 1
-        if existing != (E.m(meta, "void_boolean_modifiers") or {}):
+        if existing != recorded:
             E._attach(project, oid, {"void_boolean_modifiers": existing})
     return updated
 

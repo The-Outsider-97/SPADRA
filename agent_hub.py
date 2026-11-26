@@ -61,9 +61,9 @@ SPECS: tuple[AgentSpec, ...] = (
               why_not="SPADRA has no document-ingestion feature to attach it to yet; nothing was built on it. 2D-to-BIM reconstruction reads PDFs and images with its own pipeline."),
     AgentSpec(key="quality", label="Quality Agent", section="14.13", module="quality_agent", cls="QualityAgent", why_not="No verified service for SPADRA was identified."),
     AgentSpec(key="evaluation", label="Evaluation Agent", section="14.13", module="evaluation_agent", cls="EvaluationAgent", why_not="No verified service for SPADRA was identified."),
-    AgentSpec(key="provenance", label="Provenance Agent", section="14.13", module="provenance_agent", cls="ProvenanceAgent",
-              why_not="Specification runs, reconstructions, previews, simulations and optimisations carry their own provenance record (spadra:spec, spadra:recon, "
-                      "the preview audit, the run's seed, steps and lineage); no verified service for the agent's lineage store was identified."),
+    AgentSpec(key="provenance", label="Provenance Agent", section="14.13", module="provenance_agent", cls="ProvenanceAgent", integrated=True,
+              purpose="Keeps SPADRA's lineage graph: every recorded project event is mirrored as an entity derived from its causes, beside SPADRA's own tamper-evident "
+                      "history ledger (which is what the project carries and verifies)"),
     AgentSpec(key="safety", label="Safety Agent", section="14.13", module="safety_agent", cls="SafetyAgent", why_not="No verified service for SPADRA was identified."),
     AgentSpec(key="privacy", label="Privacy Agent", section="14.13", module="privacy_agent", cls="PrivacyAgent",
               why_not="No verified service identified; the assistant sends agents only the selection it is given."),
@@ -113,6 +113,16 @@ class Hub(AgentHub):
         super().__init__(SPECS)
         self.register_factory("stem", _build_stem)
         self.register_factory("animation", _build_animation)
+        self.register_factory("provenance", self._build_provenance)
+        self._provenance_store: str | None = None
+
+    def configure_provenance(self, store_path: Any) -> None:
+        """Where the Provenance Agent keeps its lineage graph (beside SPADRA's own data, not inside the SLAI checkout). Must be set before the agent first loads."""
+        self._provenance_store = str(store_path)
+
+    def _build_provenance(self, module: Any) -> Any:
+        config = {"store_path": self._provenance_store} if self._provenance_store else None
+        return module.ProvenanceAgent(self.shared_memory(), None, config)
 
     def health(self) -> dict[str, Any]:
         """How SPADRA's agent calls have gone this session: per agent and operation the number of calls, failures and the latency (mean, 95th percentile,
@@ -168,7 +178,7 @@ ROLES: tuple[dict[str, Any], ...] = (
     {"role": "Optimization", "agent": "optimization", "used_for": "Bounded beam-dimension optimisation, surfaced as an assistant proposal", "agent_calls": True},
     {"role": "Planning", "agent": "planning", "used_for": "Would decompose multi-step requests. The construction order of a specification is computed by a deterministic topological sort instead", "agent_calls": False},
     {"role": "Verification", "agent": "verification", "used_for": "Would verify a specification. A specification is verified by running it on a throw-away copy and measuring (``spec.verify``); a repair is offered only after it re-verifies", "agent_calls": False},
-    {"role": "Provenance", "agent": "provenance", "used_for": "Would record lineage. Specification runs, reconstructions and previews carry their own provenance records (``spadra:spec``, ``spadra:recon``, the preview audit)", "agent_calls": False},
+    {"role": "Provenance", "agent": "provenance", "used_for": "Every project event (commands, undo and redo, proposals and their approval, saving, regulation checks and corrections) is recorded in a tamper-evident history and mirrored into the agent's lineage graph", "agent_calls": True},
 )
 
 

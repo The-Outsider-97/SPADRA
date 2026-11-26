@@ -42,6 +42,7 @@ from . import structural as S
 from .agent_hub import HUB
 from .spatial_bridge import BRIDGE as SPATIAL
 from .project import MM_PER, new_id
+from . import provenance_bridge as PB
 
 INTERPRETER = {"name": "SPADRA pattern interpreter", "language_model": False,
                "note": "Recognises a fixed set of request forms. It is not a language model and does not guess at other wording."}
@@ -361,7 +362,7 @@ class Assistant:
                              targets=[ch["id"]], units="mm", evidence=out, risk="medium", evidence_kind="optimization")
 
     def propose_commands(self, project: Any, *, source: str, title: str, explanation: str, steps: list[dict[str, Any]], targets: Sequence[str] = (),
-                         evidence: Any = None, evidence_kind: str | None = None, risk: str = "medium") -> dict[str, Any]:
+                         evidence: Any = None, evidence_kind: str | None = None, risk: str = "medium", post_check: Mapping[str, Any] | None = None) -> dict[str, Any]:
         """Turn a computation's result (a script run, an optimization, an agent's suggestion) into a *proposal* a person reviews: the steps are dry-run on a
         scratch copy, nothing changes, and only ``consent`` followed by ``run`` (see ``commits.py``) can apply it. ``source`` says who proposed it."""
         with self._lock:
@@ -370,12 +371,12 @@ class Assistant:
             if not steps or len(steps) > 200:
                 raise BadRequest("A proposal has 1 to 200 steps")
             return self._propose(project, f"[{source}]", {"revision": project.revision, "source": source}, len(HUB.calls), intent=source, title=title, explanation=explanation,
-                                 steps=steps, targets=list(targets), units=project.manifest["unit"], risk=risk, evidence=evidence, evidence_kind=evidence_kind)
+                                 steps=steps, targets=list(targets), units=project.manifest["unit"], risk=risk, evidence=evidence, evidence_kind=evidence_kind, post_check=post_check)
 
     # ------------------------------------------------------------------------------------------------------------- proposals
     def _propose(self, project: Any, request: str, context: Mapping[str, Any], mark: int, *, intent: str, title: str, explanation: str, steps: list[dict[str, Any]],
                  targets: Sequence[str], units: str, risk: str = "low", assumptions: Sequence[str] = (), skipped: Sequence[str] = (), evidence: Any = None,
-                 evidence_kind: str | None = None) -> dict[str, Any]:
+                 evidence_kind: str | None = None, post_check: Mapping[str, Any] | None = None) -> dict[str, Any]:
         """Validate a structured proposal by running it on a scratch copy; if the project refuses it, no proposal is made."""
         preview = self._dry_run(project, steps, targets)
         n_targets = len(set(targets))
@@ -385,8 +386,10 @@ class Assistant:
                     "steps": steps, "units": units, "title": title, "explanation": explanation, "risk": risk, "requires_confirmation": risk == "high",
                     "preconditions": [f"The project is still at revision {project.revision}", "Every step passes the project's own validation when it runs"],
                     "validation": preview["validation"], "changes": preview["changes"], "assumptions": list(assumptions), "skipped": list(skipped),
-                    "status": "pending", "created": time.time(), "evidence": evidence, "evidence_kind": evidence_kind}
+                    "status": "pending", "created": time.time(), "evidence": evidence, "evidence_kind": evidence_kind,
+                    "post_check": dict(post_check) if post_check else None}
         self.proposals[proposal["id"]] = proposal
+        self._record(project, "made", proposal, actor=PB.proposal_actor(intent))
         return self._post(project, request, "proposal", f"{title}. Nothing has been changed yet; review the proposal and approve or reject it.", context, mark, proposal=proposal)
 
     @staticmethod
@@ -611,12 +614,21 @@ class Assistant:
         self._mark_stale(project)
         return p
 
+    @staticmethod
+    def _record(project: Any, stage: str, p: Mapping[str, Any], **kw: Any) -> str | None:
+        """Write one stage of a proposal to the project's history; the history never blocks or changes what the proposal does."""
+        try:
+            return PB.record_proposal(project, stage, p, **kw)
+        except Exception:                                                    # noqa: BLE001
+            return None
+
     def reject(self, project: Any, pid: str) -> dict[str, Any]:
         with self._lock:
             p = self._get(project, pid)
             if p["status"] not in ("pending", "stale"):
                 raise Conflict(f"This proposal is already {p['status']}")
             p["status"] = "rejected"
+            self._record(project, "rejected", p, actor=PB.HUMAN, causes=[PB.proposal_event_id(project, p, "made")])
             return p
 
     def cancel(self, project: Any, pid: str) -> dict[str, Any]:
@@ -626,6 +638,7 @@ class Assistant:
             if p["status"] not in ("pending", "stale"):
                 raise Conflict(f"This proposal is already {p['status']}")
             p["status"] = "cancelled"
+            self._record(project, "cancelled", p, actor=PB.HUMAN, causes=[PB.proposal_event_id(project, p, "made")])
             return p
 
     def consent(self, project: Any, pid: str, *, actor: str, expected_revision: int | None = None, confirm_high_risk: bool = False) -> dict[str, Any]:
@@ -646,6 +659,8 @@ class Assistant:
                 raise Conflict("This is a high-risk change and needs your explicit confirmation", hint="Approve again with the confirmation ticked",
                                details={"requires_confirmation": True, "risk": p["risk"]})
             p["consent"] = {"actor": actor, "at": time.time()}
+            self._record(project, "approved", p, actor=PB.HUMAN, payload={"approval_channel": str(actor)[:60], "confirmed_high_risk": bool(confirm_high_risk)},
+                         causes=[PB.proposal_event_id(project, p, "made")])
             return p
 
     def approve(self, project: Any, pid: str, *, expected_revision: int | None = None, confirm_high_risk: bool = False, actor: str = "direct") -> dict[str, Any]:
@@ -664,14 +679,22 @@ class Assistant:
             if project.revision != p["revision"]:
                 p["status"] = "stale"
                 raise Conflict(f"The project changed (now revision {project.revision}); this proposal was made for revision {p['revision']}", hint="Ask again")
+            kind = (p.get("post_check") or {}).get("kind")
+            if kind == "regulation":                                  # a regulation correction is never applied without its record: the history must be writable now
+                recorder = getattr(project, "provenance", None)
+                if recorder is None or not recorder.ready(project):
+                    raise Conflict("A regulation correction is not applied unless its record can be written to the project's history, and the history cannot be written right now",
+                                   hint="Open the History view to see why, then try again")
             applied = 0
             mark = len(HUB.calls)
             results = []
+            chain = [PB.proposal_event_id(project, p, "made"), PB.proposal_event_id(project, p, "approved")]
             try:
-                for step in p["steps"]:
-                    out = project.execute(step["op"], step["params"], expected_revision=project.revision)
-                    applied += 1
-                    results.append(out.get("result"))
+                with PB.context(actor=PB.HUMAN, origin=f"proposal:{p['id']}", causes=chain, note=f"approved by the person; proposed by {p.get('task')}"):
+                    for step in p["steps"]:
+                        out = project.execute(step["op"], step["params"], expected_revision=project.revision)
+                        applied += 1
+                        results.append(out.get("result"))
             except Exception as exc:
                 for _ in range(applied):                      # all or nothing: take back what was already applied
                     project.undo()
@@ -682,12 +705,27 @@ class Assistant:
                 note = f"The change was not applied: {msg}"
                 if applied:
                     note += f" The {applied} earlier step(s) were undone."
+                self._record(project, "failed", p, actor=PB.SYSTEM, payload={"applied_then_undone": applied, "error": msg[:300]}, causes=chain)
                 return self._finish(project, p, "failed", note, mark)
             verification = self._verify(project, p, results)
+            if kind:
+                extra = self._post_check(project, p)
+                verification = [*verification, *extra]
+                broken = [v for v in extra if v.get("strict") and not v["ok"]]
+                if broken:                                            # the result did not read back as promised: take everything back
+                    for _ in range(applied):
+                        project.undo()
+                    p["status"] = "failed"
+                    detail = "; ".join(f"{v['label']}: wanted {v['wanted']}, found {v['found']}" for v in broken)
+                    p["status_note"] = f"The change was applied, did not verify ({detail}) and was undone."
+                    p["result"] = {"applied": 0, "error": detail, "verification": verification}
+                    self._record(project, "failed", p, actor=PB.SYSTEM, payload={"verification_failed": [v["label"] for v in broken], "applied_then_undone": applied}, causes=chain)
+                    return self._finish(project, p, "failed", f"The change was not kept: it did not verify ({detail}). The {applied} step(s) were undone.", mark)
             p["status"] = "executed"
             p["undo_steps"] = applied
             p["result"] = {"applied": applied, "revision": project.revision, "results": results, "verification": verification}
             ok = all(v["ok"] for v in verification)
+            self._record(project, "executed", p, actor=PB.HUMAN, payload={"applied": applied, "revision_after": project.revision, "verified": bool(ok and verification)}, causes=chain)
             body = (f"{p['title']}: applied in {applied} step{'s' if applied != 1 else ''}; revision {project.revision}. "
                     + ("Verified by reading the result back from the project." if ok and verification else "Some figures did not read back as expected." if verification
                        else "The result was not independently read back; check it in the views.")
@@ -707,6 +745,14 @@ class Assistant:
                 if msg["id"] == p.get("outcome_message"):
                     return msg
             raise NotFound("The report of this proposal is no longer in the conversation")
+
+    @staticmethod
+    def _post_check(project: Any, p: dict[str, Any]) -> list[dict[str, Any]]:
+        """Checks a proposal's own domain made it promise (``post_check``): a regulation correction must leave its finding resolved and nothing else worse."""
+        if (p.get("post_check") or {}).get("kind") == "regulation":
+            from .regulations import corrections as RCO
+            return RCO.post_check(project, p)
+        return []
 
     def _verify(self, project: Any, p: dict[str, Any], results: Sequence[Any]) -> list[dict[str, Any]]:
         """After running, read back from the project what can be read back and compare it with what was asked for. Steps with nothing to read back

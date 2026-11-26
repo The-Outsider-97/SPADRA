@@ -616,7 +616,20 @@ def _summary(project: Any, category: str) -> dict[str, Any]:
 
 
 def view_schedule(project: Any, view: Mapping[str, Any]) -> dict[str, Any]:
-    """The data of a schedule *view*: a category schedule, or (``category: "family"``) the parametric schedule of one family (see ``family_schedule``)."""
+    """The data of a schedule *view*: a category schedule, or (``category: "family"``) the parametric schedule of one family (see ``family_schedule``).
+    A view may hide columns (``hidden_columns``: keys, or ``"*empty*"`` for every column whose cells are all empty), so a schedule can be printed on a sheet."""
+    data = _view_schedule(project, view)
+    hidden = list(view.get("hidden_columns") or [])
+    if not hidden or view.get("category") == "family" or SCHEDULES[view["category"]].get("summary"):
+        return data
+    empty = {c["key"] for c in data["columns"] if all(r.get(c["key"]) in (None, "", "-") for r in data["rows"])} if "*empty*" in hidden else set()
+    gone = empty | {k for k in hidden if k != "*empty*"}
+    columns = [c for c in data["columns"] if c["key"] not in gone or c["key"] in ("no", "name")]
+    keep = {c["key"] for c in columns}
+    return {**data, "columns": columns, "totals": {k: v for k, v in data["totals"].items() if k in keep}}
+
+
+def _view_schedule(project: Any, view: Mapping[str, Any]) -> dict[str, Any]:
     if view.get("category") == "family":
         from . import family_schedule as FS
         return FS.data(project, view.get("family"))
