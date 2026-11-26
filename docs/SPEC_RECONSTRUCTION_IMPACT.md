@@ -29,7 +29,7 @@ Sources: raster (OpenCV + Tesseract), vector PDF (pdfplumber), SDRW drawing. Pip
 
 ## 4. Agents (`agent_hub.py`, `GET /api/agents/roles`)
 
-Agents only propose, analyse or verify. The table of roles and what is real now is served by `/api/agents/roles`. Integrated and used: STEM, Spatial, Optimization. **Not integrated, with observed reasons:** Language, Planning (PyTorch not importable where built), Verification (scope is formal objects; specs are verified by measurement), Provenance (not importable), Software (it analyses source code; did not import here: `ModuleNotFoundError: logs`).
+Agents only propose, analyse or verify. The table of roles and what is real now is served by `/api/agents/roles`. Integrated and used: STEM, Spatial, Optimization. **Not integrated:** Language, Planning, Verification, Provenance, Software. Each row of `/api/agents/roles` gives its reason once (the agent's `why_not` in `agent_hub.py`): what SPADRA does instead, or what the agent's own documentation says it is for. Whether an agent imports differs per computer, so it is not written down: `python -m applications.SPADRA --check` reports it for the computer in front of you. SPADRA does use the Planning package's commit adapters for every approved assistant proposal; that is not the Planning Agent.
 
 ## Reproduce (Windows PowerShell, from `G:\GAIA\AI\SLAI`)
 

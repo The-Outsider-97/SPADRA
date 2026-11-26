@@ -30,6 +30,7 @@ import { formatGridSize, UNIT_MM } from "./geom2d.js";
 import { DrawingView } from "./view2d.js";
 import { ModelView } from "./view3d.js";
 import { snapshotDialog } from "./snapshot_ui.js";
+import { historyDialog, regulationDialog } from "./regulation_ui.js";
 import { attachDialog, chainDialog, detachDialog, groupDialog, linkDialog, relationshipsPanel, ungroup, unlinkDialog } from "./relationships_ui.js";
 import { defaultSettings, renderSnapshot, sizeFor, SnapshotUnavailable } from "./snapshot_render.js";
 import { Timeline } from "./timeline.js";
@@ -686,6 +687,8 @@ export class Shell {
                 return [[T("measure", "Measure", "ruler", kind === "3d" || (kind === "drawing" && !store.drawing?.projection), { tool: "measure", note: kind === "3d" ? "Distance, length, angle, radius, area, perimeter, volume, thickness, clearance, coordinates and slope, with snapping, units and precision" : "Pick points on the plan for a distance, length, angle, area, perimeter, radius or coordinates; Keep stores the figure with the project" }),
                         T("relations", "Relationships", "link-chain", !!store.project, { run: () => { void relationshipsPanel(store, picked[0]); },
                             note: "Every link, group and attachment in the project, with the chain each element belongs to" }),
+                        T("regulations", "Regulations", "check-circle", !!store.project, { run: () => { void regulationDialog(store); }, note: "Check the model against the building rules, see where each limit comes from, and preview a correction before applying it" }),
+                        T("history", "History", "clock", !!store.project && !!store.boot?.capabilities.history, { run: () => { void historyDialog(store, picked.length === 1 ? picked[0] : undefined); }, note: "What changed, who or what changed it, and whether the record still verifies" }),
                         T("check", "Check model", "check-circle", !!store.project, { run: async () => { await store.loadCheck(); reviewDialog(store); } }),
                         T("connections", "Connections", "check-circle", !!store.project, { run: () => { void connectionsDialog(store); }, note: "Rainwater, roof edges and curtain-wall corners: findings from the model's geometry, corrections proposed for review" }),
                         T("report", "Report", "report", !!store.project, { run: () => newReportDialog(store), note: "A snapshot of the project as an SLDC document" }),

@@ -298,9 +298,9 @@ export class SheetView {
             this.solidFaces(g, vp.solid);
         const outline = (w) => `M${w.polygon.map((p) => `${p[0]} ${p[1]}`).join("L")}Z`;
         const stroke = { stroke: "var(--ink)", "stroke-width": 1, "vector-effect": "non-scaling-stroke", "stroke-linejoin": "round" };
-        for (const cat of ["foundation", "floor", "roof", "room", "generic", "stair", "wall", "curtainwall", "structural", "window", "door", "column", "gutter", "downpipe", "grid"]) {
+        for (const cat of ["foundation", "floor", "roof", "room", "extrusion", "sweep", "generic", "stair", "wall", "curtainwall", "structural", "window", "door", "column", "gutter", "downpipe", "grid"]) {
             for (const w of (vp.model ?? []).filter((m) => m.category === cat)) {
-                if (cat === "room" || cat === "generic" || cat === "column" || cat === "stair" || cat === "grid" || cat === "gutter" || cat === "downpipe")
+                if (cat === "room" || cat === "extrusion" || cat === "sweep" || cat === "generic" || cat === "column" || cat === "stair" || cat === "grid" || cat === "gutter" || cat === "downpipe")
                     this.otherItem(g, w, 1 / k);
                 else if (cat === "foundation")
                     g.appendChild(s("path", { attrs: { d: outline(w), fill: "var(--ink)", "fill-opacity": 0.06, "stroke-dasharray": "5 2 1 2", ...stroke, "stroke-width": 0.5 } }));
@@ -404,6 +404,9 @@ export class SheetView {
                         g.appendChild(label([l.at[0], l.at[1] - 5.6 * unitsPerMm], 2.4 * unitsPerMm, `${l.volume_m3.toLocaleString(undefined, { maximumFractionDigits: 2 })} m³`));
                 }
             }
+        }
+        else if (w.category === "extrusion" || w.category === "sweep") { // furniture and other solids: a light tint, outlined
+            g.appendChild(s("path", { attrs: { d: outline, fill: "var(--ink)", "fill-opacity": 0.1, ...stroke, "stroke-width": 0.5 } }));
         }
         else if (w.category === "generic") {
             g.appendChild(s("path", { attrs: { d: outline, fill: "var(--ink)", "fill-opacity": 0.18, ...stroke } }));
