@@ -1,0 +1,423 @@
+{
+  "schema": "spadra.regulation.dataset.v1",
+  "id": "nl.bbl",
+  "jurisdiction": "NL",
+  "title": "Besluit bouwwerken leefomgeving (Bbl): vrije doorgang van een doorgang, art. 4.180 en tabel 4.179",
+  "version": "2025-01-10",
+  "valid_from": "2024-01-01",
+  "valid_to": null,
+  "notes": [
+    "valid_from is the date from which the consolidation consulted reports the provisions in force; it is not a statement of the instrument's own entry into force.",
+    "Only art. 4.180 lid 1 (clear width and clear height of a doorway) is modelled. The lift entrance (lid 2), art. 4.181 and every other Bbl provision are not.",
+    "A proposed amendment that would raise the clear width of a doorway with a door was found in a public consultation text; it is not in force in the consolidation consulted and is not modelled."
+  ],
+  "source": {
+    "authority": "Rijksoverheid (Staatsblad 2018, 291, as amended)",
+    "citation": "BWBR0041297",
+    "url": "https://wetten.overheid.nl/BWBR0041297",
+    "retrieved": "2026-11-26",
+    "licence": {
+      "class": "public_law",
+      "basis": "Auteurswet art. 11: laws and decrees have no copyright; the official consolidation is published openly at wetten.overheid.nl and in the BWB XML repository."
+    },
+    "consulted": [
+      "omgevingsweb.nl (artikel 4.179 and 4.180, information valid on 2025-01-10)",
+      "inview.nl (artikel 4.181, valid from 2024-01-01)"
+    ],
+    "official_xml": "https://repository.officiele-overheidspublicaties.nl/bwb/BWBR0041297/"
+  },
+  "verify": [
+    {
+      "kind": "article_contains",
+      "article": "4.180",
+      "tokens": [
+        "0,85",
+        "tabel 4.179"
+      ]
+    },
+    {
+      "kind": "article_contains",
+      "article": "4.179",
+      "tokens": [
+        "tabel 4.179"
+      ]
+    },
+    {
+      "kind": "table_row",
+      "table": "4.179",
+      "row_label": "Kantoorfunctie",
+      "tail": [
+        "2,1"
+      ]
+    },
+    {
+      "kind": "table_row",
+      "table": "4.179",
+      "row_label": "andere woonfunctie",
+      "tail": [
+        "2,3"
+      ]
+    }
+  ],
+  "building_functions": [
+    {
+      "id": "woonfunctie.woonwagen",
+      "label": "Woonfunctie: woonwagen"
+    },
+    {
+      "id": "woonfunctie.andere",
+      "label": "Woonfunctie: andere woonfunctie"
+    },
+    {
+      "id": "bijeenkomstfunctie.alcohol",
+      "label": "Bijeenkomstfunctie: voor alcoholgebruik"
+    },
+    {
+      "id": "bijeenkomstfunctie.sport_film_muziek_theater",
+      "label": "Bijeenkomstfunctie: sport, film, muziek of theater"
+    },
+    {
+      "id": "bijeenkomstfunctie.andere",
+      "label": "Bijeenkomstfunctie: andere"
+    },
+    {
+      "id": "celfunctie",
+      "label": "Celfunctie"
+    },
+    {
+      "id": "gezondheidszorgfunctie",
+      "label": "Gezondheidszorgfunctie"
+    },
+    {
+      "id": "industriefunctie.licht",
+      "label": "Industriefunctie: lichte industriefunctie"
+    },
+    {
+      "id": "industriefunctie.andere",
+      "label": "Industriefunctie: andere"
+    },
+    {
+      "id": "kantoorfunctie",
+      "label": "Kantoorfunctie"
+    },
+    {
+      "id": "logiesfunctie",
+      "label": "Logiesfunctie"
+    },
+    {
+      "id": "onderwijsfunctie",
+      "label": "Onderwijsfunctie"
+    },
+    {
+      "id": "sportfunctie",
+      "label": "Sportfunctie"
+    },
+    {
+      "id": "winkelfunctie",
+      "label": "Winkelfunctie"
+    },
+    {
+      "id": "overige_gebruiksfunctie",
+      "label": "Overige gebruiksfunctie"
+    },
+    {
+      "id": "bouwwerk_geen_gebouw",
+      "label": "Bouwwerk geen gebouw zijnde"
+    }
+  ],
+  "tables": {
+    "4.179": {
+      "title": "Tabel 4.179 (Bbl): functies waarvoor art. 4.180 en 4.181 gelden, met vrije hoogte",
+      "note": "The instrument has two free-height columns (art. 4.180 and art. 4.181); they hold the same value for every row, so one column is kept. A row with null designates none.",
+      "columns": {
+        "free_height_m": {
+          "label": "Vrije hoogte",
+          "unit": "m"
+        }
+      },
+      "rows": {
+        "woonfunctie.woonwagen": {
+          "label": "Woonfunctie: woonwagen",
+          "values": {
+            "free_height_m": 2.1
+          }
+        },
+        "woonfunctie.andere": {
+          "label": "Woonfunctie: andere woonfunctie",
+          "values": {
+            "free_height_m": 2.3
+          }
+        },
+        "bijeenkomstfunctie.alcohol": {
+          "label": "Bijeenkomstfunctie: voor alcoholgebruik",
+          "values": {
+            "free_height_m": 2.1
+          }
+        },
+        "bijeenkomstfunctie.sport_film_muziek_theater": {
+          "label": "Bijeenkomstfunctie: sport, film, muziek of theater",
+          "values": {
+            "free_height_m": 2.1
+          }
+        },
+        "bijeenkomstfunctie.andere": {
+          "label": "Bijeenkomstfunctie: andere",
+          "values": {
+            "free_height_m": 2.1
+          }
+        },
+        "celfunctie": {
+          "label": "Celfunctie",
+          "values": {
+            "free_height_m": 2.1
+          }
+        },
+        "gezondheidszorgfunctie": {
+          "label": "Gezondheidszorgfunctie",
+          "values": {
+            "free_height_m": 2.1
+          }
+        },
+        "industriefunctie.licht": {
+          "label": "Industriefunctie: lichte industriefunctie",
+          "values": {
+            "free_height_m": null
+          }
+        },
+        "industriefunctie.andere": {
+          "label": "Industriefunctie: andere",
+          "values": {
+            "free_height_m": 2.1
+          }
+        },
+        "kantoorfunctie": {
+          "label": "Kantoorfunctie",
+          "values": {
+            "free_height_m": 2.1
+          }
+        },
+        "logiesfunctie": {
+          "label": "Logiesfunctie",
+          "values": {
+            "free_height_m": 2.1
+          }
+        },
+        "onderwijsfunctie": {
+          "label": "Onderwijsfunctie",
+          "values": {
+            "free_height_m": 2.1
+          }
+        },
+        "sportfunctie": {
+          "label": "Sportfunctie",
+          "values": {
+            "free_height_m": 2.1
+          }
+        },
+        "winkelfunctie": {
+          "label": "Winkelfunctie",
+          "values": {
+            "free_height_m": 2.1
+          }
+        },
+        "overige_gebruiksfunctie": {
+          "label": "Overige gebruiksfunctie",
+          "values": {
+            "free_height_m": null
+          }
+        },
+        "bouwwerk_geen_gebouw": {
+          "label": "Bouwwerk geen gebouw zijnde",
+          "values": {
+            "free_height_m": null
+          }
+        }
+      }
+    }
+  },
+  "rules": [
+    {
+      "id": "nl.bbl.4.180.1.clear_width",
+      "title": "Vrije breedte van een doorgang",
+      "citation": {
+        "instrument": "Bbl",
+        "article": "4.180",
+        "lid": "1",
+        "table": "4.179"
+      },
+      "applies_to": {
+        "category": "door"
+      },
+      "scope_when": {
+        "op": "eq",
+        "a": {
+          "op": "fact",
+          "name": "project.status"
+        },
+        "b": {
+          "op": "const",
+          "value": "new_build"
+        }
+      },
+      "scope_note": "The installed dataset covers new construction (Bbl hoofdstuk 4) only; set the project status to New build to evaluate.",
+      "applies_when": {
+        "op": "table_has",
+        "table": "4.179",
+        "row": {
+          "op": "fact",
+          "name": "building.function"
+        }
+      },
+      "applies_note": "Table 4.179 designates no rule for this building function.",
+      "check": {
+        "kind": "minimum",
+        "value": {
+          "op": "fact",
+          "name": "door.clear_width_m"
+        },
+        "limit": {
+          "op": "const",
+          "value": 0.85
+        },
+        "unit": "m"
+      },
+      "assumptions": [
+        "Art. 4.180 lid 1 covers a doorway to a verblijfsgebied, verblijfsruimte, toiletruimte, badruimte, bergruimte, buitenruimte or the space for reaching a lift, and a doorway on the route to them from the adjoining site. SPADRA screens every door in the project; confirm that each flagged door is such a doorway."
+      ],
+      "corrections": [
+        {
+          "id": "widen_opening",
+          "label": "Widen the door opening",
+          "key": "width",
+          "unit": "m",
+          "for": [
+            "non_compliant"
+          ],
+          "new_value": {
+            "op": "ceil_to",
+            "value": {
+              "op": "add",
+              "args": [
+                {
+                  "op": "const",
+                  "value": 0.85
+                },
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "const",
+                      "value": 2
+                    },
+                    {
+                      "op": "fact",
+                      "name": "door.frame_inset_m"
+                    }
+                  ]
+                }
+              ]
+            },
+            "step": 0.01
+          },
+          "side_effects": "The opening is widened about its centre line; the wall, any adjacent door or window and the room layout may need to change."
+        }
+      ],
+      "review": {
+        "status": "transcribed",
+        "note": "Transcribed from two secondary web publications of the consolidated text; not yet checked against the official XML."
+      }
+    },
+    {
+      "id": "nl.bbl.4.180.1.clear_height",
+      "title": "Vrije hoogte van een doorgang",
+      "citation": {
+        "instrument": "Bbl",
+        "article": "4.180",
+        "lid": "1",
+        "table": "4.179"
+      },
+      "applies_to": {
+        "category": "door"
+      },
+      "scope_when": {
+        "op": "eq",
+        "a": {
+          "op": "fact",
+          "name": "project.status"
+        },
+        "b": {
+          "op": "const",
+          "value": "new_build"
+        }
+      },
+      "scope_note": "The installed dataset covers new construction (Bbl hoofdstuk 4) only; set the project status to New build to evaluate.",
+      "applies_when": {
+        "op": "table_has",
+        "table": "4.179",
+        "row": {
+          "op": "fact",
+          "name": "building.function"
+        }
+      },
+      "applies_note": "Table 4.179 designates no rule for this building function.",
+      "check": {
+        "kind": "minimum",
+        "value": {
+          "op": "fact",
+          "name": "door.clear_height_m"
+        },
+        "limit": {
+          "op": "table",
+          "table": "4.179",
+          "row": {
+            "op": "fact",
+            "name": "building.function"
+          },
+          "column": "free_height_m"
+        },
+        "unit": "m"
+      },
+      "assumptions": [
+        "Art. 4.180 lid 1 covers a doorway to a verblijfsgebied, verblijfsruimte, toiletruimte, badruimte, bergruimte, buitenruimte or the space for reaching a lift, and a doorway on the route to them from the adjoining site. SPADRA screens every door in the project; confirm that each flagged door is such a doorway."
+      ],
+      "corrections": [
+        {
+          "id": "raise_opening",
+          "label": "Raise the door opening",
+          "key": "height",
+          "unit": "m",
+          "for": [
+            "non_compliant"
+          ],
+          "new_value": {
+            "op": "ceil_to",
+            "value": {
+              "op": "add",
+              "args": [
+                {
+                  "op": "table",
+                  "table": "4.179",
+                  "row": {
+                    "op": "fact",
+                    "name": "building.function"
+                  },
+                  "column": "free_height_m"
+                },
+                {
+                  "op": "fact",
+                  "name": "door.frame_inset_m"
+                }
+              ]
+            },
+            "step": 0.01
+          },
+          "side_effects": "The door head moves up; it must still fit under the ceiling, a lintel or a floor above."
+        }
+      ],
+      "review": {
+        "status": "transcribed",
+        "note": "Table values transcribed from a secondary web publication whose table text is flattened; not yet checked against the official XML."
+      }
+    }
+  ]
+}

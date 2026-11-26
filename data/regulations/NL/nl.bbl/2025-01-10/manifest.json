@@ -1,0 +1,13 @@
+{
+  "schema": "spadra.regulation.manifest.v1",
+  "dataset_sha256": "5b1955eae7593a235f0296dc033b4da5679f0725295bfd05088dd3c1c3c52191",
+  "dataset_file": "dataset.json",
+  "sealed": "2026-11-26",
+  "verification": {
+    "status": "unverified",
+    "checked_at": null,
+    "tool": null,
+    "checks": [],
+    "note": "Run: python -m applications.SPADRA.regulations verify NL nl.bbl 2025-01-10  (needs network access to the official repository)"
+  }
+}

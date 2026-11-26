@@ -1,0 +1,27 @@
+{
+  "schema": "spadra.regulation.dataset.v1",
+  "id": "aw.bouwbesluit",
+  "jurisdiction": "AW",
+  "title": "Aruba: Bouw- en woningbesluit (AB 1999 no. GT 10): no rules installed",
+  "version": "draft",
+  "valid_from": "1999-01-01",
+  "valid_to": null,
+  "source": {
+    "authority": "Government of Aruba",
+    "citation": "AB 1999 no. GT 10",
+    "url": "https://www.overheid.aw",
+    "retrieved": "2026-11-26",
+    "licence": {
+      "class": "unknown",
+      "basis": "The licence and legal status of the available PDF copy were not established."
+    }
+  },
+  "blocked": {
+    "reason": "The only machine-readable copy found is a printout dated 22-10-2013, and whether it is the version in force, and what it binds, has not been established. No threshold is taken from it until the Aruban legal source and its status are confirmed.",
+    "since": "2026-11-26"
+  },
+  "import_required": true,
+  "building_functions": [],
+  "tables": {},
+  "rules": []
+}

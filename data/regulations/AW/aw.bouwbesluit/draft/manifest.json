@@ -1,0 +1,12 @@
+{
+  "schema": "spadra.regulation.manifest.v1",
+  "dataset_sha256": "14380fd30ddf4f877b79f6f5d5dcd38124fc2388d2171efbad7530410722e9c9",
+  "dataset_file": "dataset.json",
+  "sealed": "2026-11-26",
+  "verification": {
+    "status": "unverified",
+    "checked_at": null,
+    "tool": null,
+    "checks": []
+  }
+}

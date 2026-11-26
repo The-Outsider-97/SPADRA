@@ -1,0 +1,27 @@
+{
+  "schema": "spadra.regulation.dataset.v1",
+  "id": "us.icc",
+  "jurisdiction": "US",
+  "title": "United States: ICC model codes adopted by the Authority Having Jurisdiction: references only",
+  "version": "references",
+  "valid_from": "2000-01-01",
+  "valid_to": null,
+  "source": {
+    "authority": "International Code Council (copyright holder); adopted and amended locally by each Authority Having Jurisdiction (AHJ)",
+    "citation": "IBC / IRC / ICC A117.1",
+    "url": "https://codes.iccsafe.org",
+    "retrieved": "2026-11-26",
+    "licence": {
+      "class": "restricted",
+      "basis": "ICC terms do not permit scraping, indexing or storing the code text; the adopted edition and local amendments differ by jurisdiction."
+    }
+  },
+  "blocked": {
+    "reason": "ICC code text is licensed and may not be stored by SPADRA. Provide your own licensed ICC export, or the adopted edition and local amendments of your AHJ, through the import workflow; until then no US rule is evaluated.",
+    "since": "2026-11-26"
+  },
+  "import_required": true,
+  "building_functions": [],
+  "tables": {},
+  "rules": []
+}

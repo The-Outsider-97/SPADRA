@@ -1,0 +1,87 @@
+{
+  "schema": "spadra.regulation.registry.v1",
+  "updated": "2026-11-26",
+  "note": "Every source considered, what it is, how it may be used, and what SPADRA does with it. A source with status 'blocked' contributes no rule.",
+  "sources": [
+    {
+      "id": "nl.bbl",
+      "jurisdiction": "NL",
+      "title": "Besluit bouwwerken leefomgeving (Bbl)",
+      "authority": "Rijksoverheid",
+      "citation": "BWBR0041297",
+      "url": "https://wetten.overheid.nl/BWBR0041297",
+      "licence_class": "public_law",
+      "licence_basis": "Auteurswet art. 11 (no copyright in laws and decrees); official consolidation published openly.",
+      "access": "Official BWB XML repository (https://repository.officiele-overheidspublicaties.nl/bwb/BWBR0041297/<date>_0/xml/BWBR0041297_<date>_0.xml). Not reachable from the build environment, so the ingestion tool must run on a machine with network access.",
+      "status": "partial",
+      "implemented": "art. 4.180 lid 1 (clear width, clear height) with table 4.179",
+      "verification": "Transcribed from two secondary web publications (omgevingsweb.nl, inview.nl). Not yet verified against the official XML; run the verify command.",
+      "machine_readable": true
+    },
+    {
+      "id": "nl.bbl.secondary.omgevingsweb",
+      "jurisdiction": "NL",
+      "title": "Omgevingsweb (PONT Omgeving) article pages",
+      "authority": "PONT Omgeving",
+      "url": "https://omgevingsweb.nl",
+      "licence_class": "unknown",
+      "licence_basis": "Publisher terms not reviewed. Used only to read the public-law text during transcription; nothing from the site is stored beyond numbers and article references.",
+      "access": "Web page",
+      "status": "consulted_only",
+      "machine_readable": false
+    },
+    {
+      "id": "nl.bbl.secondary.inview",
+      "jurisdiction": "NL",
+      "title": "inView (Wolters Kluwer) article pages",
+      "authority": "Wolters Kluwer",
+      "url": "https://inview.nl",
+      "licence_class": "unknown",
+      "licence_basis": "Publisher terms not reviewed. Used only to cross-check article numbers and figures; nothing from the site is stored.",
+      "access": "Web page",
+      "status": "consulted_only",
+      "machine_readable": false
+    },
+    {
+      "id": "aw.bouwbesluit",
+      "jurisdiction": "AW",
+      "title": "Bouw- en woningbesluit (AB 1999 no. GT 10)",
+      "authority": "Government of Aruba",
+      "citation": "AB 1999 no. GT 10",
+      "url": "https://www.overheid.aw",
+      "licence_class": "unknown",
+      "licence_basis": "Not established.",
+      "access": "A PDF printout dated 22-10-2013 was found; it is machine-readable.",
+      "status": "blocked",
+      "blocked_reason": "Legal status of the copy (is it the version in force? what does it bind?) and its reuse terms are unresolved. No Aruban threshold is implemented until they are.",
+      "next_step": "Obtain the consolidated text and its status from the Aruban legislation service (or the Departamento di Obra Públika / DOW), then run the ingestion workflow.",
+      "machine_readable": true
+    },
+    {
+      "id": "us.icc",
+      "jurisdiction": "US",
+      "title": "ICC I-Codes (IBC, IRC) and ICC A117.1, as adopted by the AHJ",
+      "authority": "International Code Council; adopting Authority Having Jurisdiction",
+      "url": "https://codes.iccsafe.org",
+      "licence_class": "restricted",
+      "licence_basis": "ICC terms prohibit scraping, indexing and storing the code text.",
+      "access": "Licensed digital copy or purchase; not accessible to SPADRA.",
+      "status": "blocked",
+      "blocked_reason": "Licensed content. Which edition and which local amendments apply is decided by the AHJ, so a single 'US dataset' would be wrong for most projects.",
+      "next_step": "Licensed-import workflow: the user supplies their own licensed export or the adopted values; SPADRA stores values and pinpoints they entered, never ICC text.",
+      "machine_readable": false
+    },
+    {
+      "id": "us.federal.ada",
+      "jurisdiction": "US",
+      "title": "2010 ADA Standards for Accessible Design (federal)",
+      "authority": "U.S. Department of Justice",
+      "url": "https://www.ada.gov",
+      "licence_class": "public_law",
+      "licence_basis": "Federal regulation text (not verified here).",
+      "access": "Not evaluated.",
+      "status": "candidate",
+      "note": "A different instrument from the ICC codes requested, with its own applicability. Listed so the choice is visible; no value has been read or implemented."
+    }
+  ]
+}
