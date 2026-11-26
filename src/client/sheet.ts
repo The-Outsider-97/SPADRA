@@ -262,9 +262,9 @@ export class SheetView {
     if (vp.solid) this.solidFaces(g, vp.solid);
     const outline = (w: { polygon: Pt[] }): string => `M${w.polygon.map((p) => `${p[0]} ${p[1]}`).join("L")}Z`;
     const stroke = { stroke: "var(--ink)", "stroke-width": 1, "vector-effect": "non-scaling-stroke", "stroke-linejoin": "round" };
-    for (const cat of ["foundation", "floor", "roof", "room", "generic", "stair", "wall", "curtainwall", "structural", "window", "door", "column", "gutter", "downpipe", "grid"]) {
+    for (const cat of ["foundation", "floor", "roof", "room", "extrusion", "sweep", "generic", "stair", "wall", "curtainwall", "structural", "window", "door", "column", "gutter", "downpipe", "grid"]) {
       for (const w of (vp.model ?? []).filter((m) => m.category === cat)) {
-        if (cat === "room" || cat === "generic" || cat === "column" || cat === "stair" || cat === "grid" || cat === "gutter" || cat === "downpipe") this.otherItem(g, w, 1 / k);
+        if (cat === "room" || cat === "extrusion" || cat === "sweep" || cat === "generic" || cat === "column" || cat === "stair" || cat === "grid" || cat === "gutter" || cat === "downpipe") this.otherItem(g, w, 1 / k);
         else if (cat === "foundation") g.appendChild(s("path", { attrs: { d: outline(w), fill: "var(--ink)", "fill-opacity": 0.06, "stroke-dasharray": "5 2 1 2", ...stroke, "stroke-width": 0.5 } }));
         else if (cat === "wall") {
           g.appendChild(s("path", { attrs: { d: outline(w), fill: "var(--ink)", "fill-opacity": 0.22, ...stroke } }));
@@ -351,6 +351,8 @@ export class SheetView {
             `${l.volume_m3.toLocaleString(undefined, { maximumFractionDigits: 2 })} m³`));
         }
       }
+    } else if (w.category === "extrusion" || w.category === "sweep") {          // furniture and other solids: a light tint, outlined
+      g.appendChild(s("path", { attrs: { d: outline, fill: "var(--ink)", "fill-opacity": 0.1, ...stroke, "stroke-width": 0.5 } }));
     } else if (w.category === "generic") {
       g.appendChild(s("path", { attrs: { d: outline, fill: "var(--ink)", "fill-opacity": 0.18, ...stroke } }));
     } else if (w.category === "column") {

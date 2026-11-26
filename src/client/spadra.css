@@ -683,3 +683,23 @@ dialog.slai-startup.spadra-startup[open] {
 .visual-range { flex: 1; min-width: 7rem; }
 .visual-out { min-width: 2.6rem; text-align: right; font-variant-numeric: tabular-nums; color: var(--text); }
 .visual-check .visual-label { min-width: 0; }
+
+/* Regulations and History windows. A status is always its words first; the colour only helps. */
+.reg { display: flex; flex-direction: column; gap: 1rem; }
+.reg h3 { margin: 0 0 .4rem; font-size: 1em; }
+.reg-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: .6rem; margin: .5rem 0; }
+.reg-field { display: flex; flex-direction: column; gap: .2rem; font-size: .9em; }
+.reg-field input[type="checkbox"] { align-self: flex-start; }
+.reg .ap-status, .reg .ap-actions { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin: .4rem 0; }
+.reg .badge { font-size: .75em; font-weight: 700; border: 1px solid var(--hairline); border-radius: 999px; padding: .05rem .55rem; color: var(--muted); }
+.reg .badge.risk { color: var(--danger, #b3261e); border-color: currentColor; }
+.reg .reg-non_compliant { color: var(--danger, #b3261e); border-color: currentColor; }
+.reg .reg-insufficient_data, .reg .reg-approaching_limit { color: var(--warn, #8a5a00); border-color: currentColor; }
+.reg .reg-compliant { color: var(--ok, #1a7f4b); border-color: currentColor; }
+.reg .ap-stale { color: var(--danger, #b3261e); margin: .3rem 0; }
+.reg .ap-assume, .reg .ap-valid { color: var(--muted); font-size: .85em; margin: .2rem 0; }
+.reg .ap-proposal { border: 1px solid var(--hairline); border-radius: 10px; padding: .7rem; display: flex; flex-direction: column; gap: .4rem; }
+.reg .ap-proposal.risk-high { border-color: var(--danger, #b3261e); }
+.reg .ap-ptitle { font-weight: 700; }
+.reg tr.current { background: var(--accent-soft, rgba(0, 0, 0, .06)); }
+.reg .reg-check { flex-direction: row; align-items: center; gap: .5rem; }

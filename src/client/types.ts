@@ -38,7 +38,7 @@ export interface TreeResponse { project: ProjectSummary; tree: { sections: TreeN
 export interface Capabilities {
   drawing2d: boolean; model3d: boolean; walls: boolean; sheets: string | boolean; exportSvg: boolean; exportGlb: boolean; exportStl: boolean;
   sections: boolean; elevations: boolean; schedules: boolean; animation: boolean; engineering: boolean; assistant: boolean; simulation: boolean;
-  optimization?: boolean; spatial?: boolean; calculator?: boolean;
+  optimization?: boolean; spatial?: boolean; calculator?: boolean; history?: boolean;
 }
 /** What a failure means to the person (served once by the server, so the screen has no table of its own). */
 export interface ErrorInfo { category: string; recovery: string }
